@@ -52,7 +52,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 23;
+pub(crate) const SCHEMA_VERSION: i32 = 24;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -234,6 +234,20 @@ impl Database {
         db.ensure_model_pricing_seeded()?;
 
         Ok(db)
+    }
+
+    /// 测试用：在指定路径上打开数据库。
+    ///
+    /// 和 `init()` 用同一套连接配置（PRAGMA + 变更钩子），但不做迁移和启动清理，
+    /// 也不假定路径是应用配置目录下的那一个。
+    #[cfg(test)]
+    pub(crate) fn open_for_test(path: &std::path::Path) -> Result<Self, AppError> {
+        let conn = ConnectionPool::file(path.to_path_buf(), configure_connection)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(Self {
+            conn,
+            log_count_cache: Mutex::new(None),
+        })
     }
 
     pub(crate) fn get_auto_vacuum_mode(conn: &Connection) -> Result<i32, AppError> {
