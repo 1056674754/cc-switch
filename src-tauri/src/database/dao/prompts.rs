@@ -82,7 +82,7 @@ impl Database {
     ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let transaction = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
         for prompt in prompts.values() {
             transaction

@@ -611,7 +611,7 @@ pub(crate) fn effective_usage_log_filter_for_range(
 }
 
 /// 请求日志总数缓存：每次刷新都 `COUNT(*)` 一遍明细，大范围下最耗时。
-/// 筛选条件、起点没变，且连接上没有任何写入（`total_changes` 没变，增删改都算）
+/// 筛选条件、起点没变，且库上没有任何写入（全局写入纪元没变，增删改都算）
 /// 时复用上次的总数；结束时间往后推时（「当天」这类活动窗口每次刷新都会变），
 /// 再确认新增的时间段里没有行。另设 [`LOG_COUNT_CACHE_TTL`] 兜底。
 pub(crate) struct LogCountCache {
@@ -624,9 +624,13 @@ pub(crate) struct LogCountCache {
 
 const LOG_COUNT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60);
 
-/// 这条连接打开以来增删改过的总行数（SQLite 内置函数），任何写入都会让它变。
-fn connection_total_changes(conn: &Connection) -> Result<u64, AppError> {
-    Ok(conn.query_row("SELECT total_changes()", [], |row| row.get::<_, i64>(0))? as u64)
+/// 进程内的写入纪元：任何增删改都会让它变，且**跨连接可见**。
+///
+/// 原来是 `conn.total_changes()`，那是「这条连接打开以来改过多少行」。连接池化之后
+/// 每次借到的不一定是同一条连接，计数器会随借还而换，缓存就再也命不中；
+/// 改用 `register_db_change_hook` 里维护的全局计数。
+fn connection_total_changes(_conn: &Connection) -> Result<u64, AppError> {
+    Ok(crate::database::db_write_epoch())
 }
 
 fn log_count_cache_key(filters: &LogFilters) -> String {

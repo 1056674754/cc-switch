@@ -96,7 +96,7 @@ pub async fn set_proxy_takeover_for_app(
 }
 
 /// 应用页模式行用：生效的模式、路由目标（直连时是上次路由的那家）、直连那家。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_app_mode(
     state: tauri::State<'_, AppState>,
     app_type: String,
@@ -138,7 +138,7 @@ pub async fn exit_proxy_apps_in_mode(
 }
 
 /// 直连指针：代理模式下退出代理时写回的供应商
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_direct_provider(
     state: tauri::State<'_, AppState>,
     app_type: String,

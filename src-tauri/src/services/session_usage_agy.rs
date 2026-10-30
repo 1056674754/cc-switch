@@ -154,7 +154,7 @@ fn import_records(
     }
 
     let mut conn = lock_conn!(db.conn);
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let (mut imported, mut skipped) = (0, 0);
     for row in rows {
         if row["type"] != "PLANNER_RESPONSE" || row["status"] != "DONE" {

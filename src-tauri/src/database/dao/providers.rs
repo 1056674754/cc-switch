@@ -30,7 +30,7 @@ impl Database {
         }
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
         let rows = {
             let mut stmt = tx
@@ -272,7 +272,7 @@ impl Database {
     ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
         for (id, sort_index) in updates {
             tx.execute(
@@ -287,7 +287,7 @@ impl Database {
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut meta_clone = provider.meta.clone().unwrap_or_default();
@@ -399,7 +399,7 @@ impl Database {
 
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let (is_current, in_failover_queue) = tx
@@ -496,7 +496,7 @@ impl Database {
     pub fn set_current_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         tx.execute(
@@ -574,7 +574,7 @@ impl Database {
     ) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
         tx.execute(
             "UPDATE providers SET is_current = 0 WHERE app_type = ?1 AND category = ?2",

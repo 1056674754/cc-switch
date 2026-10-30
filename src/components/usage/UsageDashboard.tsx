@@ -95,7 +95,11 @@ const isRefreshIntervalOption = (
 const normalizeRefreshInterval = (value: number | undefined) =>
   isRefreshIntervalOption(value) ? value : DEFAULT_REFRESH_INTERVAL_MS;
 
-const STATUS_CODE_OPTIONS = [200, 400, 401, 429, 500] as const;
+// 后端可能记录的状态码不止这几个（422 格式转换、502/503/504 代理侧失败等），
+// 只列常见的会让这些请求在筛选里「消失」。
+const STATUS_CODE_OPTIONS = [
+  200, 400, 401, 403, 404, 422, 429, 500, 502, 503, 504,
+] as const;
 
 // 页签只放数据视图；显示和定价设置在「用量设置」抽屉里
 type UsageTab = "logs" | "providers" | "models";

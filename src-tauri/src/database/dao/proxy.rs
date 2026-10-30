@@ -438,7 +438,11 @@ impl Database {
     pub fn is_live_takeover_active_sync(&self) -> bool {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return false,
+            Err(e) => {
+                // 连接池化之后，这里也可能是「等连接超时」而不只是锁毒化。
+                log::warn!("读取 proxy_config 失败，按未启用代理处理: {e}");
+                return false;
+            }
         };
         conn.query_row(
             "SELECT COUNT(*) FROM proxy_config WHERE enabled = 1",
@@ -801,7 +805,10 @@ impl Database {
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, i32>(1)? as u16)),
                 )
                 .unwrap_or_else(|_| fallback()),
-            Err(_) => fallback(),
+            Err(e) => {
+                log::warn!("读取监听地址失败，使用默认值: {e}");
+                fallback()
+            }
         };
         let host = crate::settings::get_proxy_client_host().unwrap_or(listen_address);
         (host, port)
@@ -810,7 +817,10 @@ impl Database {
     pub fn get_proxy_flags_sync(&self, app_type: &str) -> (bool, bool) {
         let conn = match self.conn.lock() {
             Ok(c) => c,
-            Err(_) => return (false, false),
+            Err(e) => {
+                log::warn!("读取 proxy 开关失败，按全部关闭处理: {e}");
+                return (false, false);
+            }
         };
 
         conn.query_row(
@@ -833,7 +843,7 @@ impl Database {
         let conn = self
             .conn
             .lock()
-            .map_err(|e| AppError::Database(format!("Mutex lock failed: {e}")))?;
+            .map_err(|e| AppError::Database(format!("获取数据库连接失败: {e}")))?;
 
         conn.execute(
             "UPDATE proxy_config SET enabled = ?2, auto_failover_enabled = ?3, updated_at = datetime('now') WHERE app_type = ?1",

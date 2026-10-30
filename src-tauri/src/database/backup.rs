@@ -3178,7 +3178,7 @@ mod tests {
             rollup_rows: usize,
         ) -> Result<(), AppError> {
             let mut conn = crate::database::lock_conn!(db.conn);
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             for i in 0..50 {
                 tx.execute(
                     "INSERT INTO providers (id, app_type, name, settings_config, meta)
@@ -3305,7 +3305,7 @@ mod tests {
         let source = Database::memory()?;
         {
             let mut conn = crate::database::lock_conn!(source.conn);
-            let tx = conn.transaction()?;
+            let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             for i in 0..50 {
                 tx.execute(
                     "INSERT INTO providers (id, app_type, name, settings_config, meta)

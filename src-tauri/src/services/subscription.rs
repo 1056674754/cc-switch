@@ -450,7 +450,7 @@ async fn query_claude_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .header("Authorization", format!("Bearer {access_token}"))
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("Accept", "application/json")
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(6))
         .send()
         .await;
 
@@ -1035,7 +1035,7 @@ async fn query_codex_usage(
         req = req.header("ChatGPT-Account-Id", id);
     }
 
-    let resp = match req.timeout(std::time::Duration::from_secs(15)).send().await {
+    let resp = match req.timeout(std::time::Duration::from_secs(6)).send().await {
         Ok(r) => r,
         Err(e) => return Err(format!("Network error: {e}")),
     };
@@ -1481,7 +1481,7 @@ async fn query_gemini_quota(access_token: &str) -> Result<SubscriptionQuota, Str
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Content-Type", "application/json")
         .json(&quota_body)
-        .timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(6))
         .send()
         .await;
 

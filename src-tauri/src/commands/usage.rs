@@ -182,7 +182,7 @@ pub async fn get_request_detail(
 }
 
 /// 获取模型定价列表
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingInfo>, AppError> {
     log::info!("获取模型定价列表");
     state.db.ensure_model_pricing_seeded()?;
@@ -233,7 +233,7 @@ pub fn get_model_pricing(state: State<'_, AppState>) -> Result<Vec<ModelPricingI
 }
 
 /// 更新模型定价
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_model_pricing(
     state: State<'_, AppState>,
     model_id: String,
@@ -258,7 +258,7 @@ pub fn update_model_pricing(
 }
 
 /// 批量更新模型定价（models.dev 自动同步仅触发一次历史成本回填）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_model_pricing_batch(
     state: State<'_, AppState>,
     entries: Vec<ModelPricingInfo>,
@@ -266,14 +266,14 @@ pub fn update_model_pricing_batch(
     crate::services::model_pricing::update_model_pricing_batch(&state.db, entries)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_models_dev_sync_config(
     state: State<'_, AppState>,
 ) -> Result<ModelsDevSyncState, AppError> {
     crate::services::model_pricing::get_models_dev_sync_state(&state.db)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn save_models_dev_sync_config(
     state: State<'_, AppState>,
     config: ModelsDevSyncConfig,
@@ -281,7 +281,7 @@ pub fn save_models_dev_sync_config(
     crate::services::model_pricing::save_models_dev_sync_config(&state.db, config)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn record_models_dev_sync_result(
     state: State<'_, AppState>,
     synced_at: Option<i64>,
@@ -291,7 +291,7 @@ pub fn record_models_dev_sync_result(
 }
 
 /// 检查 Provider 使用限额
-#[tauri::command]
+#[tauri::command(async)]
 pub fn check_provider_limits(
     state: State<'_, AppState>,
     provider_id: String,
@@ -301,7 +301,7 @@ pub fn check_provider_limits(
 }
 
 /// 删除模型定价
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_model_pricing(state: State<'_, AppState>, model_id: String) -> Result<(), AppError> {
     crate::services::model_pricing::delete_model_pricing(&state.db, &model_id)?;
     log::info!("已删除模型定价: {model_id}");
@@ -361,7 +361,7 @@ pub async fn rebuild_codex_usage(
 }
 
 /// 获取数据来源分布
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_usage_data_sources(
     state: State<'_, AppState>,
 ) -> Result<Vec<crate::services::session_usage::DataSourceSummary>, AppError> {

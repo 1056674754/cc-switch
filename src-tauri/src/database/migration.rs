@@ -12,7 +12,7 @@ impl Database {
     pub fn migrate_from_json(&self, config: &MultiAppConfig) -> Result<(), AppError> {
         let mut conn = lock_conn!(self.conn);
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         Self::migrate_from_json_tx(&tx, config)?;
@@ -32,7 +32,7 @@ impl Database {
         Self::apply_schema_migrations_on_conn(&conn)?;
 
         let tx = conn
-            .transaction()
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(|e| AppError::Database(e.to_string()))?;
         Self::migrate_from_json_tx(&tx, config)?;
 

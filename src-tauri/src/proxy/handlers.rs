@@ -398,7 +398,10 @@ async fn handle_messages_for_app(
 
     // Claude 特有：格式转换处理
     if needs_transform {
-        return handle_claude_transform(
+        // 转换阶段的失败同样要落一行请求日志：上游 2xx 里的 response.failed
+        // （过载、限流等）就是在这里变成 4xx/5xx 的，不记的话用量页按状态码
+        // 筛选时这些请求会整批「消失」。
+        let transformed = handle_claude_transform(
             response,
             &ctx,
             &state,
@@ -408,6 +411,13 @@ async fn handle_messages_for_app(
             connection_guard,
         )
         .await;
+        return match transformed {
+            Ok(response) => Ok(response),
+            Err(error) => {
+                log_forward_error(&state, &ctx, is_stream, &error).await;
+                Err(error)
+            }
+        };
     }
 
     // 通用响应处理（透传模式）
@@ -3207,12 +3217,33 @@ async fn log_forward_error(
     let error_message = get_error_message(error);
     let request_id = uuid::Uuid::new_v4().to_string();
 
+    // 失败时 ctx.outbound_model 还没回填（它只在 forward 成功后写）。Claude Desktop
+    // 的真实映射在 provider.meta.claudeDesktopModelRoutes 里，这里按同一套路由把
+    // 真正会发出去的名字算出来——否则 429 行会把 gpt-6.1-sol 记成 claude-opus-5，
+    // 看起来像「限流发生在另一个模型上」。
+    let outbound_model = ctx.outbound_model.clone().or_else(|| {
+        if ctx.app_type_str != "claude-desktop" {
+            return None;
+        }
+        crate::claude_desktop_config::map_proxy_request_model(
+            serde_json::json!({ "model": ctx.request_model }),
+            &ctx.provider,
+        )
+        .ok()
+        .and_then(|body| {
+            body.get("model")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
+    });
+
     // #7818：错误行的写入同样要拿 Database 的阻塞锁并做磁盘 IO，
     // 移到阻塞线程池执行，避免卡住 tokio worker。
     let db = state.db.clone();
     let provider_id = ctx.provider.id.clone();
     let app_type = ctx.app_type_str.to_string();
     let request_model = ctx.request_model.clone();
+    let model = outbound_model.unwrap_or_else(|| request_model.clone());
     let session_id = ctx.session_id.clone();
     let latency_ms = ctx.latency_ms();
     let write = tokio::task::spawn_blocking(move || {
@@ -3220,7 +3251,8 @@ async fn log_forward_error(
             request_id,
             provider_id,
             app_type,
-            request_model,
+            model,
+            Some(request_model),
             status_code,
             error_message,
             latency_ms,

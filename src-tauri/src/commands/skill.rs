@@ -28,7 +28,7 @@ fn parse_app_type(app: &str) -> Result<AppType, String> {
 // ========== 统一管理命令 ==========
 
 /// 获取所有已安装的 Skills
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_installed_skills(app_state: State<'_, AppState>) -> Result<Vec<InstalledSkill>, String> {
     SkillService::get_all_installed(&app_state.db).map_err(|e| e.to_string())
 }
@@ -66,7 +66,7 @@ pub async fn install_skill_unified(
 }
 
 /// 卸载 Skill（新版统一卸载）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn uninstall_skill_unified(
     id: String,
     app_state: State<'_, AppState>,
@@ -74,7 +74,7 @@ pub fn uninstall_skill_unified(
     SkillService::uninstall(&app_state.db, &id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn restore_skill_backup(
     backup_id: String,
     current_app: String,
@@ -86,7 +86,7 @@ pub fn restore_skill_backup(
 }
 
 /// 切换 Skill 的应用启用状态
-#[tauri::command]
+#[tauri::command(async)]
 pub fn toggle_skill_app(
     id: String,
     app: String,
@@ -99,7 +99,7 @@ pub fn toggle_skill_app(
 }
 
 /// 扫描未管理的 Skills
-#[tauri::command]
+#[tauri::command(async)]
 pub fn scan_unmanaged_skills(
     app_state: State<'_, AppState>,
 ) -> Result<Vec<UnmanagedSkill>, String> {
@@ -107,7 +107,7 @@ pub fn scan_unmanaged_skills(
 }
 
 /// 从应用目录导入 Skills
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_skills_from_apps(
     imports: Vec<ImportSkillSelection>,
     app_state: State<'_, AppState>,
@@ -300,7 +300,7 @@ pub async fn install_skill_for_app(
 }
 
 /// 卸载技能（兼容旧 API）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn uninstall_skill(
     directory: String,
     app_state: State<'_, AppState>,
@@ -309,7 +309,7 @@ pub fn uninstall_skill(
 }
 
 /// 卸载指定应用的技能（兼容旧 API）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn uninstall_skill_for_app(
     app: String,
     directory: String,
@@ -331,13 +331,13 @@ pub fn uninstall_skill_for_app(
 // ========== 仓库管理命令 ==========
 
 /// 获取技能仓库列表
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_skill_repos(app_state: State<'_, AppState>) -> Result<Vec<SkillRepo>, String> {
     app_state.db.get_skill_repos().map_err(|e| e.to_string())
 }
 
 /// 添加技能仓库
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_skill_repo(repo: SkillRepo, app_state: State<'_, AppState>) -> Result<bool, String> {
     // 整个结构体由前端反序列化而来，owner/name/branch 会被拼进归档下载 URL。
     // 主防线在 download_repo，这里让非法值当场报错而不是沉淀进表。
@@ -351,7 +351,7 @@ pub fn add_skill_repo(repo: SkillRepo, app_state: State<'_, AppState>) -> Result
 }
 
 /// 删除技能仓库
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_skill_repo(
     owner: String,
     name: String,
@@ -365,7 +365,7 @@ pub fn remove_skill_repo(
 }
 
 /// 从 ZIP 文件安装 Skills；目录名已被占用的如实列在 `skipped` 里（#3749）
-#[tauri::command]
+#[tauri::command(async)]
 pub fn install_skills_from_zip(
     file_path: String,
     current_app: String,

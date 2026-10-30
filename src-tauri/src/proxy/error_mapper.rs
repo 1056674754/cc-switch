@@ -17,6 +17,11 @@ use super::ProxyError;
 /// - 转换错误：422 Unprocessable Entity
 /// - 其他错误：500 Internal Server Error
 pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
+    // 上游用 2xx + 错误信封报告过载/限流时会被包成 TransformError；对客户端应按
+    // 可重试的 429 处理，而不是 422（与 `ProxyError::into_response` 保持一致）。
+    if let Some((status, _)) = super::error::upstream_retryable_message(error) {
+        return status.as_u16();
+    }
     match error {
         // 服务状态错误：与 IntoResponse 保持一致
         ProxyError::AlreadyRunning => 409,
@@ -173,6 +178,100 @@ mod tests {
         assert_eq!(
             get_error_message(&error_none),
             "上游错误 (502): 上游未返回错误内容"
+        );
+    }
+}
+
+#[cfg(test)]
+mod overload_mapping_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+
+    #[test]
+    fn overload_transform_error_is_retryable_429() {
+        let overload = ProxyError::TransformError(
+            "Responses upstream server_error: Our servers are currently overloaded. \
+             Please try again later."
+                .to_string(),
+        );
+        assert_eq!(map_proxy_error_to_status(&overload), 429);
+        let response = overload.into_response();
+        assert_eq!(response.status(), 429);
+        // 客户端认这两个头：等 5 秒再重试，并强制按可重试处理
+        assert_eq!(
+            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            Some("10")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+
+        // 真正不可重试的转换错误（上下文超限）仍然是 422
+        let context = ProxyError::TransformError(
+            "Your input exceeds the context window of this model.".to_string(),
+        );
+        assert_eq!(map_proxy_error_to_status(&context), 422);
+        assert_eq!(context.into_response().status(), 422);
+    }
+
+    #[test]
+    fn upstream_429_passthrough_carries_retry_headers() {
+        let upstream = ProxyError::UpstreamError {
+            status: 429,
+            body: Some("{\"detail\":\"Rate limit exceeded\"}".to_string()),
+        };
+        let response = upstream.into_response();
+        assert_eq!(response.status(), 429);
+        assert_eq!(
+            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            Some("10")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
+        );
+
+        // 非 429 的上游错误不补退避头
+        let bad_request = ProxyError::UpstreamError {
+            status: 400,
+            body: None,
+        };
+        assert!(bad_request
+            .into_response()
+            .headers()
+            .get("retry-after")
+            .is_none());
+    }
+
+    #[test]
+    fn generic_upstream_error_is_retryable_503() {
+        let error = ProxyError::TransformError(
+            "An error occurred while processing your request. You can retry your \
+             request, or contact us through our help center at help.openai.com if \
+             the error persists. Please include the request ID \
+             772c14f2-2ebe-46ec-b174-e41f0b43a10b in your message."
+                .to_string(),
+        );
+        assert_eq!(map_proxy_error_to_status(&error), 503);
+        let response = error.into_response();
+        assert_eq!(response.status(), 503);
+        assert_eq!(
+            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            Some("10")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-should-retry")
+                .and_then(|v| v.to_str().ok()),
+            Some("true")
         );
     }
 }

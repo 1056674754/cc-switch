@@ -42,7 +42,7 @@ pub async fn fetch_deeplink_icon(url: String) -> Option<String> {
 }
 
 /// Import a provider from a deep link request (legacy, kept for compatibility)
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_from_deeplink(
     state: State<AppState>,
     request: DeepLinkImportRequest,

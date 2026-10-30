@@ -299,7 +299,10 @@ impl<'a> UsageLogger<'a> {
         request_id: String,
         provider_id: String,
         app_type: String,
+        // model：实际发往上游的模型名；失败时能解析出来就填真值，解析不出来等于请求名。
         model: String,
+        // request_model：客户端请求的模型名（映射前的别名），None 时与 model 相同。
+        request_model: Option<String>,
         status_code: u16,
         error_message: String,
         latency_ms: u64,
@@ -307,7 +310,7 @@ impl<'a> UsageLogger<'a> {
         session_id: Option<String>,
         provider_type: Option<String>,
     ) -> Result<(), AppError> {
-        let request_model = model.clone();
+        let request_model = request_model.unwrap_or_else(|| model.clone());
         let log = RequestLog {
             request_id,
             provider_id,

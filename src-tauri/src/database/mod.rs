@@ -26,6 +26,7 @@
 pub(crate) mod backup;
 mod dao;
 mod migration;
+mod pool;
 mod schema;
 
 #[cfg(test)]
@@ -59,12 +60,14 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
 }
 
-/// 安全地获取 Mutex 锁，避免 unwrap panic
+pub(crate) use pool::ConnectionPool;
+
+/// 安全地获取一条数据库连接，避免 unwrap panic
 macro_rules! lock_conn {
     ($mutex:expr) => {
         $mutex
             .lock()
-            .map_err(|e| AppError::Database(format!("Mutex lock failed: {}", e)))?
+            .map_err(|e| AppError::Database(format!("获取数据库连接失败: {}", e)))?
     };
 }
 
@@ -73,24 +76,56 @@ pub(crate) use lock_conn;
 
 /// 数据库连接封装
 ///
-/// 使用 Mutex 包装 Connection 以支持在多线程环境（如 Tauri State）中共享。
-/// rusqlite::Connection 本身不是 Sync 的，因此需要这层包装。
+/// `conn` 是一个连接池（见 [`pool`]）：字段名、`lock()` 方法和守卫的解引用都刻意与
+/// 原来的 `Mutex<Connection>` 保持一致，`lock_conn!` 与各处 `.lock()` 无需改动。
+/// 池化之后读写不再互相排队——写仍然由 SQLite 串行，但排在 `busy_timeout` 上。
 pub struct Database {
-    pub(crate) conn: Mutex<Connection>,
+    pub(crate) conn: ConnectionPool,
     /// 请求日志总数缓存，见 `services::usage_stats::LogCountCache`
     pub(crate) log_count_cache: Mutex<Option<crate::services::usage_stats::LogCountCache>>,
+}
+
+/// 每一条新连接都要跑的配置。
+///
+/// `busy_timeout` 与 `foreign_keys` 是**连接级**的，必须逐条设置；`journal_mode=WAL`
+/// 是文件级的，重复执行是幂等的（内存库会返回 `memory`，这不是错误）。
+fn configure_connection(conn: &Connection) {
+    let _ = conn.busy_timeout(pool::BUSY_TIMEOUT);
+    if let Err(e) = conn.execute("PRAGMA foreign_keys = ON;", []) {
+        log::warn!("设置 foreign_keys 失败: {e}");
+    }
+    if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
+        log::warn!("设置 synchronous 失败: {e}");
+    }
+    if let Err(e) = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| row.get::<_, String>(0)) {
+        log::warn!("设置 journal_mode 失败: {e}");
+    }
+    register_db_change_hook(conn);
 }
 
 fn register_db_change_hook(conn: &Connection) {
     conn.update_hook(Some(
         |action: Action, _database: &str, table: &str, _row_id: i64| match action {
             Action::SQLITE_INSERT | Action::SQLITE_UPDATE | Action::SQLITE_DELETE => {
+                DB_WRITE_EPOCH.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 crate::services::webdav_auto_sync::notify_db_changed(table);
                 crate::services::s3_auto_sync::notify_db_changed(table);
             }
             _ => {}
         },
     ));
+}
+
+/// 进程内的写入纪元：任何一次行级增删改都会让它加一，**跨连接可见**。
+///
+/// `Connection::total_changes()` 是每条连接自己的计数器，池化之后换一条连接就归零，
+/// 不能再用来判断「上次统计完之后库有没有被写过」。钩子在每条连接上都注册了，
+/// 这里补一个全局计数顶替它（使用方见 `services::usage_stats::LogCountCache`）。
+static DB_WRITE_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 当前写入纪元；与上次记录的值不同即说明期间有过写入。
+pub(crate) fn db_write_epoch() -> u64 {
+    DB_WRITE_EPOCH.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 impl Database {
@@ -106,23 +141,21 @@ impl Database {
             std::fs::create_dir_all(parent).map_err(|e| AppError::io(parent, e))?;
         }
 
-        let conn = Connection::open(&db_path).map_err(|e| AppError::Database(e.to_string()))?;
-
-        // 启用外键约束
-        conn.execute("PRAGMA foreign_keys = ON;", [])
+        let conn = ConnectionPool::file(db_path.clone(), configure_connection)
             .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let db = Self {
+            conn,
+            log_count_cache: Mutex::new(None),
+        };
+
         if !db_exists {
             // For a brand-new database, configure incremental auto-vacuum
             // before creating any tables so no rebuild is needed later.
+            let conn = lock_conn!(db.conn);
             conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
                 .map_err(|e| AppError::Database(e.to_string()))?;
         }
-        register_db_change_hook(&conn);
-
-        let db = Self {
-            conn: Mutex::new(conn),
-            log_count_cache: Mutex::new(None),
-        };
         db.create_tables()?;
 
         // Pre-migration backup: only when upgrading from an existing database
@@ -185,19 +218,18 @@ impl Database {
 
     /// 创建内存数据库（用于测试）
     pub fn memory() -> Result<Self, AppError> {
-        let conn = Connection::open_in_memory().map_err(|e| AppError::Database(e.to_string()))?;
-
-        // 启用外键约束
-        conn.execute("PRAGMA foreign_keys = ON;", [])
+        let conn = ConnectionPool::memory(configure_connection)
             .map_err(|e| AppError::Database(e.to_string()))?;
-        conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
-            .map_err(|e| AppError::Database(e.to_string()))?;
-        register_db_change_hook(&conn);
 
         let db = Self {
-            conn: Mutex::new(conn),
+            conn,
             log_count_cache: Mutex::new(None),
         };
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute("PRAGMA auto_vacuum = INCREMENTAL;", [])
+                .map_err(|e| AppError::Database(e.to_string()))?;
+        }
         db.create_tables()?;
         db.ensure_model_pricing_seeded()?;
 

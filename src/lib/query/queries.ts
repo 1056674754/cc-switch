@@ -84,9 +84,10 @@ export const useProvidersQuery = (
   // 切应用时会先闪一下别家的卡片
   return useQuery({
     ...providersQueryOptions(appId),
-    // 当代理服务运行时，每 10 秒刷新一次供应商列表
-    // 这样可以自动反映后端熔断器自动禁用代理目标的变更
-    refetchInterval: isProxyRunning ? 10000 : false,
+    // 代理运行时定期刷新，反映后端熔断器自动禁用代理目标的变更。
+    // 间隔从 10 秒放宽到 60 秒：这条命令要读数据库，之前每 10 秒一次是主要的
+    // 后台写入/锁竞争来源；熔断状态晚一分钟呈现不影响使用。
+    refetchInterval: isProxyRunning ? 60000 : false,
   });
 };
 

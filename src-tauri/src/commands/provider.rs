@@ -21,7 +21,7 @@ const TEMPLATE_TYPE_OFFICIAL_SUBSCRIPTION: &str = "official_subscription";
 const COPILOT_UNIT_PREMIUM: &str = "requests";
 
 /// 获取所有供应商
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_providers(
     state: State<'_, AppState>,
     app: String,
@@ -30,7 +30,7 @@ pub fn get_providers(
     ProviderService::list(state.inner(), app_type).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_current_provider(state: State<'_, AppState>, app: String) -> Result<String, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     ProviderService::current(state.inner(), app_type).map_err(|e| e.to_string())
@@ -121,7 +121,7 @@ pub async fn get_provider_editor_view(
     .map_err(|e| format!("读取编辑器内容失败: {e}"))?
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_provider(
     state: State<'_, AppState>,
     app: String,
@@ -133,7 +133,7 @@ pub fn delete_provider(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_provider_to_live_config(
     state: tauri::State<'_, AppState>,
     app: String,
@@ -145,7 +145,7 @@ pub fn add_provider_to_live_config(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_provider_from_live_config(
     state: tauri::State<'_, AppState>,
     app: String,
@@ -269,7 +269,7 @@ pub fn import_default_config_test_hook(
     import_default_config_internal(state, app_type)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_default_config(state: State<'_, AppState>, app: String) -> Result<bool, String> {
     let app_type = AppType::from_str(&app).map_err(|e| e.to_string())?;
     import_default_config_internal(&state, app_type).map_err(Into::into)
@@ -290,7 +290,7 @@ pub fn get_claude_desktop_default_routes(
     crate::claude_desktop_config::default_proxy_routes()
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_claude_desktop_providers_from_claude(
     state: State<'_, AppState>,
 ) -> Result<usize, String> {
@@ -344,7 +344,7 @@ pub fn import_claude_desktop_providers_from_claude(
     Ok(imported)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ensure_claude_desktop_official_provider(state: State<'_, AppState>) -> Result<bool, String> {
     state
         .db
@@ -355,7 +355,7 @@ pub fn ensure_claude_desktop_official_provider(state: State<'_, AppState>) -> Re
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ensure_codex_official_provider(state: State<'_, AppState>) -> Result<bool, String> {
     state
         .db
@@ -363,7 +363,7 @@ pub fn ensure_codex_official_provider(state: State<'_, AppState>) -> Result<bool
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn ensure_grokbuild_official_provider(state: State<'_, AppState>) -> Result<bool, String> {
     state
         .db
@@ -883,7 +883,7 @@ pub async fn test_api_endpoints(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_custom_endpoints(
     state: State<'_, AppState>,
     app: String,
@@ -894,7 +894,7 @@ pub fn get_custom_endpoints(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn add_custom_endpoint(
     state: State<'_, AppState>,
     app: String,
@@ -906,7 +906,7 @@ pub fn add_custom_endpoint(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn remove_custom_endpoint(
     state: State<'_, AppState>,
     app: String,
@@ -918,7 +918,7 @@ pub fn remove_custom_endpoint(
         .map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn update_endpoint_last_used(
     state: State<'_, AppState>,
     app: String,
@@ -975,14 +975,14 @@ fn emit_universal_provider_synced(app: &AppHandle, action: &str, id: &str) {
     );
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_universal_providers(
     state: State<'_, AppState>,
 ) -> Result<HashMap<String, UniversalProvider>, String> {
     ProviderService::list_universal(state.inner()).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_universal_provider(
     state: State<'_, AppState>,
     id: String,
@@ -990,7 +990,7 @@ pub fn get_universal_provider(
     ProviderService::get_universal(state.inner(), &id).map_err(|e| e.to_string())
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn upsert_universal_provider(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1005,7 +1005,7 @@ pub fn upsert_universal_provider(
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn delete_universal_provider(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1019,7 +1019,7 @@ pub fn delete_universal_provider(
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn sync_universal_provider(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -1033,7 +1033,7 @@ pub fn sync_universal_provider(
     Ok(result)
 }
 
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_opencode_providers_from_live(state: State<'_, AppState>) -> Result<usize, String> {
     crate::services::provider::import_opencode_providers_from_live(state.inner())
         .map_err(|e| e.to_string())

@@ -28,6 +28,7 @@ mod lightweight;
 #[cfg(target_os = "linux")]
 mod linux_fix;
 pub mod live;
+mod main_thread_watchdog;
 mod mcode_config;
 mod mcp;
 pub mod mode;
@@ -568,6 +569,10 @@ pub fn run() {
 
             #[cfg(unix)]
             raise_open_file_limit();
+
+            // 主线程看门狗：AppKit 主线程停顿超过 1 秒就自动抓调用栈存盘，
+            // 以便下次再出现「转圈很久」时有现场证据。启动后有 15 秒宽限。
+            main_thread_watchdog::spawn(app.handle().clone());
 
             // 首次读取覆盖路径时 logger 尚未可用；此处重放一次，
             // 让 Store 损坏或路径无效等启动警告能够真正落盘。

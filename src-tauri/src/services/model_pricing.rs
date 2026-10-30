@@ -275,7 +275,7 @@ fn apply_file_to_database(
     file: &ModelPricingFile,
 ) -> Result<(usize, usize), AppError> {
     let mut conn = lock_conn!(db.conn);
-    let transaction = conn.transaction()?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut upserted = 0;
     for entry in &file.models {
         upserted += upsert_pricing(&transaction, entry)?;
@@ -402,7 +402,7 @@ fn update_model_pricing_batch_inner(
             .retain(|model_id| !updated_ids.contains(model_id));
 
         let mut conn = lock_conn!(db.conn);
-        let transaction = conn.transaction()?;
+        let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut changed = 0;
         for entry in &entries {
             changed += upsert_pricing(&transaction, entry)?;
@@ -461,7 +461,7 @@ pub fn delete_model_pricing(db: &Database, model_id: &str) -> Result<(), AppErro
     }
 
     let mut conn = lock_conn!(db.conn);
-    let transaction = conn.transaction()?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     transaction.execute(
         "DELETE FROM model_pricing WHERE model_id = ?1",
         params![model_id],

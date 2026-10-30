@@ -187,7 +187,7 @@ fn sync_file(
         pending.push((request, meta, usage, created));
     }
     let mut conn = lock_conn!(db.conn);
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     for (request, meta, mut usage, created) in pending {
         let model = requests.model(&meta).unwrap_or("unknown");
         usage.model = Some(model.into());

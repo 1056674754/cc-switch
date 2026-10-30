@@ -12,7 +12,7 @@ use crate::store::AppState;
 ///
 /// OpenClaw uses additive mode — users may already have providers
 /// configured in openclaw.json.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn import_openclaw_providers_from_live(state: State<'_, AppState>) -> Result<usize, String> {
     crate::services::provider::import_openclaw_providers_from_live(state.inner())
         .map_err(|e| e.to_string())

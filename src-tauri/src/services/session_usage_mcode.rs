@@ -25,7 +25,7 @@ fn sync_from_database(
 ) -> Result<SessionSyncResult, AppError> {
     let mut result = SessionSyncResult::default();
     let mut conn = lock_conn!(db.conn);
-    let tx = conn.transaction()?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     let mut cursor = tx.query_row(
         "SELECT COALESCE(MAX(last_line_offset), 0) FROM session_log_sync WHERE file_path = ?1",
         [&key],

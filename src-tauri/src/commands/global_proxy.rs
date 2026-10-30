@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 /// 获取全局代理 URL
 ///
 /// 返回当前配置的代理 URL，null 表示直连。
-#[tauri::command]
+#[tauri::command(async)]
 pub fn get_global_proxy_url(state: tauri::State<'_, AppState>) -> Result<Option<String>, String> {
     let result = state.db.get_global_proxy_url().map_err(|e| e.to_string())?;
     log::debug!(
@@ -31,7 +31,7 @@ pub fn get_global_proxy_url(state: tauri::State<'_, AppState>) -> Result<Option<
 ///
 /// 执行顺序：先验证 → 写 DB → 再应用
 /// 这样确保 DB 写失败时不会出现运行态与持久化不一致的问题
-#[tauri::command]
+#[tauri::command(async)]
 pub fn set_global_proxy_url(state: tauri::State<'_, AppState>, url: String) -> Result<(), String> {
     // 调试：显示接收到的 URL 信息（不包含敏感内容）
     let has_auth = url.contains('@') && (url.starts_with("http://") || url.starts_with("socks"));
