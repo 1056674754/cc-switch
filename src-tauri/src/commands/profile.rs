@@ -97,9 +97,16 @@ pub fn emit_profile_apply_events(
     crate::tray::refresh_tray_menu(app);
 }
 
-#[tauri::command(async)]
-pub fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, String> {
-    let profiles = ProfileService::list(&state).map_err(|e| e.to_string())?;
+#[tauri::command]
+pub async fn list_profiles(state: State<'_, AppState>) -> Result<ProfilesResponse, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || list_profiles_blocking(&state))
+        .await
+        .map_err(|e| format!("读取项目列表任务失败: {e}"))?
+}
+
+fn list_profiles_blocking(state: &AppState) -> Result<ProfilesResponse, String> {
+    let profiles = ProfileService::list(state).map_err(|e| e.to_string())?;
     let current_ids = CurrentProfileIds {
         claude: state
             .db

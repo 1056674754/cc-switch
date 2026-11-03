@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "CC Switch",
-  "version": "4.0.22+diy1",
+  "version": "4.0.25+diy1",
   "identifier": "com.ccswitch.desktop",
   "build": {
     "frontendDist": "../dist",
@@ -56,7 +56,7 @@
     },
     "macOS": {
       "minimumSystemVersion": "12.0",
-      "bundleVersion": "4.0.22"
+      "bundleVersion": "4.0.25"
     }
   },
   "plugins": {
