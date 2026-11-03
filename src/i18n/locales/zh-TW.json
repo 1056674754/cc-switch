@@ -4348,7 +4348,13 @@
     "updateFailed": "位址更新失敗",
     "adoptTo": "採用至…",
     "adoptSuccess": "已在 {{app}} 裡新增供應商 {{name}}",
-    "adoptFailed": "採用失敗，請重試"
+    "adoptFailed": "採用失敗，請重試",
+    "changeSecret": "換密鑰",
+    "secretLabel": "新密鑰",
+    "secretPlaceholder": "貼上新密鑰，按 Enter 儲存",
+    "secretRequired": "請先填寫新密鑰",
+    "secretUpdated": "密鑰已更新，接入的應用一起換好了",
+    "secretFailed": "密鑰更新失敗"
   },
   "bindings": {
     "description": "各 agent 從這裡選用供應商；位址和金鑰都在供應商那邊設定。",
@@ -4364,7 +4370,23 @@
     "pickPlaceholder": "選擇供應商端點…",
     "noCandidates": "沒有可選的端點：需要 anthropic 協議的供應商，且這個應用還沒在用。",
     "adopting": "正在接入…",
-    "manualOnly": "該應用需要手動設定，暫不支援一鍵選用"
+    "manualOnly": "該應用需要手動設定，暫不支援一鍵選用",
+    "modelMap": "模型映射",
+    "modelMapEmpty": "未設定",
+    "modelMapEdit": "編輯映射",
+    "modelMapFor": "{{app}} 的模型映射",
+    "modelMapPlaceholder": "模型名稱",
+    "modelMapHint": "欄位留空表示清掉對應的模型設定；儲存只影響這個應用，不動同一端點上其他應用。",
+    "modelMapSaved": "模型映射已儲存",
+    "modelMapFailed": "模型映射儲存失敗",
+    "modelSlot": {
+      "haiku": "Haiku",
+      "sonnet": "Sonnet",
+      "opus": "Opus",
+      "fable": "Fable",
+      "subagent": "子代理",
+      "default": "預設"
+    }
   },
   "mode": {
     "tabsLabel": "連線模式",

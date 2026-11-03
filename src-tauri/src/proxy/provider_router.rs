@@ -837,6 +837,70 @@ mod tests {
         Ok(())
     }
 
+    /// 改「接入」的模型映射，路由器读到的必须跟着变。
+    ///
+    /// 这是"映射归接入"的闭环：写的是该 app 自己的 provider 配置，
+    /// 再对账刷新绑定，读路径立刻生效——同一个网关在不同 app 里可以是不同模型。
+    #[tokio::test]
+    #[serial]
+    async fn editing_binding_model_map_changes_what_router_reads() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        let provider = Provider::with_id(
+            "p".to_string(),
+            "P".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-abc",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "from-provider",
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)?;
+
+        let router = ProviderRouter::new(db.clone());
+        assert_eq!(
+            router
+                .model_mapping("claude", "p")
+                .await
+                .and_then(|m| m.sonnet_model),
+            Some("from-provider".to_string())
+        );
+
+        {
+            let mut conn = lock_conn!(db.conn);
+            let changed = Database::update_binding_model_map(
+                &mut conn,
+                "claude",
+                "p",
+                &json!({"sonnet": "kimi-k2", "haiku": "kimi-k2-small"}),
+            )?;
+            assert!(changed, "claude 系配置应可写模型映射");
+            Database::reconcile_provider_bindings(&mut conn, "claude")?;
+        }
+
+        let router = ProviderRouter::new(db.clone());
+        let mapping = router.model_mapping("claude", "p").await.unwrap();
+        assert_eq!(mapping.sonnet_model.as_deref(), Some("kimi-k2"));
+        assert_eq!(mapping.haiku_model.as_deref(), Some("kimi-k2-small"));
+
+        // 写源确实翻到了 provider 配置上，而不只是改了绑定
+        let stored: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT settings_config FROM providers WHERE app_type='claude' AND id='p'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        assert!(stored.contains("kimi-k2"), "provider 配置应已改写: {stored}");
+        assert!(!stored.contains("from-provider"), "旧映射应被覆盖");
+        Ok(())
+    }
+
     #[tokio::test]
     #[serial]
     async fn endpoint_base_url_comes_from_gateway_table() -> Result<(), AppError> {

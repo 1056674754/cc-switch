@@ -1,5 +1,20 @@
 import { invoke } from "@tauri-apps/api/core";
 
+/**
+ * 一条接入明细：哪个 app 的哪条配置挂在这个端点上，以及它自己的模型映射。
+ *
+ * 模型映射归「接入」而不归网关：同一个端点，claude 里可以映射成 kimi-k2、
+ * claude-desktop 里映射成别的，所以每条接入各带一份。
+ */
+export interface SupplierEndpointBinding {
+  /** app 类型，如 "claude" / "claude-desktop" */
+  appType: string;
+  /** 该 app 里挂在这个端点上的 providerId */
+  providerId: string;
+  /** 槽位化映射（haiku/sonnet/opus/fable/subagent/default）；没配过时是空对象 */
+  modelMap: Record<string, string>;
+}
+
 /** 网关端点：某家供应商在某一种协议上的上游地址。 */
 export interface SupplierEndpoint {
   /** 端点主键 */
@@ -14,6 +29,8 @@ export interface SupplierEndpoint {
   consumers: string[];
   /** 挂在这个端点上的凭据数 */
   credentialCount: number;
+  /** 接入明细（含模型映射），模型映射编辑器用它预填 */
+  bindings: SupplierEndpointBinding[];
 }
 
 /** 供应商（网关级上游）：一家服务商有几个端点、被哪些 app 使用。 */
@@ -52,6 +69,28 @@ export const suppliersApi = {
     baseUrl: string,
   ): Promise<Supplier[]> {
     return invoke("update_supplier_base_url", { endpointId, baseUrl });
+  },
+
+  // 换一把密钥：所有使用这个端点的 app 一起换，返回更新后的总览。
+  // 密钥只写不读——后端从不返回明文，只返回 credentialCount，界面也拿不到旧值。
+  // 密钥存在环境变量里（库里没有明文）或端点没有任何接入时会 reject 一段中文原因。
+  async updateSecret(endpointId: string, secret: string): Promise<Supplier[]> {
+    return invoke("update_supplier_secret", { endpointId, secret });
+  },
+
+  // 改一个接入的模型映射（app + provider 粒度，不动同一端点上别的 app）。
+  // modelMap 的槽位是固定的 haiku/sonnet/opus/fable/subagent/default，
+  // 值为空串（或整个槽位缺省）表示清掉该槽位对应的模型字段。
+  async updateBindingModelMap(
+    appType: string,
+    providerId: string,
+    modelMap: Record<string, string>,
+  ): Promise<Supplier[]> {
+    return invoke("update_binding_model_map", {
+      appType,
+      providerId,
+      modelMap,
+    });
   },
 
   // 一键采用：把端点接进某个 agent，地址和密钥都从网关读，用户不用填 key。

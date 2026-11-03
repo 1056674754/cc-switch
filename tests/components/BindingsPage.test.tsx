@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -8,6 +8,7 @@ import type { Supplier, SupplierEndpoint } from "@/lib/api/suppliers";
 const mocks = vi.hoisted(() => ({
   overview: vi.fn(),
   adopt: vi.fn(),
+  updateBindingModelMap: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
 }));
@@ -17,6 +18,11 @@ vi.mock("@/lib/api/suppliers", () => ({
     overview: () => mocks.overview(),
     adopt: (appType: string, endpointId: string) =>
       mocks.adopt(appType, endpointId),
+    updateBindingModelMap: (
+      appType: string,
+      providerId: string,
+      modelMap: Record<string, string>,
+    ) => mocks.updateBindingModelMap(appType, providerId, modelMap),
   },
 }));
 
@@ -46,6 +52,7 @@ const endpoint = (
   apps: [],
   consumers: [],
   credentialCount: 0,
+  bindings: [],
   ...overrides,
 });
 
@@ -76,6 +83,13 @@ const overview: Supplier[] = [
         apps: ["claude"],
         consumers: ["claude:p1"],
         credentialCount: 1,
+        bindings: [
+          {
+            appType: "claude",
+            providerId: "p1",
+            modelMap: { haiku: "kimi-k2-small", sonnet: "kimi-k2" },
+          },
+        ],
       }),
       endpoint({
         id: "ep-2",
@@ -104,6 +118,20 @@ const overview: Supplier[] = [
   }),
 ];
 
+/** 用一份新的 claude 模型映射重建总览（后端保存后返回的形状）。 */
+const withClaudeModelMap = (modelMap: Record<string, string>): Supplier[] =>
+  overview.map((item) => ({
+    ...item,
+    endpoints: item.endpoints.map((endpoint) =>
+      endpoint.id === "ep-1"
+        ? {
+            ...endpoint,
+            bindings: [{ appType: "claude", providerId: "p1", modelMap }],
+          }
+        : endpoint,
+    ),
+  }));
+
 const renderPage = () => {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -129,6 +157,7 @@ describe("BindingsPage", () => {
     Element.prototype.scrollIntoView = vi.fn();
     mocks.overview.mockResolvedValue(overview);
     mocks.adopt.mockReset();
+    mocks.updateBindingModelMap.mockReset();
     mocks.success.mockReset();
     mocks.error.mockReset();
   });
@@ -256,5 +285,176 @@ describe("BindingsPage", () => {
     expect(
       await screen.findByRole("heading", { name: "Claude" }),
     ).toBeInTheDocument();
+  });
+
+  it("summarizes the current model mapping on each in-use supplier", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+
+    expect(
+      screen.getByText("haiku → kimi-k2-small · sonnet → kimi-k2"),
+    ).toBeInTheDocument();
+    // Codex 的两条接入都没有映射：如实显示「未配置」，不是留白
+    expect(screen.getAllByText("bindings.modelMapEmpty")).toHaveLength(2);
+  });
+
+  it("prefills the six slots from the binding and saves the edited mapping", async () => {
+    mocks.updateBindingModelMap.mockResolvedValue(
+      withClaudeModelMap({ sonnet: "kimi-k3" }),
+    );
+
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "bindings.modelMapEdit" }),
+    );
+
+    // 六个槽位固定都在，已配的槽位按后端返回预填
+    expect(screen.getByLabelText("bindings.modelSlot.haiku")).toHaveValue(
+      "kimi-k2-small",
+    );
+    expect(screen.getByLabelText("bindings.modelSlot.sonnet")).toHaveValue(
+      "kimi-k2",
+    );
+    for (const slot of ["opus", "fable", "subagent", "default"]) {
+      expect(screen.getByLabelText(`bindings.modelSlot.${slot}`)).toHaveValue(
+        "",
+      );
+    }
+
+    const sonnet = screen.getByLabelText("bindings.modelSlot.sonnet");
+    await user.clear(sonnet);
+    await user.type(sonnet, "kimi-k3");
+    // 清空 haiku：空槽位不用提交，后端会删掉对应的模型字段
+    await user.clear(screen.getByLabelText("bindings.modelSlot.haiku"));
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.updateBindingModelMap).toHaveBeenCalledWith("claude", "p1", {
+        sonnet: "kimi-k3",
+      }),
+    );
+    expect(mocks.success).toHaveBeenCalledWith("bindings.modelMapSaved");
+    // 新总览落缓存，摘要跟着变，编辑器收起
+    expect(await screen.findByText("sonnet → kimi-k3")).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("bindings.modelSlot.sonnet"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("only offers the model mapping editor to Claude-family apps", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+
+    expect(
+      screen.getAllByRole("button", { name: "bindings.modelMapEdit" }),
+    ).toHaveLength(1);
+
+    // Codex 的配置里没有可写的模型字段，别给它一个按了会被拒的按钮
+    const codexCard = screen
+      .getByRole("heading", { name: "Codex" })
+      .closest("li") as HTMLElement;
+    expect(
+      within(codexCard).queryByRole("button", {
+        name: "bindings.modelMapEdit",
+      }),
+    ).toBeNull();
+  });
+
+  it("toasts the backend reason and keeps the editor open when saving is rejected", async () => {
+    mocks.updateBindingModelMap.mockRejectedValue(
+      "claude 的这条配置里没有可写的模型字段（只有 claude 系支持模型映射）",
+    );
+
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "bindings.modelMapEdit" }),
+    );
+    const sonnet = screen.getByLabelText("bindings.modelSlot.sonnet");
+    await user.clear(sonnet);
+    await user.type(sonnet, "kimi-k2-pro");
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.error).toHaveBeenCalledWith(
+        "claude 的这条配置里没有可写的模型字段（只有 claude 系支持模型映射）",
+      ),
+    );
+    expect(mocks.success).not.toHaveBeenCalled();
+    // 输入不丢、不卡加载态
+    expect(screen.getByLabelText("bindings.modelSlot.sonnet")).toHaveValue(
+      "kimi-k2-pro",
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "common.save" }),
+      ).not.toBeDisabled(),
+    );
+  });
+
+  it("closes the mapping editor on Escape without saving", async () => {
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "bindings.modelMapEdit" }),
+    );
+    await user.type(
+      screen.getByLabelText("bindings.modelSlot.opus"),
+      "kimi-k2-thinking",
+    );
+    await user.keyboard("{Escape}");
+
+    expect(
+      screen.queryByLabelText("bindings.modelSlot.opus"),
+    ).not.toBeInTheDocument();
+    expect(mocks.updateBindingModelMap).not.toHaveBeenCalled();
+    // 收起后摘要还是原来的映射
+    expect(
+      screen.getByText("haiku → kimi-k2-small · sonnet → kimi-k2"),
+    ).toBeInTheDocument();
+  });
+
+  it("disables the mapping editor while the request is in flight", async () => {
+    let resolveMap!: (value: Supplier[]) => void;
+    mocks.updateBindingModelMap.mockReturnValue(
+      new Promise<Supplier[]>((resolve) => {
+        resolveMap = resolve;
+      }),
+    );
+
+    renderPage();
+    await screen.findByRole("heading", { name: "Claude" });
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "bindings.modelMapEdit" }),
+    );
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(screen.getByLabelText("bindings.modelSlot.sonnet")).toBeDisabled(),
+    );
+    expect(screen.getByRole("button", { name: "common.save" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "common.save" })).toHaveAttribute(
+      "aria-busy",
+      "true",
+    );
+
+    await act(async () => {
+      resolveMap(withClaudeModelMap({}));
+    });
+
+    await waitFor(() =>
+      expect(
+        screen.queryByLabelText("bindings.modelSlot.sonnet"),
+      ).not.toBeInTheDocument(),
+    );
   });
 });

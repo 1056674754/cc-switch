@@ -2163,6 +2163,47 @@ impl Database {
         (!map.is_empty()).then(|| serde_json::Value::Object(map).to_string())
     }
 
+    /// 把槽位化的模型映射写回配置（`env.ANTHROPIC_DEFAULT_*_MODEL` 一族）。
+    ///
+    /// 与 [`Self::p1_model_map`] 的槽位表**共用同一份键名**——读到的和写回去的必须是
+    /// 同一批字段，否则界面改完下次对账又读回旧值。
+    ///
+    /// 槽位缺失或为空表示"清掉这个槽"，所以这里会**删除**对应 env 键。
+    /// 配置里没有 `env` 对象（非 claude 系）时返回 false，调用方据此拒绝。
+    pub(crate) fn p1_set_model_map(
+        config: &mut serde_json::Value,
+        map: &serde_json::Value,
+    ) -> bool {
+        const KEYS: &[(&str, &str)] = &[
+            ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+            ("default", "ANTHROPIC_MODEL"),
+        ];
+        let Some(env) = config.get_mut("env").and_then(|value| value.as_object_mut()) else {
+            return false;
+        };
+
+        for (slot, env_key) in KEYS {
+            let value = map
+                .get(*slot)
+                .and_then(|value| value.as_str())
+                .map(str::trim)
+                .filter(|text| !text.is_empty());
+            match value {
+                Some(model) => {
+                    env.insert((*env_key).to_string(), serde_json::Value::from(model));
+                }
+                None => {
+                    env.remove(*env_key);
+                }
+            }
+        }
+        true
+    }
+
     fn p1_protocol_for(app_type: &str, config: &serde_json::Value) -> String {
         if app_type == "opencode" {
             let npm = config
@@ -5138,6 +5179,48 @@ mod tests {
         // 认不出的形状必须明确返回 false，不能悄悄成功
         let mut opaque = serde_json::json!({"something": "else"});
         assert!(!Database::p1_set_base_url(&mut opaque, "https://new.example.com"));
+    }
+
+    /// 模型映射读写必须闭合：写进去的槽位，`p1_model_map` 要能原样读回来。
+    #[test]
+    fn set_model_map_round_trips_through_extractor() {
+        let mut config = serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": "https://ai.ctaigw.cn/v1",
+                "ANTHROPIC_DEFAULT_SONNET_MODEL": "old-sonnet",
+            }
+        });
+
+        let map = serde_json::json!({"sonnet": "kimi-k2", "haiku": "kimi-k2-small"});
+        assert!(Database::p1_set_model_map(&mut config, &map));
+
+        // 写进去的字段
+        assert_eq!(config["env"]["ANTHROPIC_DEFAULT_SONNET_MODEL"], "kimi-k2");
+        assert_eq!(
+            config["env"]["ANTHROPIC_DEFAULT_HAIKU_MODEL"],
+            "kimi-k2-small"
+        );
+        // 地址不能被模型映射动到
+        assert_eq!(config["env"]["ANTHROPIC_BASE_URL"], "https://ai.ctaigw.cn/v1");
+
+        // 读回来一致
+        let extracted: serde_json::Value = serde_json::from_str(
+            &Database::p1_model_map(&config).expect("应能提取"),
+        )
+        .expect("合法 JSON");
+        assert_eq!(extracted["sonnet"], "kimi-k2");
+        assert_eq!(extracted["haiku"], "kimi-k2-small");
+
+        // 清空某个槽位应删除对应 env 键，而不是留空串
+        assert!(Database::p1_set_model_map(&mut config, &serde_json::json!({"sonnet": "kimi-k2"})));
+        assert!(
+            config["env"].get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none(),
+            "被清掉的槽位要删除 env 键"
+        );
+
+        // 没有 env 的配置写不了
+        let mut opencode = serde_json::json!({"options": {"baseURL": "https://x"}});
+        assert!(!Database::p1_set_model_map(&mut opencode, &map));
     }
 
     #[test]

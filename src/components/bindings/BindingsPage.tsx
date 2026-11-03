@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Loader2, Plug, RefreshCw } from "lucide-react";
+import { Loader2, Pencil, Plug, RefreshCw } from "lucide-react";
 import type { AppId } from "@/lib/api";
 import {
   suppliersApi,
@@ -27,6 +27,17 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { protocolLabel } from "@/components/suppliers/protocolLabel";
+import { ModelMapEditor } from "./ModelMapEditor";
+import {
+  findBinding,
+  type ModelMapDraft,
+  type ModelMapSlot,
+  parseConsumer,
+  summarizeModelMap,
+  supportsModelMap,
+  toModelMapDraft,
+  toModelMapPayload,
+} from "./modelMap";
 
 /** 一个供应商端点，连同它属于哪家供应商（列表里要显示供应商名）。 */
 interface EndpointRef {
@@ -34,18 +45,32 @@ interface EndpointRef {
   endpoint: SupplierEndpoint;
 }
 
+/** 在用的端点：还带上这个 app 挂在这个端点上的 providerId（模型映射按它写）。 */
+interface InUseRef extends EndpointRef {
+  providerId: string;
+}
+
 /** 一个 app 的接入情况：已经在用哪些端点、还能选用哪些。 */
 interface AppBinding {
   app: AppId;
-  inUse: EndpointRef[];
+  inUse: InUseRef[];
   candidates: EndpointRef[];
+}
+
+/** 正在编辑的模型映射：定位到某 app 的某条接入，草稿是六个槽位。 */
+interface ModelMapEditing {
+  endpointId: string;
+  appType: AppId;
+  providerId: string;
+  draft: ModelMapDraft;
 }
 
 /**
  * 从供应商总览反查每个 app 的接入情况。
  *
  * - 有哪些 app：从各端点的 `apps` 汇总，顺序沿用 APP_IDS（不硬编码全量应用列表）；
- * - 在用什么：`consumers` 里以 `"<app>:"` 开头的端点；
+ * - 在用什么：`consumers` 里 `"<app>:<providerId>"` 的项，一条接入一个条目
+ *   （同一个端点被同一个 app 的两条配置挂上时，各自有独立的模型映射）；
  * - 能选什么：anthropic 协议、且这个 app 还没在用的端点。
  */
 export function buildBindings(suppliers: Supplier[]): AppBinding[] {
@@ -56,17 +81,24 @@ export function buildBindings(suppliers: Supplier[]): AppBinding[] {
   );
 
   return apps.map((app) => {
-    const inUse: EndpointRef[] = [];
+    const inUse: InUseRef[] = [];
     const candidates: EndpointRef[] = [];
 
     for (const supplier of suppliers) {
       for (const endpoint of supplier.endpoints) {
-        const usedByApp = endpoint.consumers.some((consumer) =>
-          consumer.startsWith(`${app}:`),
-        );
+        const providerIds = endpoint.consumers
+          .map(parseConsumer)
+          .filter(
+            (parsed): parsed is { appType: string; providerId: string } =>
+              parsed !== null,
+          )
+          .filter((parsed) => parsed.appType === app)
+          .map((parsed) => parsed.providerId);
 
-        if (usedByApp) {
-          inUse.push({ supplier, endpoint });
+        if (providerIds.length > 0) {
+          for (const providerId of providerIds) {
+            inUse.push({ supplier, endpoint, providerId });
+          }
         } else if (endpoint.protocol === "anthropic") {
           candidates.push({ supplier, endpoint });
         }
@@ -96,10 +128,68 @@ export function BindingsPage() {
 
   // 正在采用到哪个 app：下拉在请求期间禁用，防止连点给同一个 agent 重复建配置
   const [adoptingApp, setAdoptingApp] = useState<string | null>(null);
+  // 正在编辑模型映射的接入；同时只开一个编辑器，换一条就是换草稿
+  const [editingMap, setEditingMap] = useState<ModelMapEditing | null>(null);
+  const [savingMap, setSavingMap] = useState(false);
   // 只有能忠实渲染配置的 app 才给「选用」下拉；其余点了也只会被后端拒绝
   const canAdopt = (app: AppId) => ADOPT_APPS.includes(app);
 
   const bindings = useMemo(() => buildBindings(data ?? []), [data]);
+
+  const openModelMap = (
+    app: AppId,
+    endpoint: SupplierEndpoint,
+    providerId: string,
+  ) => {
+    // 预填当前映射：后端可能只返回配过的槽位，缺的槽位补空串
+    const current = findBinding(endpoint, app, providerId)?.modelMap;
+    setEditingMap({
+      endpointId: endpoint.id,
+      appType: app,
+      providerId,
+      draft: toModelMapDraft(current),
+    });
+  };
+
+  const closeModelMap = () => {
+    // 保存中不给关：请求已经发出去了，关了也拦不住
+    if (savingMap) return;
+    setEditingMap(null);
+  };
+
+  const changeModelMapSlot = (slot: ModelMapSlot, value: string) => {
+    setEditingMap((previous) =>
+      previous
+        ? { ...previous, draft: { ...previous.draft, [slot]: value } }
+        : previous,
+    );
+  };
+
+  const saveModelMap = async () => {
+    if (!editingMap || savingMap) return;
+
+    setSavingMap(true);
+    try {
+      const updated = await suppliersApi.updateBindingModelMap(
+        editingMap.appType,
+        editingMap.providerId,
+        toModelMapPayload(editingMap.draft),
+      );
+      // 后端返回的就是更新后的总览，直接落缓存，不再多拉一次
+      queryClient.setQueryData<Supplier[]>(suppliersKeys.overview, updated);
+      // 模型映射写在各 app 自己的配置里，供应商列表下次进入时要重读
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      setEditingMap(null);
+      toast.success(t("bindings.modelMapSaved"));
+    } catch (saveError) {
+      // 非 claude 系、配置已被删掉等，后端会给出中文原因，原样透出
+      toast.error(
+        extractErrorMessage(saveError) || t("bindings.modelMapFailed"),
+      );
+    } finally {
+      setSavingMap(false);
+    }
+  };
 
   const adoptFor = async (app: AppId, endpointId: string) => {
     if (adoptingApp) return;
@@ -205,30 +295,87 @@ export function BindingsPage() {
                   </div>
                 ) : (
                   <ul className="m-0 list-none space-y-1.5 p-0">
-                    {inUse.map(({ supplier, endpoint }) => (
-                      <li
-                        key={`${supplier.id}:${endpoint.id}`}
-                        className="rounded-control bg-subtle px-3 py-2"
-                      >
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <span className="min-w-0 truncate text-body text-fg-1">
-                            {supplier.name}
-                          </span>
-                          <Badge
-                            variant="outline"
-                            className="h-[18px] shrink-0 rounded-full px-1.5 text-badge font-medium text-fg-2"
-                          >
-                            {protocolLabel(endpoint.protocol)}
-                          </Badge>
-                          <code
-                            className="min-w-0 font-mono text-caption text-fg-3 [overflow-wrap:anywhere]"
-                            title={endpoint.baseUrl || undefined}
-                          >
-                            {endpoint.baseUrl || t("suppliers.noBaseUrl")}
-                          </code>
-                        </div>
-                      </li>
-                    ))}
+                    {inUse.map(({ supplier, endpoint, providerId }) => {
+                      const summary = summarizeModelMap(
+                        findBinding(endpoint, app, providerId)?.modelMap,
+                      );
+                      // 同一个端点可能被同一个 app 的多条配置挂上，providerId 要进 key
+                      const rowKey = `${supplier.id}:${endpoint.id}:${providerId}`;
+                      const isEditingMap =
+                        editingMap?.endpointId === endpoint.id &&
+                        editingMap.appType === app &&
+                        editingMap.providerId === providerId;
+
+                      return (
+                        <li
+                          key={rowKey}
+                          className="rounded-control bg-subtle px-3 py-2"
+                        >
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="min-w-0 truncate text-body text-fg-1">
+                              {supplier.name}
+                            </span>
+                            <Badge
+                              variant="outline"
+                              className="h-[18px] shrink-0 rounded-full px-1.5 text-badge font-medium text-fg-2"
+                            >
+                              {protocolLabel(endpoint.protocol)}
+                            </Badge>
+                            <code
+                              className="min-w-0 font-mono text-caption text-fg-3 [overflow-wrap:anywhere]"
+                              title={endpoint.baseUrl || undefined}
+                            >
+                              {endpoint.baseUrl || t("suppliers.noBaseUrl")}
+                            </code>
+                          </div>
+
+                          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption">
+                            <span className="shrink-0 text-fg-3">
+                              {t("bindings.modelMap")}
+                            </span>
+                            <span
+                              className={cn(
+                                "min-w-0 truncate font-mono",
+                                summary ? "text-fg-2" : "text-fg-3 italic",
+                              )}
+                              title={summary || undefined}
+                            >
+                              {summary || t("bindings.modelMapEmpty")}
+                            </span>
+                            {supportsModelMap(app) && !isEditingMap && (
+                              <Button
+                                type="button"
+                                variant="quiet"
+                                size="compact"
+                                className="h-6 px-1.5 text-caption"
+                                onClick={() =>
+                                  openModelMap(app, endpoint, providerId)
+                                }
+                              >
+                                <Pencil
+                                  aria-hidden="true"
+                                  className="h-3 w-3"
+                                />
+                                {t("bindings.modelMapEdit")}
+                              </Button>
+                            )}
+                          </div>
+
+                          {supportsModelMap(app) &&
+                            isEditingMap &&
+                            editingMap && (
+                              <ModelMapEditor
+                                appLabel={label}
+                                draft={editingMap.draft}
+                                saving={savingMap}
+                                onChange={changeModelMapSlot}
+                                onSave={() => void saveModelMap()}
+                                onCancel={closeModelMap}
+                              />
+                            )}
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>

@@ -22,6 +22,7 @@ export type {
   AdoptedSupplierProvider,
   Supplier,
   SupplierEndpoint,
+  SupplierEndpointBinding,
 } from "./suppliers";
 export type { Prompt } from "./prompts";
 export type { Profile, ProfilePayload, ProfilesResponse } from "./profiles";

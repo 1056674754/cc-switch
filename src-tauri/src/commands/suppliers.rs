@@ -24,6 +24,18 @@ pub struct SupplierEndpoint {
     pub consumers: Vec<String>,
     /// 挂在这个端点上的凭据数
     pub credential_count: i64,
+    /// 接入明细（含模型映射），前端编辑映射时用来预填
+    pub bindings: Vec<BindingDetail>,
+}
+
+/// 一条接入：哪个 app、哪个 provider、当前模型映射。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct BindingDetail {
+    pub app_type: String,
+    pub provider_id: String,
+    /// 槽位化 JSON（haiku/sonnet/opus/fable/subagent/default），空对象表示没配
+    pub model_map: serde_json::Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -78,25 +90,26 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
     }
 
     // endpoint_id → 该端点上的使用情况
-    let mut consumers: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    let mut consumers: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT endpoint_id, app_type, provider_id FROM provider_bindings
-             ORDER BY endpoint_id, app_type, provider_id",
+            "SELECT endpoint_id, app_type, provider_id, COALESCE(model_map, '')
+             FROM provider_bindings ORDER BY endpoint_id, app_type, provider_id",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
             ))
         })?;
         for row in rows {
-            let (endpoint_id, app_type, provider_id) = row?;
+            let (endpoint_id, app_type, provider_id, model_map) = row?;
             consumers
                 .entry(endpoint_id)
                 .or_default()
-                .push((app_type, provider_id));
+                .push((app_type, provider_id, model_map));
         }
     }
 
@@ -140,11 +153,19 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
 
             let mut apps: Vec<String> = Vec::new();
             let mut details: Vec<String> = Vec::new();
-            for (app_type, provider_id) in consumers.get(&endpoint_id).into_iter().flatten() {
+            let mut binding_details: Vec<BindingDetail> = Vec::new();
+            for (app_type, provider_id, model_map) in consumers.get(&endpoint_id).into_iter().flatten()
+            {
                 if !apps.contains(app_type) {
                     apps.push(app_type.clone());
                 }
                 details.push(format!("{app_type}:{provider_id}"));
+                binding_details.push(BindingDetail {
+                    app_type: app_type.clone(),
+                    provider_id: provider_id.clone(),
+                    model_map: serde_json::from_str(model_map)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                });
             }
 
             let (credential_count, kinds) = per_endpoint
@@ -164,6 +185,7 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 apps,
                 consumers: details,
                 credential_count,
+                bindings: binding_details,
             });
         }
     }
@@ -377,6 +399,37 @@ pub async fn update_supplier_secret(
             crate::database::Database::reconcile_provider_bindings(&mut conn, app)
                 .map_err(|error| error.to_string())?;
         }
+    }
+
+    collect(&state.db).map_err(|error| error.to_string())
+}
+
+/// 改某个接入的模型映射（`app + provider` 粒度）。
+///
+/// 同一个网关，不同 app 可以映射成不同模型——这正是「映射归接入」的含义。
+#[tauri::command]
+pub async fn update_binding_model_map(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    provider_id: String,
+    model_map: serde_json::Value,
+) -> Result<Vec<Supplier>, String> {
+    {
+        let mut conn = lock_conn!(state.db.conn);
+        let changed = crate::database::Database::update_binding_model_map(
+            &mut conn,
+            &app_type,
+            &provider_id,
+            &model_map,
+        )
+        .map_err(|error| error.to_string())?;
+        if !changed {
+            return Err(format!(
+                "{app_type} 的这条配置里没有可写的模型字段（只有 claude 系支持模型映射）"
+            ));
+        }
+        crate::database::Database::reconcile_provider_bindings(&mut conn, &app_type)
+            .map_err(|error| error.to_string())?;
     }
 
     collect(&state.db).map_err(|error| error.to_string())

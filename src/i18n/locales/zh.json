@@ -4347,7 +4347,13 @@
     "updateFailed": "地址更新失败",
     "adoptTo": "采用到…",
     "adoptSuccess": "已在 {{app}} 里添加供应商 {{name}}",
-    "adoptFailed": "采用失败，请重试"
+    "adoptFailed": "采用失败，请重试",
+    "changeSecret": "换密钥",
+    "secretLabel": "新密钥",
+    "secretPlaceholder": "粘贴新密钥，回车保存",
+    "secretRequired": "请先填写新密钥",
+    "secretUpdated": "密钥已更新，接入的应用一起换好了",
+    "secretFailed": "密钥更新失败"
   },
   "bindings": {
     "description": "各 agent 从这里选用供应商；地址和密钥都在供应商那边配。",
@@ -4363,7 +4369,23 @@
     "pickPlaceholder": "选择供应商端点…",
     "noCandidates": "没有可选的端点：需要 anthropic 协议的供应商，且这个应用还没在用。",
     "adopting": "正在接入…",
-    "manualOnly": "该应用需要手动配置，暂不支持一键选用"
+    "manualOnly": "该应用需要手动配置，暂不支持一键选用",
+    "modelMap": "模型映射",
+    "modelMapEmpty": "未配置",
+    "modelMapEdit": "编辑映射",
+    "modelMapFor": "{{app}} 的模型映射",
+    "modelMapPlaceholder": "模型名称",
+    "modelMapHint": "槽位留空表示清掉对应的模型字段；保存只影响这个应用，不动同一端点上别的应用。",
+    "modelMapSaved": "模型映射已保存",
+    "modelMapFailed": "模型映射保存失败",
+    "modelSlot": {
+      "haiku": "Haiku",
+      "sonnet": "Sonnet",
+      "opus": "Opus",
+      "fable": "Fable",
+      "subagent": "子代理",
+      "default": "默认"
+    }
   },
   "mode": {
     "tabsLabel": "连接模式",

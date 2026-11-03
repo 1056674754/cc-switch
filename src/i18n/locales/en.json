@@ -4350,7 +4350,13 @@
     "updateFailed": "Couldn't update the address",
     "adoptTo": "Adopt into…",
     "adoptSuccess": "Added supplier {{name}} to {{app}}",
-    "adoptFailed": "Couldn't adopt this supplier; please try again."
+    "adoptFailed": "Couldn't adopt this supplier; please try again.",
+    "changeSecret": "Change key",
+    "secretLabel": "New API key",
+    "secretPlaceholder": "Paste the new key, then press Enter",
+    "secretRequired": "Enter the new key first",
+    "secretUpdated": "Key updated for every connected app",
+    "secretFailed": "Couldn't update the key"
   },
   "bindings": {
     "description": "Each agent picks its supplier here. Addresses and keys are configured once on the supplier side.",
@@ -4366,7 +4372,23 @@
     "pickPlaceholder": "Choose a supplier endpoint…",
     "noCandidates": "No endpoints to choose from: you need an Anthropic-protocol supplier that this app isn't using yet.",
     "adopting": "Binding…",
-    "manualOnly": "This app needs manual setup; one-click adopting isn't supported yet"
+    "manualOnly": "This app needs manual setup; one-click adopting isn't supported yet",
+    "modelMap": "Model mapping",
+    "modelMapEmpty": "Not configured",
+    "modelMapEdit": "Edit mapping",
+    "modelMapFor": "Model mapping for {{app}}",
+    "modelMapPlaceholder": "Model name",
+    "modelMapHint": "Leave a slot empty to clear that model field. Saving only affects this app, not other apps on the same endpoint.",
+    "modelMapSaved": "Model mapping saved",
+    "modelMapFailed": "Couldn't save the model mapping",
+    "modelSlot": {
+      "haiku": "Haiku",
+      "sonnet": "Sonnet",
+      "opus": "Opus",
+      "fable": "Fable",
+      "subagent": "Subagent",
+      "default": "Default"
+    }
   },
   "mode": {
     "tabsLabel": "Connection mode",

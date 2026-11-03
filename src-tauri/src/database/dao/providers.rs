@@ -896,6 +896,43 @@ impl Database {
         })
     }
 
+    /// 改某个接入的模型映射（`app + provider` 粒度，不是网关粒度）。
+    ///
+    /// 模型映射归"这个 app 怎么用这条接入"：同一个网关，claude 里可以映射成
+    /// kimi-k2，claude-desktop 里映射成别的。所以写的是该 app 自己的配置，
+    /// 不动同端点的其它 app。
+    ///
+    /// 返回 false 表示这个 provider 的配置里没有可写的 `env`（例如 opencode）。
+    pub(crate) fn update_binding_model_map(
+        conn: &mut rusqlite::Connection,
+        app_type: &str,
+        provider_id: &str,
+        map: &serde_json::Value,
+    ) -> Result<bool, AppError> {
+        let config_text: Option<String> = conn
+            .query_row(
+                "SELECT settings_config FROM providers WHERE app_type = ?1 AND id = ?2",
+                params![app_type, provider_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let Some(config_text) = config_text else {
+            return Ok(false);
+        };
+        let mut config: serde_json::Value =
+            serde_json::from_str(&config_text).unwrap_or(serde_json::Value::Null);
+        if !Database::p1_set_model_map(&mut config, map) {
+            return Ok(false);
+        }
+        conn.execute(
+            "UPDATE providers SET settings_config = ?1 WHERE app_type = ?2 AND id = ?3",
+            params![config.to_string(), app_type, provider_id],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(true)
+    }
+
     /// 换一把密钥，所有使用这个端点的 app 一起换。
     ///
     /// 只改 `settings_config` 里的凭证值；`upstream_credentials` 由随后的对账

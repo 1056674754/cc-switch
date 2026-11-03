@@ -5,6 +5,9 @@ import {
   Boxes,
   ChevronRight,
   Download,
+  Eye,
+  EyeOff,
+  KeyRound,
   Loader2,
   Pencil,
   RefreshCw,
@@ -45,6 +48,18 @@ interface EditingBaseUrl {
 }
 
 /**
+ * 换密钥的就地编辑器状态。
+ *
+ * 永远从空串开始：旧密钥后端不返回、界面也不保存，这里只接收「新密钥」。
+ */
+interface EditingSecret {
+  endpointId: string;
+  value: string;
+  /** 是否切成明文显示（默认遮住） */
+  revealed: boolean;
+}
+
+/**
  * 供应商页：网关级视角的供应商 / 端点总览。
  *
  * 每家供应商一行，点开看它的端点；端点上的地址改一次，所有接入它的 agent 一起被改写。
@@ -62,7 +77,14 @@ export function SupplierPage() {
     () => new Set(),
   );
   const [editing, setEditing] = useState<EditingBaseUrl | null>(null);
+  const [editingSecret, setEditingSecret] = useState<EditingSecret | null>(
+    null,
+  );
   const [savingEndpointId, setSavingEndpointId] = useState<string | null>(null);
+  // 换密钥单独记一个「正在保存的端点」：地址和密钥的请求不能互相顶掉禁用态
+  const [savingSecretEndpointId, setSavingSecretEndpointId] = useState<
+    string | null
+  >(null);
   // 正在「采用到…」的端点：按钮期间禁用，防止连点给同一个 agent 重复建配置
   const [adoptingEndpointId, setAdoptingEndpointId] = useState<string | null>(
     null,
@@ -83,10 +105,24 @@ export function SupplierPage() {
   };
 
   const startEditing = (endpoint: SupplierEndpoint) => {
+    // 一行只开一个编辑器：开地址编辑就把密钥编辑收起来
+    setEditingSecret(null);
     setEditing({ endpointId: endpoint.id, value: endpoint.baseUrl });
   };
 
   const cancelEditing = () => setEditing(null);
+
+  const startEditingSecret = (endpoint: SupplierEndpoint) => {
+    // 不预填：有没有旧密钥、旧密钥是什么，界面都不知道（后端也不返回）
+    setEditing(null);
+    setEditingSecret({
+      endpointId: endpoint.id,
+      value: "",
+      revealed: false,
+    });
+  };
+
+  const cancelEditingSecret = () => setEditingSecret(null);
 
   const saveBaseUrl = async (endpoint: SupplierEndpoint) => {
     if (!editing || editing.endpointId !== endpoint.id) return;
@@ -118,6 +154,36 @@ export function SupplierPage() {
       );
     } finally {
       setSavingEndpointId(null);
+    }
+  };
+
+  // 换密钥：一把密钥换掉这个端点下所有 app 的；后端不接受空串，这里先拦一道
+  const saveSecret = async (endpoint: SupplierEndpoint) => {
+    if (!editingSecret || editingSecret.endpointId !== endpoint.id) return;
+    if (savingSecretEndpointId) return;
+
+    const nextSecret = editingSecret.value.trim();
+    if (!nextSecret) {
+      toast.error(t("suppliers.secretRequired"));
+      return;
+    }
+
+    setSavingSecretEndpointId(endpoint.id);
+    try {
+      const updated = await suppliersApi.updateSecret(endpoint.id, nextSecret);
+      // 后端返回的就是更新后的总览，直接落缓存
+      queryClient.setQueryData<Supplier[]>(suppliersKeys.overview, updated);
+      // 各应用里存的密钥已经被一起改写（界面只显示 credentialCount），让列表重读
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      setEditingSecret(null);
+      toast.success(t("suppliers.secretUpdated"));
+    } catch (saveError) {
+      // 「密钥存在环境变量里，库里没有明文可换」「该端点没有任何接入」等中文原因原样透出
+      toast.error(
+        extractErrorMessage(saveError) || t("suppliers.secretFailed"),
+      );
+    } finally {
+      setSavingSecretEndpointId(null);
     }
   };
 
@@ -277,6 +343,10 @@ export function SupplierPage() {
                         const isEditing = editing?.endpointId === endpoint.id;
                         const isSaving = savingEndpointId === endpoint.id;
                         const isAdopting = adoptingEndpointId === endpoint.id;
+                        const isEditingSecret =
+                          editingSecret?.endpointId === endpoint.id;
+                        const isSavingSecret =
+                          savingSecretEndpointId === endpoint.id;
                         return (
                           <li
                             key={endpoint.id}
@@ -401,6 +471,23 @@ export function SupplierPage() {
                                       />
                                       {t("suppliers.editUrl")}
                                     </Button>
+                                    {/* 「换密钥」：就地输入新密钥，一把换掉这个端点下所有 app 的 */}
+                                    {!isEditingSecret && (
+                                      <Button
+                                        type="button"
+                                        variant="neutral"
+                                        size="compact"
+                                        onClick={() =>
+                                          startEditingSecret(endpoint)
+                                        }
+                                      >
+                                        <KeyRound
+                                          aria-hidden="true"
+                                          className="h-3.5 w-3.5"
+                                        />
+                                        {t("suppliers.changeSecret")}
+                                      </Button>
+                                    )}
                                     {/* 「采用到…」：把这家端点一键接进某个 agent，key 从网关读 */}
                                     <DropdownMenu>
                                       <DropdownMenuTrigger asChild>
@@ -447,6 +534,104 @@ export function SupplierPage() {
                                 )}
                               </div>
                             </div>
+
+                            {/* 换密钥就地编辑器：只收新值，界面不显示也没拿到过旧密钥 */}
+                            {isEditingSecret && editingSecret && (
+                              <div className="mt-2 flex min-w-0 items-center gap-2">
+                                <div className="relative min-w-0 flex-1">
+                                  <Input
+                                    autoFocus
+                                    type={
+                                      editingSecret.revealed
+                                        ? "text"
+                                        : "password"
+                                    }
+                                    value={editingSecret.value}
+                                    disabled={isSavingSecret}
+                                    aria-label={t("suppliers.secretLabel")}
+                                    placeholder={t(
+                                      "suppliers.secretPlaceholder",
+                                    )}
+                                    className="h-7 pe-8 font-mono text-caption"
+                                    onChange={(event) =>
+                                      setEditingSecret({
+                                        endpointId: endpoint.id,
+                                        value: event.target.value,
+                                        revealed: editingSecret.revealed,
+                                      })
+                                    }
+                                    onKeyDown={(event) => {
+                                      if (event.key === "Enter") {
+                                        event.preventDefault();
+                                        void saveSecret(endpoint);
+                                      } else if (event.key === "Escape") {
+                                        event.preventDefault();
+                                        cancelEditingSecret();
+                                      }
+                                    }}
+                                  />
+                                  {editingSecret.value && (
+                                    <button
+                                      type="button"
+                                      disabled={isSavingSecret}
+                                      aria-label={
+                                        editingSecret.revealed
+                                          ? t("apiKeyInput.hide")
+                                          : t("apiKeyInput.show")
+                                      }
+                                      className="absolute inset-y-0 end-0 flex items-center pe-2 text-fg-3 transition-colors hover:text-fg-1 disabled:cursor-not-allowed disabled:opacity-50"
+                                      onClick={() =>
+                                        setEditingSecret((previous) =>
+                                          previous
+                                            ? {
+                                                ...previous,
+                                                revealed: !previous.revealed,
+                                              }
+                                            : previous,
+                                        )
+                                      }
+                                    >
+                                      {editingSecret.revealed ? (
+                                        <EyeOff
+                                          aria-hidden="true"
+                                          className="h-3.5 w-3.5"
+                                        />
+                                      ) : (
+                                        <Eye
+                                          aria-hidden="true"
+                                          className="h-3.5 w-3.5"
+                                        />
+                                      )}
+                                    </button>
+                                  )}
+                                </div>
+                                <Button
+                                  type="button"
+                                  variant="solid"
+                                  size="compact"
+                                  disabled={isSavingSecret}
+                                  aria-busy={isSavingSecret}
+                                  onClick={() => void saveSecret(endpoint)}
+                                >
+                                  {isSavingSecret && (
+                                    <Loader2
+                                      aria-hidden="true"
+                                      className="h-3.5 w-3.5 animate-spin"
+                                    />
+                                  )}
+                                  {t("common.save")}
+                                </Button>
+                                <Button
+                                  type="button"
+                                  variant="neutral"
+                                  size="compact"
+                                  disabled={isSavingSecret}
+                                  onClick={cancelEditingSecret}
+                                >
+                                  {t("common.cancel")}
+                                </Button>
+                              </div>
+                            )}
                           </li>
                         );
                       })}
