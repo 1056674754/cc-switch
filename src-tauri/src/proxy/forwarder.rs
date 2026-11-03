@@ -521,7 +521,7 @@ impl RequestForwarder {
         if used_half_open_permit {
             if let Err(e) = self
                 .router
-                .record_result(provider_id, app_type, true, true, None)
+                .record_result(provider_id, app_type, true, true, None, None)
                 .await
             {
                 log::warn!(
@@ -536,7 +536,7 @@ impl RequestForwarder {
         let app_type = app_type.to_string();
         tokio::spawn(async move {
             if let Err(e) = router
-                .record_result(&provider_id, &app_type, false, true, None)
+                .record_result(&provider_id, &app_type, false, true, None, None)
                 .await
             {
                 log::warn!(
@@ -688,6 +688,7 @@ impl RequestForwarder {
                 used_half_open_permit,
                 false,
                 Some(error.to_string()),
+                Some(crate::proxy::provider_router::classify_failure(error)),
             )
             .await;
         self.status.write().await.last_error = Some(last_error);
@@ -8278,7 +8279,7 @@ mod tests {
                 for _ in 0..20 {
                     let _ = fwd
                         .router
-                        .record_result(id, "claude", false, false, Some("seed".into()))
+                        .record_result(id, "claude", false, false, Some("seed".into()), None)
                         .await;
                 }
             }

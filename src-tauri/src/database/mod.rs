@@ -52,7 +52,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 24;
+pub(crate) const SCHEMA_VERSION: i32 = 25;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -61,6 +61,8 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
 }
 
 pub(crate) use pool::ConnectionPool;
+/// provider → 网关级上游绑定（熔断键 + host），供代理层使用
+pub(crate) use dao::providers::UpstreamBinding;
 
 /// 安全地获取一条数据库连接，避免 unwrap panic
 macro_rules! lock_conn {

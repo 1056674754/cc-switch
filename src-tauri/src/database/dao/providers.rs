@@ -3,7 +3,73 @@ use crate::error::AppError;
 use crate::provider::{Provider, ProviderMeta};
 use indexmap::IndexMap;
 use rusqlite::{params, OptionalExtension};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
+
+/// provider 到网关级上游的绑定结果。
+///
+/// 熔断需要两个粒度：**凭证级**（`circuit_key`，管 401/429/配额）和
+/// **host 级**（`host`，管 DNS/连接/TLS/5xx/超时）。
+#[derive(Debug, Clone)]
+pub struct UpstreamBinding {
+    /// `up:{upstream_id}:{protocol}:{密钥指纹}`
+    pub circuit_key: String,
+    /// 上游 host；无显式 URL（官方托管 / 本地未填）时为空串，此时不参与 host 级熔断
+    pub host: String,
+}
+
+/// 鉴权字段名判定：`env` / `options` 里命中这些后缀的才参与指纹计算。
+fn is_credential_field(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    ["TOKEN", "API_KEY", "APIKEY", "AUTH", "KEY"]
+        .iter()
+        .any(|suffix| upper.ends_with(suffix))
+}
+
+/// 由 provider 的 `settings_config` 计算密钥指纹。
+///
+/// 为什么需要：同一个上游下不同 provider 可能用**不同**的 key（实测 `api.kimi.com`
+/// 有 2 把、`www.omnai.xyz` 有 3 把）。若熔断键只看 `(上游, 协议)`，一把 key 配额耗尽
+/// 会把用另一把 key 的 agent 一起熔断——属于误伤。
+///
+/// 只输出指纹：不落库、不打印、不可逆。
+fn credential_fingerprint(config: &serde_json::Value) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for scope in ["env", "options"] {
+        let Some(object) = config.get(scope).and_then(|value| value.as_object()) else {
+            continue;
+        };
+        for (name, value) in object {
+            if !is_credential_field(name) {
+                continue;
+            }
+            if let Some(text) = value.as_str() {
+                let text = text.trim();
+                if !text.is_empty() {
+                    // 只收「值」不收字段名：同一把 key 在不同 app 里可能分别存在
+                    // `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` / `options.apiKey`，
+                    // 它们是同一个凭证，不该因为字段名不同被拆成两个熔断器。
+                    parts.push(text.to_string());
+                }
+            }
+        }
+    }
+    for name in ["apiKey", "api_key"] {
+        if let Some(text) = config.get(name).and_then(|value| value.as_str()) {
+            let text = text.trim();
+            if !text.is_empty() {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    if parts.is_empty() {
+        // 本地推理服务（LM Studio 等）通常无鉴权；同 host 同协议本就该归一组
+        return "nokey".to_string();
+    }
+    parts.sort();
+    let digest = Sha256::digest(parts.join("\u{1f}").as_bytes());
+    digest[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
 
 type OmoProviderRow = (
     String,
@@ -739,6 +805,79 @@ impl Database {
             ids.insert(row.map_err(|e| AppError::Database(e.to_string()))?);
         }
         Ok(ids)
+    }
+
+    /// 按 app 取「provider_id → 网关级熔断键」映射。
+    ///
+    /// 键格式 `up:{upstream_id}:{protocol}:{密钥指纹}`，三段缺一不可：
+    ///
+    /// - `upstream_id`：同一网关在不同 app 下只算一个上游（改造的核心目的）；
+    /// - `protocol`：实测同一 host 会分裂成 anthropic / openai_chat / openai_responses
+    ///   多个端点，一条路径坏掉不代表其他路径坏掉；
+    /// - **密钥指纹**：同一上游下的 provider 可能用不同的 key（实测 `api.kimi.com`
+    ///   有 2 把、`www.omnai.xyz` 有 3 把）。少了这一段，一把 key 配额耗尽会把
+    ///   用另一把 key 的 agent 一起熔断——那是误伤，不是共享。
+    ///
+    /// 没有绑定的 provider（迁移后新建、或迁移被跳过）不出现在返回值里，调用方回落到旧键。
+    pub fn get_provider_upstream_keys(
+        &self,
+        app_type: &str,
+    ) -> Result<HashMap<String, UpstreamBinding>, AppError> {
+        let conn = lock_conn!(self.conn);
+        // 表不存在（未跑过 v25 迁移的库）时返回空映射，绝不因此让路由失败
+        let has_bindings: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master
+                               WHERE type = 'table' AND name = 'provider_bindings')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        if !has_bindings {
+            return Ok(HashMap::new());
+        }
+
+        let mut stmt = conn
+            .prepare(
+                "SELECT b.provider_id, e.upstream_id, e.protocol, u.host, p.settings_config
+                 FROM provider_bindings b
+                 JOIN upstream_endpoints e ON e.id = b.endpoint_id
+                 JOIN upstreams u ON u.id = e.upstream_id
+                 LEFT JOIN providers p
+                        ON p.id = b.provider_id AND p.app_type = b.app_type
+                 WHERE b.app_type = ?1",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map(params![app_type], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        let mut keys = HashMap::new();
+        for row in rows {
+            let (provider_id, upstream_id, protocol, host, settings_config) =
+                row.map_err(|e| AppError::Database(e.to_string()))?;
+            let fingerprint = settings_config
+                .as_deref()
+                .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
+                .map(|config| credential_fingerprint(&config))
+                .unwrap_or_else(|| "nokey".to_string());
+            keys.insert(
+                provider_id,
+                UpstreamBinding {
+                    circuit_key: format!("up:{upstream_id}:{protocol}:{fingerprint}"),
+                    host,
+                },
+            );
+        }
+        Ok(keys)
     }
 
     /// 判断指定 app 下是否已存在任意 provider。

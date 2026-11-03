@@ -3,14 +3,95 @@
 //! 负责选择和管理代理目标供应商，实现智能故障转移
 
 use crate::app_config::AppType;
-use crate::database::Database;
+use crate::database::{Database, UpstreamBinding};
 use crate::error::AppError;
 use crate::provider::Provider;
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
+
+/// 失败分类——决定这次失败该记到哪个粒度上。
+///
+/// 用户的原话：「要区分不同的挂了的情况」。区别在于**影响范围**：
+///
+/// | 失败类型 | 影响范围 | 记录到 |
+/// |---|---|---|
+/// | DNS / 连接 / TLS / 超时 | 整个 host | host 级 + 凭证级 |
+/// | 5xx | 整个 host（上游自己坏了） | host 级 + 凭证级 |
+/// | 401/402/403/429 | 只有这把 key | 仅凭证级 |
+/// | 4xx 其余、模型不可用 | 只有这条路径 | 仅凭证级 |
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FailureKind {
+    /// 连不上：DNS/连接/TLS/超时
+    Transport,
+    /// 上游 5xx
+    ServerError,
+    /// 鉴权或限流：只影响这一把 key
+    Credential,
+    /// 请求本身的问题：只影响这条路径
+    Request,
+}
+
+impl FailureKind {
+    /// 该失败是否说明**整个 host** 不可用（只有这类才污染 host 级熔断）
+    pub fn affects_host(self) -> bool {
+        matches!(self, Self::Transport | Self::ServerError)
+    }
+}
+
+/// 从 `ProxyError` 归类失败。与 forwarder 里「本家出了问题 → 换下一家」的判定保持一致。
+pub fn classify_failure(error: &crate::proxy::error::ProxyError) -> FailureKind {
+    use crate::proxy::error::ProxyError;
+    match error {
+        ProxyError::Timeout(_) | ProxyError::ForwardFailed(_) => FailureKind::Transport,
+        ProxyError::UpstreamError { status, .. } => match *status {
+            401 | 402 | 403 | 429 => FailureKind::Credential,
+            500..=599 => FailureKind::ServerError,
+            _ => FailureKind::Request,
+        },
+        _ => FailureKind::Request,
+    }
+}
+
+/// 熔断键里「网关级上游」生效的范围（灰度开关，环境变量 `CCS_CIRCUIT_KEY_MODE`）。
+///
+/// - `off`：完全旧行为，`{app_type}:{provider_id}`，不同 app 各自熔断；
+/// - `shadow`（默认）：**仍用旧键**，只在启动时打一份「哪些跨 app 的键会合并」报告；
+/// - `on`：改用 `up:{upstream_id}:{protocol}`，同一上游同一协议跨 app 共享健康状态。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CircuitKeyMode {
+    Off,
+    Shadow,
+    On,
+}
+
+impl CircuitKeyMode {
+    fn from_env() -> Self {
+        match std::env::var("CCS_CIRCUIT_KEY_MODE")
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "on" | "upstream" | "1" | "true" => Self::On,
+            "off" | "legacy" | "0" | "false" => Self::Off,
+            _ => Self::Shadow,
+        }
+    }
+}
+
+/// `provider_id → 网关级键` 的按 app 缓存；provider 增删改后最迟 [`UPSTREAM_KEY_TTL`] 生效。
+struct UpstreamKeyEntry {
+    loaded_at: Instant,
+    keys: HashMap<String, UpstreamBinding>,
+}
+
+/// 缓存有效期。取值权衡：太长则新建 provider 迟迟拿不到网关键（只会回落到旧键，
+/// 不影响正确性，只是少共享一次熔断）；太短则每次请求都查库。
+const UPSTREAM_KEY_TTL: Duration = Duration::from_secs(30);
 
 /// Codex Official requests carry the selected account's native Authorization
 /// header. Reusing that request against another account card would cross the
@@ -24,8 +105,15 @@ pub(crate) fn provider_supports_failover(app_type: &str, provider: &Provider) ->
 pub struct ProviderRouter {
     /// 数据库连接
     db: Arc<Database>,
-    /// 熔断器管理器 - key 格式: "app_type:provider_id"
+    /// 熔断器管理器 - key 见 [`ProviderRouter::circuit_key_for`]
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// 熔断键 → 归属的 app_types。网关级键会被多个 app 共用，
+    /// `update_app_configs` 需要据此判断某个 key 是否与目标 app 相关。
+    circuit_key_apps: Arc<RwLock<HashMap<String, HashSet<String>>>>,
+    /// 网关级键缓存（按 app_type）
+    upstream_keys: Arc<RwLock<HashMap<String, UpstreamKeyEntry>>>,
+    /// 熔断键模式
+    circuit_mode: CircuitKeyMode,
 }
 
 impl ProviderRouter {
@@ -34,8 +122,128 @@ impl ProviderRouter {
         Self {
             db,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            circuit_key_apps: Arc::new(RwLock::new(HashMap::new())),
+            upstream_keys: Arc::new(RwLock::new(HashMap::new())),
+            circuit_mode: CircuitKeyMode::from_env(),
         }
     }
+
+    /// 当前的熔断键模式（供启动日志/诊断使用）
+    pub fn circuit_key_mode(&self) -> CircuitKeyMode {
+        self.circuit_mode
+    }
+
+    /// 解析单个 `(app_type, provider_id)` 的熔断键（凭证级）。
+    ///
+    /// 旧键 `{app_type}:{provider_id}`；网关级键 `up:{upstream_id}:{protocol}:{密钥指纹}`。
+    /// 没有绑定关系时（新库未迁移、迁移后被新建的 provider）回落到旧键。
+    async fn circuit_key_for(&self, app_type: &str, provider_id: &str) -> String {
+        let legacy = format!("{app_type}:{provider_id}");
+        if self.circuit_mode != CircuitKeyMode::On {
+            return legacy;
+        }
+        self.resolve_binding(app_type, provider_id)
+            .await
+            .map(|binding| binding.circuit_key)
+            .unwrap_or(legacy)
+    }
+
+    /// 解析 host 级熔断键。整个网关连不上时该键熔断，跨 key、跨 app 一起生效。
+    ///
+    /// 没有显式 URL 的 provider（官方托管）返回 `None`，不参与 host 级熔断。
+    async fn host_key_for(&self, app_type: &str, provider_id: &str) -> Option<String> {
+        if self.circuit_mode != CircuitKeyMode::On {
+            return None;
+        }
+        self.resolve_binding(app_type, provider_id)
+            .await
+            .map(|binding| binding.host)
+            .filter(|host| !host.is_empty())
+            .map(|host| format!("host:{host}"))
+    }
+
+    /// 查缓存/数据库得到 provider 的上游绑定（熔断键 + host）
+    async fn resolve_binding(&self, app_type: &str, provider_id: &str) -> Option<UpstreamBinding> {
+        {
+            let cache = self.upstream_keys.read().await;
+            if let Some(entry) = cache.get(app_type) {
+                if entry.loaded_at.elapsed() < UPSTREAM_KEY_TTL {
+                    return entry.keys.get(provider_id).cloned();
+                }
+            }
+        }
+
+        // 同步查库；此处不持有任何异步锁
+        let loaded = match self.db.get_provider_upstream_keys(app_type) {
+            Ok(keys) => keys,
+            Err(err) => {
+                log::warn!("[{app_type}] 读取上游绑定失败，熔断键回落旧格式: {err}");
+                return None;
+            }
+        };
+
+        let mut cache = self.upstream_keys.write().await;
+        cache.insert(
+            app_type.to_string(),
+            UpstreamKeyEntry {
+                loaded_at: Instant::now(),
+                keys: loaded.clone(),
+            },
+        );
+        loaded.get(provider_id).cloned()
+    }
+
+    /// 启动诊断：报告「哪些旧键会因为网关级改造而合并」。
+    ///
+    /// 只在 `shadow` / `on` 下打日志。合并项 > 0 说明确实存在跨 app 的重复上游——
+    /// 也就是改造前每个 app 各自重试一遍的那批。
+    pub async fn log_upstream_key_diagnostics(&self) {
+        if self.circuit_mode == CircuitKeyMode::Off {
+            return;
+        }
+        let mut by_upstream: HashMap<String, Vec<String>> = HashMap::new();
+        let mut total = 0usize;
+        for app in [
+            "claude",
+            "claude-desktop",
+            "codex",
+            "gemini",
+            "kimi",
+            "opencode",
+            "omp",
+            "hermes",
+        ] {
+            let Ok(keys) = self.db.get_provider_upstream_keys(app) else {
+                continue;
+            };
+            for (provider_id, upstream_key) in keys {
+                total += 1;
+                by_upstream
+                    .entry(upstream_key.circuit_key)
+                    .or_default()
+                    .push(format!("{app}:{provider_id}"));
+            }
+        }
+
+        let merged: Vec<_> = by_upstream
+            .iter()
+            .filter(|(_, members)| members.len() > 1)
+            .collect();
+        let merged_keys = merged.iter().map(|(_, m)| m.len()).sum::<usize>();
+
+        log::info!(
+            "熔断键模式 {:?}：{} 条 provider 绑定，{} 个网关级键，其中 {} 个键由多个 app 共享（覆盖 {} 条绑定）",
+            self.circuit_mode,
+            total,
+            by_upstream.len(),
+            merged.len(),
+            merged_keys
+        );
+        for (upstream_key, members) in merged {
+            log::info!("  {upstream_key} ← {}", members.join(", "));
+        }
+    }
+
 
     /// 选择可用的供应商（支持故障转移）
     ///
@@ -105,10 +313,23 @@ impl ProviderRouter {
                 }
                 total_providers += 1;
 
-                let circuit_key = format!("{app_type}:{}", provider.id);
-                let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+                let circuit_key = self.circuit_key_for(app_type, &provider.id).await;
+                let breaker = self
+                    .get_or_create_circuit_breaker(&circuit_key, app_type)
+                    .await;
 
-                if breaker.is_available().await {
+                // host 级：整个网关连不上时跨 key、跨 app 一起跳过
+                let host_available = match self.host_key_for(app_type, &provider.id).await {
+                    Some(host_key) => {
+                        self.get_or_create_circuit_breaker(&host_key, app_type)
+                            .await
+                            .is_available()
+                            .await
+                    }
+                    None => true,
+                };
+
+                if breaker.is_available().await && host_available {
                     result.push(provider);
                 } else {
                     circuit_open_count += 1;
@@ -144,12 +365,17 @@ impl ProviderRouter {
     /// 注意：调用方必须在请求结束后通过 `record_result()` 释放 HalfOpen 名额，
     /// 否则会导致该 Provider 长时间无法进入探测状态。
     pub async fn allow_provider_request(&self, provider_id: &str, app_type: &str) -> AllowResult {
-        let circuit_key = format!("{app_type}:{provider_id}");
-        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        let circuit_key = self.circuit_key_for(app_type, provider_id).await;
+        let breaker = self
+            .get_or_create_circuit_breaker(&circuit_key, app_type)
+            .await;
         breaker.allow_request().await
     }
 
     /// 记录供应商请求结果
+    ///
+    /// `failure_kind` 决定这次失败波及多广：只有 [`FailureKind::affects_host`] 的失败
+    /// 才会污染 host 级熔断。`None` 视为与成功无关的未知失败（只记凭证级）。
     pub async fn record_result(
         &self,
         provider_id: &str,
@@ -157,6 +383,7 @@ impl ProviderRouter {
         used_half_open_permit: bool,
         success: bool,
         error_msg: Option<String>,
+        failure_kind: Option<FailureKind>,
     ) -> Result<(), AppError> {
         // 1. 按应用独立获取熔断器配置
         let failure_threshold = match self.db.get_proxy_config_for_app(app_type).await {
@@ -164,14 +391,36 @@ impl ProviderRouter {
             Err(_) => 5, // 默认值
         };
 
-        // 2. 更新熔断器状态
-        let circuit_key = format!("{app_type}:{provider_id}");
-        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        // 2. 更新凭证级熔断器
+        let circuit_key = self.circuit_key_for(app_type, provider_id).await;
+        let breaker = self
+            .get_or_create_circuit_breaker(&circuit_key, app_type)
+            .await;
 
         if success {
             breaker.record_success(used_half_open_permit).await;
         } else {
             breaker.record_failure(used_half_open_permit).await;
+        }
+
+        // 3. 更新 host 级熔断器
+        //
+        // host 级不参与 HalfOpen 许可协议（恒定传 false）：`is_available()` 在 HalfOpen
+        // 返回 true，`record_*(false)` 只计数不碰许可，因此它能自行超时恢复。
+        if let Some(host_key) = self.host_key_for(app_type, provider_id).await {
+            let should_touch = match (success, failure_kind) {
+                (true, _) => true,
+                (false, Some(kind)) => kind.affects_host(),
+                (false, None) => false,
+            };
+            if should_touch {
+                let host_breaker = self.get_or_create_circuit_breaker(&host_key, app_type).await;
+                if success {
+                    host_breaker.record_success(false).await;
+                } else {
+                    host_breaker.record_failure(false).await;
+                }
+            }
         }
 
         // 3. 更新数据库健康状态（使用配置的阈值）
@@ -198,8 +447,12 @@ impl ProviderRouter {
 
     /// 重置指定供应商的熔断器
     pub async fn reset_provider_breaker(&self, provider_id: &str, app_type: &str) {
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = self.circuit_key_for(app_type, provider_id).await;
         self.reset_circuit_breaker(&circuit_key).await;
+        // host 级也要一起复位，否则用户点了恢复、请求仍被 host 熔断挡下
+        if let Some(host_key) = self.host_key_for(app_type, provider_id).await {
+            self.reset_circuit_breaker(&host_key).await;
+        }
     }
 
     /// 仅释放 HalfOpen permit，不影响健康统计（neutral 接口）
@@ -215,8 +468,10 @@ impl ProviderRouter {
         if !used_half_open_permit {
             return;
         }
-        let circuit_key = format!("{app_type}:{provider_id}");
-        let breaker = self.get_or_create_circuit_breaker(&circuit_key).await;
+        let circuit_key = self.circuit_key_for(app_type, provider_id).await;
+        let breaker = self
+            .get_or_create_circuit_breaker(&circuit_key, app_type)
+            .await;
         breaker.release_half_open_permit();
     }
 
@@ -229,11 +484,19 @@ impl ProviderRouter {
     }
 
     /// 更新指定应用已创建熔断器的配置（热更新）
+    ///
+    /// 网关级键可能被多个 app 共用，因此不能靠 key 前缀判断归属，
+    /// 改用 `circuit_key_apps` 记录的真实归属关系。
     pub async fn update_app_configs(&self, app_type: &str, config: CircuitBreakerConfig) {
-        let prefix = format!("{app_type}:");
+        let key_apps = self.circuit_key_apps.read().await;
         let breakers = self.circuit_breakers.read().await;
         for (key, breaker) in breakers.iter() {
-            if key.starts_with(&prefix) {
+            let belongs = match key_apps.get(key) {
+                Some(apps) => apps.contains(app_type),
+                // 归属未知（理论上不会发生）时按旧规则判断，避免漏更新
+                None => key.starts_with(&format!("{app_type}:")),
+            };
+            if belongs {
                 breaker.update_config(config.clone()).await;
             }
         }
@@ -246,7 +509,7 @@ impl ProviderRouter {
         provider_id: &str,
         app_type: &str,
     ) -> Option<crate::proxy::circuit_breaker::CircuitBreakerStats> {
-        let circuit_key = format!("{app_type}:{provider_id}");
+        let circuit_key = self.circuit_key_for(app_type, provider_id).await;
         let breakers = self.circuit_breakers.read().await;
 
         if let Some(breaker) = breakers.get(&circuit_key) {
@@ -257,12 +520,18 @@ impl ProviderRouter {
     }
 
     /// 获取或创建熔断器
-    async fn get_or_create_circuit_breaker(&self, key: &str) -> Arc<CircuitBreaker> {
+    ///
+    /// `app_type` 必须由调用方显式传入：网关级键 `up:{upstream_id}:{protocol}` 不再
+    /// 以 app_type 开头，无法从 key 反推（旧实现靠 `split(':')`，换键后会静默取错配置）。
+    async fn get_or_create_circuit_breaker(&self, key: &str, app_type: &str) -> Arc<CircuitBreaker> {
         // 先尝试读锁获取
         {
             let breakers = self.circuit_breakers.read().await;
             if let Some(breaker) = breakers.get(key) {
-                return breaker.clone();
+                let breaker = breaker.clone();
+                drop(breakers);
+                self.register_key_app(key, app_type).await;
+                return breaker;
             }
         }
 
@@ -271,11 +540,11 @@ impl ProviderRouter {
 
         // 双重检查，防止竞争条件
         if let Some(breaker) = breakers.get(key) {
-            return breaker.clone();
+            let breaker = breaker.clone();
+            drop(breakers);
+            self.register_key_app(key, app_type).await;
+            return breaker;
         }
-
-        // 从 key 中提取 app_type (格式: "app_type:provider_id")
-        let app_type = key.split(':').next().unwrap_or("claude");
 
         // 按应用独立读取熔断器配置
         let config = match self.db.get_proxy_config_for_app(app_type).await {
@@ -291,14 +560,26 @@ impl ProviderRouter {
 
         let breaker = Arc::new(CircuitBreaker::new(config));
         breakers.insert(key.to_string(), breaker.clone());
+        drop(breakers);
+        self.register_key_app(key, app_type).await;
 
         breaker
+    }
+
+    /// 记录某个熔断键被哪个 app 使用（网关级键会被多个 app 共用）
+    async fn register_key_app(&self, key: &str, app_type: &str) {
+        let mut key_apps = self.circuit_key_apps.write().await;
+        key_apps
+            .entry(key.to_string())
+            .or_default()
+            .insert(app_type.to_string());
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::database::lock_conn;
     use crate::database::Database;
     use crate::provider::{AuthBinding, AuthBindingSource, ProviderMeta};
     use serde_json::json;
@@ -381,8 +662,232 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         let router = ProviderRouter::new(db);
 
-        let breaker = router.get_or_create_circuit_breaker("claude:test").await;
+        let breaker = router
+            .get_or_create_circuit_breaker("claude:test", "claude")
+            .await;
         assert!(breaker.allow_request().await.allowed);
+    }
+
+    /// 造一个「两个 app 绑定到同一上游端点」的库，用于验证熔断键合并
+    fn seed_shared_upstream(db: &Database) -> Result<(), AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.execute_batch(
+            "INSERT INTO upstreams (id, name, host, created_at)
+                VALUES ('up-ai.ctaigw.cn', 'CTYun', 'ai.ctaigw.cn', 1);
+             INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
+                VALUES ('ep-a', 'up-ai.ctaigw.cn', 'anthropic', 'https://ai.ctaigw.cn/v1', 1);
+             INSERT INTO provider_bindings
+                (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
+                VALUES ('claude', 'shared', 'ep-a', 0, 0, 0, 1),
+                       ('claude-desktop', 'shared', 'ep-a', 0, 0, 0, 1);",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn gateway_circuit_key_is_shared_across_apps() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        seed_shared_upstream(&db).unwrap();
+
+        let mut router = ProviderRouter::new(db.clone());
+        router.circuit_mode = CircuitKeyMode::On;
+
+        let claude_key = router.circuit_key_for("claude", "shared").await;
+        let desktop_key = router.circuit_key_for("claude-desktop", "shared").await;
+
+        assert!(
+            claude_key.starts_with("up:up-ai.ctaigw.cn:anthropic:"),
+            "实际键: {claude_key}"
+        );
+        assert_eq!(claude_key, desktop_key, "同一上游同一协议必须共用熔断器");
+
+        // 关键：两个 app 拿到的必须是同一个实例，否则「共享健康状态」只是名字好听
+        let a = router
+            .get_or_create_circuit_breaker(&claude_key, "claude")
+            .await;
+        let b = router
+            .get_or_create_circuit_breaker(&desktop_key, "claude-desktop")
+            .await;
+        assert!(Arc::ptr_eq(&a, &b), "跨 app 必须复用同一熔断器实例");
+
+        // 没有绑定的 provider 回落旧键：新库、迁移后新建的 provider 都不会因此失效
+        assert_eq!(
+            router.circuit_key_for("claude", "brand-new").await,
+            "claude:brand-new"
+        );
+    }
+
+    /// 造一个「两个 app 在同一 host、但用不同 key」的库
+    fn seed_same_host_two_credentials(db: &Database) -> Result<(), AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.execute_batch(
+            "INSERT INTO upstreams (id, name, host, created_at)
+                VALUES ('up-kimi', 'Kimi', 'api.kimi.com', 1);
+             INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
+                VALUES ('ep-kimi', 'up-kimi', 'anthropic', 'https://api.kimi.com/coding', 1);
+             INSERT INTO providers (id, app_type, name, settings_config, created_at) VALUES
+                ('p-a', 'claude', 'A',
+                 '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
+                ('p-b', 'claude-desktop', 'B',
+                 '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);
+             INSERT INTO provider_bindings
+                (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
+                VALUES ('claude', 'p-a', 'ep-kimi', 0, 0, 0, 1),
+                       ('claude-desktop', 'p-b', 'ep-kimi', 0, 0, 0, 1);",
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn transport_failure_trips_host_breaker_for_other_app() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        seed_same_host_two_credentials(&db)?;
+
+        let mut router = ProviderRouter::new(db.clone());
+        router.circuit_mode = CircuitKeyMode::On;
+
+        // 两个 app 在同一个 host，host 级键必须相同（凭证不同不影响 host 级）
+        let host_a = router.host_key_for("claude", "p-a").await;
+        let host_b = router.host_key_for("claude-desktop", "p-b").await;
+        assert_eq!(host_a, host_b, "同一 host 必须共用 host 级熔断器");
+        assert_eq!(host_a.as_deref(), Some("host:api.kimi.com"));
+
+        // claude 侧连不上（Transport）若干次 → host 级熔断
+        for _ in 0..8 {
+            router
+                .record_result(
+                    "p-a",
+                    "claude",
+                    false,
+                    false,
+                    Some("connect refused".into()),
+                    Some(FailureKind::Transport),
+                )
+                .await?;
+        }
+
+        let host_breaker = router
+            .get_or_create_circuit_breaker(host_a.as_ref().unwrap(), "claude")
+            .await;
+        assert!(
+            !host_breaker.is_available().await,
+            "host 已熔断：另一个 app 不该再去撞同一个挂掉的网关"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn credential_failure_does_not_trip_host_breaker() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        seed_same_host_two_credentials(&db)?;
+
+        let mut router = ProviderRouter::new(db.clone());
+        router.circuit_mode = CircuitKeyMode::On;
+
+        // claude 侧 key 失效（401/429）若干次
+        for _ in 0..8 {
+            router
+                .record_result(
+                    "p-a",
+                    "claude",
+                    false,
+                    false,
+                    Some("401 unauthorized".into()),
+                    Some(FailureKind::Credential),
+                )
+                .await?;
+        }
+
+        // 凭证级熔断，但 host 级必须干净——另一把 key 完全无辜
+        let cred_key = router.circuit_key_for("claude", "p-a").await;
+        let cred_breaker = router
+            .get_or_create_circuit_breaker(&cred_key, "claude")
+            .await;
+        assert!(!cred_breaker.is_available().await, "这把 key 应该熔断");
+
+        let host_key = router.host_key_for("claude-desktop", "p-b").await.unwrap();
+        let host_breaker = router
+            .get_or_create_circuit_breaker(&host_key, "claude-desktop")
+            .await;
+        assert!(
+            host_breaker.is_available().await,
+            "key 配额问题不代表网关挂了：另一把 key 不得被牵连"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn different_keys_on_same_upstream_do_not_share_breaker() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute_batch(
+                "INSERT INTO upstreams (id, name, host, created_at)
+                    VALUES ('up-kimi', 'Kimi', 'api.kimi.com', 1);
+                 INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
+                    VALUES ('ep-kimi', 'up-kimi', 'anthropic', 'https://api.kimi.com/coding', 1);
+                 INSERT INTO providers (id, app_type, name, settings_config, created_at)
+                    VALUES ('kimi-coding', 'claude', 'Kimi For Coding',
+                            '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
+                           ('kimi-coding', 'claude-desktop', 'Kimi For Coding',
+                            '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);
+                 INSERT INTO provider_bindings
+                    (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
+                    VALUES ('claude', 'kimi-coding', 'ep-kimi', 0, 0, 0, 1),
+                           ('claude-desktop', 'kimi-coding', 'ep-kimi', 0, 0, 0, 1);",
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        let mut router = ProviderRouter::new(db.clone());
+        router.circuit_mode = CircuitKeyMode::On;
+
+        let a = router.circuit_key_for("claude", "kimi-coding").await;
+        let b = router.circuit_key_for("claude-desktop", "kimi-coding").await;
+
+        assert!(a.starts_with("up:up-kimi:anthropic:"), "实际键: {a}");
+        assert_ne!(
+            a, b,
+            "同一上游但 key 不同：一把 key 配额耗尽不得把另一把也熔断"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn legacy_mode_keeps_per_app_isolation() {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        seed_shared_upstream(&db).unwrap();
+
+        let mut router = ProviderRouter::new(db.clone());
+        router.circuit_mode = CircuitKeyMode::Off;
+
+        let claude_key = router.circuit_key_for("claude", "shared").await;
+        let desktop_key = router.circuit_key_for("claude-desktop", "shared").await;
+        assert_eq!(claude_key, "claude:shared");
+        assert_ne!(
+            claude_key, desktop_key,
+            "旧键按 app 隔离——这正是改造前同一网关被两个 agent 各重试一遍的原因"
+        );
+
+        let a = router
+            .get_or_create_circuit_breaker(&claude_key, "claude")
+            .await;
+        let b = router
+            .get_or_create_circuit_breaker(&desktop_key, "claude-desktop")
+            .await;
+        assert!(!Arc::ptr_eq(&a, &b));
     }
 
     #[tokio::test]
@@ -577,7 +1082,7 @@ mod tests {
         let router = ProviderRouter::new(db.clone());
 
         router
-            .record_result("b", "claude", false, false, Some("fail".to_string()))
+            .record_result("b", "claude", false, false, Some("fail".to_string()), None)
             .await
             .unwrap();
 
@@ -616,7 +1121,7 @@ mod tests {
 
         // 触发熔断：1 次失败
         router
-            .record_result("a", "claude", false, false, Some("fail".to_string()))
+            .record_result("a", "claude", false, false, Some("fail".to_string()), None)
             .await
             .unwrap();
 

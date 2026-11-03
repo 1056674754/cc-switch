@@ -444,6 +444,10 @@ impl Database {
             [],
         );
 
+        // 网关级上游四张表（v25）。建在 create_tables 里，保证全新安装的库
+        // 与升级后的库形状一致；迁移里也会调用同一份 DDL（IF NOT EXISTS）。
+        Self::create_upstream_tables(conn)?;
+
         Ok(())
     }
 
@@ -647,6 +651,13 @@ impl Database {
                             )?;
                         }
                         Self::set_user_version(conn, 24)?;
+                    }
+                    24 => {
+                        log::info!(
+                            "迁移数据库从 v24 到 v25（网关级上游：upstreams / upstream_endpoints / upstream_credentials / provider_bindings）"
+                        );
+                        Self::migrate_v24_to_v25(conn)?;
+                        Self::set_user_version(conn, 25)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1695,6 +1706,413 @@ impl Database {
                 "INTEGER",
             )?;
         }
+        Ok(())
+    }
+
+    // ------------------------------------------------------------------
+    // v24 -> v25：网关级上游模型（Upstream / Endpoint / Credential / Binding）
+    // ------------------------------------------------------------------
+    //
+    // 背景：`providers` 的主键是 `(id, app_type)`，导致同一个上游必须为每个 app
+    // 重复录入一行（实测 40 行只对应 13 个 host，其中 `ai.ctaigw.cn` 一个上游被
+    // 记成 5 个不同名字）。本迁移把上游的归属从「agent」提升到「网关」：
+    //
+    //     Upstream(host) -> Endpoint(upstream, protocol, base_url)
+    //                    -> Credential(per app 的来源凭证，暂为占位)
+    //                    -> Binding(app_type, provider_id)
+    //
+    // 三条硬约束，避免破坏现有功能：
+    //   1. **只新增表，不改不删 `providers` 任何行**——旧代码路径完全不受影响；
+    //   2. 身份键是 `(host, protocol)` 而非 host：实测 `ai.ctaigw.cn` 同时承载
+    //      anthropic / openai_chat / openai_responses 三种协议，只按 host 合并会
+    //      让代理层选不出正确的转换器；
+    //   3. 凭证**不搬运**（`secret` 留空，仅记录 provider_id 来源），P1 不碰密钥。
+
+    /// 创建网关级上游四张表。全新安装与 v24→v25 迁移共用同一份 DDL。
+    fn create_upstream_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS upstreams (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 host TEXT NOT NULL DEFAULT '',
+                 website_url TEXT,
+                 notes TEXT,
+                 icon TEXT,
+                 icon_color TEXT,
+                 created_at INTEGER NOT NULL
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_upstreams_host
+                 ON upstreams(host) WHERE host <> '';
+
+             CREATE TABLE IF NOT EXISTS upstream_endpoints (
+                 id TEXT PRIMARY KEY,
+                 upstream_id TEXT NOT NULL,
+                 protocol TEXT NOT NULL,
+                 base_url TEXT NOT NULL DEFAULT '',
+                 created_at INTEGER NOT NULL,
+                 FOREIGN KEY (upstream_id) REFERENCES upstreams(id) ON DELETE CASCADE
+             );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_upstream_endpoints_unique
+                 ON upstream_endpoints(upstream_id, protocol, base_url);
+
+             CREATE TABLE IF NOT EXISTS upstream_credentials (
+                 id TEXT PRIMARY KEY,
+                 endpoint_id TEXT NOT NULL,
+                 app_type TEXT NOT NULL,
+                 provider_id TEXT NOT NULL,
+                 secret TEXT,
+                 limits_json TEXT,
+                 cooldown_until INTEGER,
+                 created_at INTEGER NOT NULL,
+                 FOREIGN KEY (endpoint_id) REFERENCES upstream_endpoints(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_upstream_credentials_endpoint
+                 ON upstream_credentials(endpoint_id);
+
+             CREATE TABLE IF NOT EXISTS provider_bindings (
+                 app_type TEXT NOT NULL,
+                 provider_id TEXT NOT NULL,
+                 endpoint_id TEXT NOT NULL,
+                 is_current INTEGER NOT NULL DEFAULT 0,
+                 in_failover_queue INTEGER NOT NULL DEFAULT 0,
+                 sort_index INTEGER,
+                 created_at INTEGER NOT NULL,
+                 PRIMARY KEY (app_type, provider_id),
+                 FOREIGN KEY (endpoint_id) REFERENCES upstream_endpoints(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_provider_bindings_endpoint
+                 ON provider_bindings(endpoint_id);",
+        )
+        .map_err(|e| AppError::Database(format!("创建上游表失败: {e}")))?;
+        Ok(())
+    }
+
+    /// 派生协议标签。默认由 app_type 决定，但 **opencode 的协议写在 `npm` 适配器字段里**，
+    /// 必须按它来——否则会把 `@ai-sdk/anthropic` 的端点误标成 openai_chat（实测该库里有
+    /// 3 条 `@ai-sdk/anthropic`、1 条 `@ai-sdk/alibaba`，与其余 openai-compatible 混用
+    /// 同一批 URL，正是 `(host, protocol)` 才算身份的另一处证据）。
+    fn p1_protocol_for(app_type: &str, config: &serde_json::Value) -> String {
+        if app_type == "opencode" {
+            let npm = config
+                .get("npm")
+                .and_then(|value| value.as_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if npm.contains("anthropic") {
+                return "anthropic".to_string();
+            }
+            if npm.contains("alibaba") {
+                return "alibaba".to_string();
+            }
+            if npm.contains("google") || npm.contains("gemini") {
+                return "gemini_native".to_string();
+            }
+            if npm.contains("openai") {
+                return "openai_chat".to_string();
+            }
+            // 适配器缺失/不认识：保留原始信息，别猜
+            return if npm.is_empty() {
+                "unknown".to_string()
+            } else {
+                format!("opencode:{npm}")
+            };
+        }
+        match app_type {
+            "claude" | "claude-desktop" => "anthropic",
+            "codex" => "openai_responses",
+            "gemini" => "gemini_native",
+            "kimi" => "kimi_managed",
+            "omp" | "hermes" | "pi" | "mcode" | "dsh" | "agy" | "openclaw" => "openai_chat",
+            _ => "unknown",
+        }
+        .to_string()
+    }
+
+    /// 按各 app 的 `settings_config` 形状提取 base_url（形状来自 `provider.rs` 的读法）。
+    fn p1_extract_base_url(config: &serde_json::Value) -> Option<String> {
+        fn text(value: Option<&serde_json::Value>) -> Option<String> {
+            value
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        }
+
+        if let Some(env) = config.get("env") {
+            for key in [
+                "ANTHROPIC_BASE_URL",
+                "OPENAI_BASE_URL",
+                "GEMINI_BASE_URL",
+                "GOOGLE_GEMINI_BASE_URL",
+            ] {
+                if let Some(found) = text(env.get(key)) {
+                    return Some(found);
+                }
+            }
+        }
+        if let Some(options) = config.get("options") {
+            for key in ["baseURL", "baseUrl", "base_url"] {
+                if let Some(found) = text(options.get(key)) {
+                    return Some(found);
+                }
+            }
+        }
+        for key in ["baseUrl", "base_url", "url"] {
+            if let Some(found) = text(config.get(key)) {
+                return Some(found);
+            }
+        }
+        // codex：`config` 是 TOML 文本
+        if let Some(toml_text) = text(config.get("config")) {
+            if let Ok(pattern) = regex::Regex::new(r#"base_url\s*=\s*"([^"]+)""#) {
+                if let Some(captures) = pattern.captures(&toml_text) {
+                    return captures.get(1).map(|m| m.as_str().to_string());
+                }
+            }
+        }
+        if let Some(provider) = config.get("provider") {
+            for key in ["baseUrl", "base_url"] {
+                if let Some(found) = text(provider.get(key)) {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+
+    /// 规范化 base_url，返回 `(host, normalized)`。
+    ///
+    /// 只统一大小写与**尾部斜杠**；不跨路径合并——`/coding` 与 `/coding/v1` 保留为
+    /// 两个端点，因为不同客户端拼路径的方式不同，自动合并会改掉实际请求地址。
+    fn p1_normalize_url(raw: &str) -> Option<(String, String)> {
+        let parsed = url::Url::parse(raw.trim()).ok()?;
+        let scheme = parsed.scheme().to_ascii_lowercase();
+        let host = parsed.host_str()?.to_ascii_lowercase();
+        let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+        let path = parsed.path().trim_end_matches('/').to_string();
+        let normalized = format!("{scheme}://{host}{port}{path}");
+        Some((host, normalized))
+    }
+
+    /// 稳定的短哈希，用于生成确定性 id（同一输入永远得到同一 id，迁移可安全重跑）。
+    fn p1_fnv1a_hex(input: &str) -> String {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in input.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100_0000_01b3);
+        }
+        format!("{hash:016x}")
+    }
+
+    /// v24 -> v25：把按 agent 重复录入的 provider 归一为网关级上游。
+    fn migrate_v24_to_v25(conn: &Connection) -> Result<(), AppError> {
+        Self::create_upstream_tables(conn)?;
+
+        // 缺表或列不齐的库（异常库 / 测试夹具）跳过回填：create_tables 会以完整
+        // 形状建表，而老夹具里的 `providers` 未必有界面上才出现的那些列。
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(());
+        }
+        for required in ["id", "app_type", "name", "settings_config"] {
+            if !Self::has_column(conn, "providers", required)? {
+                log::warn!(
+                    "providers 缺少列 {required}，跳过 v24→v25 上游回填（交由 create_tables 建新表）"
+                );
+                return Ok(());
+            }
+        }
+
+        // 一次性数据修正（2026-11-03 用户确认）：`claude` 侧该行沿用陈旧错名，
+        // 其 base_url 实为天翼云 CTYun 网关，与 `claude-desktop` 侧同名。
+        // 精确匹配三元组，未命中则不动作，非本库不受影响。
+        let _ = conn.execute(
+            "UPDATE providers SET name = 'CTYun'
+             WHERE app_type = 'claude'
+               AND id = 'f829d5c5-8d05-445f-bf45-1976a7a995f7'
+               AND name = 'DeepSeek'",
+            [],
+        );
+
+        struct P1Row {
+            id: String,
+            app_type: String,
+            name: String,
+            config: String,
+            is_current: i64,
+            in_failover: i64,
+            sort_index: Option<i64>,
+        }
+
+        /// 单元格按值取证：缺列时由 SQL 填字面量，脏类型（BLOB/REAL）也不 panic。
+        fn cell_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+            Ok(match row.get_ref(index)? {
+                rusqlite::types::ValueRef::Text(bytes) => {
+                    String::from_utf8_lossy(bytes).into_owned()
+                }
+                rusqlite::types::ValueRef::Blob(bytes) => {
+                    String::from_utf8_lossy(bytes).into_owned()
+                }
+                _ => String::new(),
+            })
+        }
+        fn cell_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
+            Ok(match row.get_ref(index)? {
+                rusqlite::types::ValueRef::Integer(value) => value,
+                rusqlite::types::ValueRef::Real(value) => value as i64,
+                _ => 0,
+            })
+        }
+        fn cell_opt_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<i64>> {
+            Ok(match row.get_ref(index)? {
+                rusqlite::types::ValueRef::Integer(value) => Some(value),
+                rusqlite::types::ValueRef::Real(value) => Some(value as i64),
+                _ => None,
+            })
+        }
+
+        let is_current_expr = if Self::has_column(conn, "providers", "is_current")? {
+            "is_current"
+        } else {
+            "0"
+        };
+        let in_failover_expr = if Self::has_column(conn, "providers", "in_failover_queue")? {
+            "in_failover_queue"
+        } else {
+            "0"
+        };
+        let sort_index_expr = if Self::has_column(conn, "providers", "sort_index")? {
+            "sort_index"
+        } else {
+            "NULL"
+        };
+
+        let rows: Vec<P1Row> = {
+            let mut statement = conn.prepare(&format!(
+                "SELECT id, app_type, name, settings_config, {is_current_expr}, {in_failover_expr}, {sort_index_expr}
+                 FROM providers ORDER BY app_type, name"
+            ))?;
+            let mapped = statement.query_map([], |row| {
+                Ok(P1Row {
+                    id: cell_text(row, 0)?,
+                    app_type: cell_text(row, 1)?,
+                    name: cell_text(row, 2)?,
+                    config: cell_text(row, 3)?,
+                    is_current: cell_int(row, 4)?,
+                    in_failover: cell_int(row, 5)?,
+                    sort_index: cell_opt_int(row, 6)?,
+                })
+            })?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        // 第一遍：确定每个 host 的规范名（current 行优先，否则按 app_type,name 排序取首个）
+        let mut canonical: std::collections::BTreeMap<String, String> = Default::default();
+        let mut resolved: Vec<Option<(String, String)>> = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let config: serde_json::Value =
+                serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
+            let hit =
+                Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw));
+            if let Some((host, _url)) = &hit {
+                let entry = canonical
+                    .entry(host.clone())
+                    .or_insert_with(|| row.name.clone());
+                if row.is_current != 0 {
+                    *entry = row.name.clone();
+                }
+            }
+            resolved.push(hit);
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+
+        // 第二遍：写入上游 / 端点 / 凭证占位 / 绑定
+        for (index, row) in rows.iter().enumerate() {
+            let config: serde_json::Value =
+                serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
+            let protocol = Self::p1_protocol_for(&row.app_type, &config);
+            let endpoint_id = match &resolved[index] {
+                Some((host, url)) => {
+                    let upstream_id = format!("up-{host}");
+                    let endpoint_id = format!(
+                        "ep-{}",
+                        Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
+                    );
+                    let display_name = canonical
+                        .get(host)
+                        .cloned()
+                        .unwrap_or_else(|| row.name.clone());
+                    conn.execute(
+                        "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
+                         VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![upstream_id, display_name, host, now],
+                    )?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO upstream_endpoints
+                         (id, upstream_id, protocol, base_url, created_at)
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![endpoint_id, upstream_id, protocol, url, now],
+                    )?;
+                    endpoint_id
+                }
+                None => {
+                    // 官方托管 / 无显式 URL：每个 provider 自成上游，保证一行都不丢
+                    let upstream_id = format!("up-provider-{}", row.id);
+                    let endpoint_id = format!(
+                        "ep-{}",
+                        Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|"))
+                    );
+                    conn.execute(
+                        "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
+                         VALUES (?1, ?2, '', ?3)",
+                        rusqlite::params![upstream_id, row.name, now],
+                    )?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO upstream_endpoints
+                         (id, upstream_id, protocol, base_url, created_at)
+                         VALUES (?1, ?2, ?3, '', ?4)",
+                        rusqlite::params![endpoint_id, upstream_id, protocol, now],
+                    )?;
+                    endpoint_id
+                }
+            };
+
+            // 凭证占位：只记录来源，不搬 key（P1 不触碰密钥）
+            conn.execute(
+                "INSERT OR IGNORE INTO upstream_credentials
+                 (id, endpoint_id, app_type, provider_id, secret, limits_json, cooldown_until, created_at)
+                 VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)",
+                rusqlite::params![
+                    format!("cred-{}-{}", row.app_type, row.id),
+                    endpoint_id,
+                    row.app_type,
+                    row.id,
+                    now
+                ],
+            )?;
+
+            conn.execute(
+                "INSERT OR IGNORE INTO provider_bindings
+                 (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                rusqlite::params![
+                    row.app_type,
+                    row.id,
+                    endpoint_id,
+                    row.is_current,
+                    row.in_failover,
+                    row.sort_index,
+                    now
+                ],
+            )?;
+        }
+
         Ok(())
     }
 
@@ -4318,6 +4736,174 @@ mod tests {
         )?;
         assert_eq!(byte_offset, None, "存量行的字节游标必须为 NULL");
         assert_eq!(fingerprint, None, "存量行的尾部指纹必须为 NULL");
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v24_to_v25_lifts_providers_into_gateway_upstreams() -> Result<(), AppError> {
+        // 真实形状：claude 与 claude-desktop 各录一遍同一个上游（其中一行带尾斜杠），
+        // opencode 指向同一 host 的另一条路径与另一种协议，gemini 是无显式 URL 的官方行。
+        let conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE providers (
+                 id TEXT NOT NULL,
+                 app_type TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 settings_config TEXT NOT NULL,
+                 is_current BOOLEAN NOT NULL DEFAULT 0,
+                 in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+                 sort_index INTEGER,
+                 PRIMARY KEY (id, app_type)
+             );
+             INSERT INTO providers VALUES
+               ('p1','claude','DeepSeek',
+                '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://ai.ctaigw.cn/v1/chat/completions\"}}',0,0,0),
+               ('p1','claude-desktop','CTYun',
+                '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://ai.ctaigw.cn/v1/chat/completions/\"}}',1,0,0),
+               ('p2','opencode','ctaigw',
+                '{\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"baseURL\":\"https://ai.ctaigw.cn/v1\"}}',0,0,0),
+               ('p3','gemini','Google Official','{\"env\":{}}',0,0,0);",
+        )?;
+        Database::set_user_version(&conn, 24)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+
+        let upstreams: i64 =
+            conn.query_row("SELECT COUNT(*) FROM upstreams", [], |row| row.get(0))?;
+        assert_eq!(upstreams, 2, "ai.ctaigw.cn + 无显式 URL 的官方行");
+
+        let endpoints: i64 =
+            conn.query_row("SELECT COUNT(*) FROM upstream_endpoints", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(
+            endpoints, 3,
+            "anthropic（尾斜杠归一后合并）+ openai_chat + 无 URL，各一个"
+        );
+
+        let bindings: i64 =
+            conn.query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| {
+                row.get(0)
+            })?;
+        assert_eq!(bindings, 4, "providers 的每一行都必须有绑定，一行都不能丢");
+
+        // 同一 host 下的两个 anthropic 端点必须合并成一个
+        let anthropic_endpoints: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_endpoints WHERE protocol = 'anthropic'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(anthropic_endpoints, 1);
+
+        // opencode 的协议来自 `npm` 适配器字段，不是 app_type 的静态映射
+        let openai_chat_endpoints: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_endpoints WHERE protocol = 'openai_chat'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(openai_chat_endpoints, 1);
+
+        // 规范名取 is_current 的那一行
+        let upstream_name: String = conn.query_row(
+            "SELECT name FROM upstreams WHERE host = 'ai.ctaigw.cn'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(upstream_name, "CTYun");
+
+        // 凭证只记录来源，P1 不搬运密钥
+        let carried_secrets: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_credentials WHERE secret IS NOT NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(carried_secrets, 0);
+
+        // 重跑必须幂等（迁移可安全重算）
+        Database::migrate_v24_to_v25(&conn)?;
+        let upstreams_again: i64 =
+            conn.query_row("SELECT COUNT(*) FROM upstreams", [], |row| row.get(0))?;
+        assert_eq!(upstreams_again, 2, "重跑迁移不得产生重复上游");
+
+        Ok(())
+    }
+
+    /// 针对**真实数据库副本**的验证（手工运行，默认跳过）。
+    ///
+    /// ```text
+    /// cp ~/.cc-switch/cc-switch.db /tmp/ccs-p1/verify.db
+    /// CCS_P1_VERIFY_DB=/tmp/ccs-p1/verify.db \
+    ///   cargo test --lib migrate_v24_to_v25_on_real_copy -- --ignored --nocapture
+    /// ```
+    ///
+    /// 只读副本、绝不指向线上库；用于核对去重结果是否符合预期。
+    #[test]
+    #[ignore = "需要 CCS_P1_VERIFY_DB 指向数据库副本"]
+    fn migrate_v24_to_v25_on_real_copy() -> Result<(), AppError> {
+        let path = match std::env::var("CCS_P1_VERIFY_DB") {
+            Ok(path) => path,
+            Err(_) => return Ok(()),
+        };
+        let conn = Connection::open(&path)?;
+
+        let providers_before: i64 =
+            conn.query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        let providers_after: i64 =
+            conn.query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))?;
+        assert_eq!(providers_before, providers_after, "providers 行数必须不变");
+
+        let upstreams: i64 =
+            conn.query_row("SELECT COUNT(*) FROM upstreams", [], |row| row.get(0))?;
+        let endpoints: i64 =
+            conn.query_row("SELECT COUNT(*) FROM upstream_endpoints", [], |row| row.get(0))?;
+        let bindings: i64 =
+            conn.query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| row.get(0))?;
+        let with_url: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstreams WHERE host <> ''",
+            [],
+            |row| row.get(0),
+        )?;
+
+        println!("providers(before/after) = {providers_before}/{providers_after}");
+        println!(
+            "upstreams = {upstreams}（其中按 host 去重 {with_url}，无 URL 各自成家 {}）",
+            upstreams - with_url
+        );
+        println!("upstream_endpoints = {endpoints}, provider_bindings = {bindings}");
+
+        let mut statement = conn.prepare(
+            "SELECT u.name, u.host, e.protocol, e.base_url,
+                    (SELECT COUNT(*) FROM provider_bindings b WHERE b.endpoint_id = e.id)
+             FROM upstreams u
+             JOIN upstream_endpoints e ON e.upstream_id = u.id
+             WHERE u.host <> ''
+             ORDER BY u.host, e.protocol, e.base_url",
+        )?;
+        let listing = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        println!("\n{:<26}{:<28}{:<16}{:<52}绑定", "上游名", "host", "协议", "base_url");
+        for item in listing {
+            let (name, host, protocol, url, count) = item?;
+            println!("{name:<26}{host:<28}{protocol:<16}{url:<52}{count}");
+        }
+
+        assert_eq!(
+            bindings, providers_after,
+            "每个 provider 行都必须有且只有一条绑定"
+        );
+
         Ok(())
     }
 }

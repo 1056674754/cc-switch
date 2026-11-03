@@ -105,6 +105,13 @@ impl ProxyServer {
             return Err(ProxyError::AlreadyRunning);
         }
 
+        // 网关级熔断键诊断（shadow/on 模式下报告哪些跨 app 的键会合并）
+        log::info!(
+            "熔断键模式: {:?}（环境变量 CCS_CIRCUIT_KEY_MODE=off|shadow|on 控制）",
+            self.state.provider_router.circuit_key_mode()
+        );
+        self.state.provider_router.log_upstream_key_diagnostics().await;
+
         let addr: SocketAddr =
             format!("{}:{}", self.config.listen_address, self.config.listen_port)
                 .parse()
