@@ -30,6 +30,16 @@ export interface Supplier {
   credentialKinds: string[];
 }
 
+/** 一键采用的结果：agent 侧新建的那条配置（地址和密钥都来自网关）。 */
+export interface AdoptedSupplierProvider {
+  /** 采用进的 app，如 "claude-desktop" */
+  appType: string;
+  /** agent 侧新配置的 providerId */
+  providerId: string;
+  /** agent 侧新配置的名字，沿用供应商名 */
+  providerName: string;
+}
+
 export const suppliersApi = {
   // 供应商总览：网关级视角的只读聚合
   async overview(): Promise<Supplier[]> {
@@ -42,5 +52,15 @@ export const suppliersApi = {
     baseUrl: string,
   ): Promise<Supplier[]> {
     return invoke("update_supplier_base_url", { endpointId, baseUrl });
+  },
+
+  // 一键采用：把端点接进某个 agent，地址和密钥都从网关读，用户不用填 key。
+  // 目前后端只支持 claude / claude-desktop；协议不匹配、密钥是环境变量引用或托管登录时
+  // 会 reject 一段中文原因，调用方原样 toast 出来。
+  async adopt(
+    appType: string,
+    endpointId: string,
+  ): Promise<AdoptedSupplierProvider> {
+    return invoke("adopt_supplier", { appType, endpointId });
   },
 };

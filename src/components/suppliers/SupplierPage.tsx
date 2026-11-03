@@ -1,12 +1,20 @@
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Boxes, ChevronRight, Loader2, Pencil, RefreshCw } from "lucide-react";
+import {
+  Boxes,
+  ChevronRight,
+  Download,
+  Loader2,
+  Pencil,
+  RefreshCw,
+} from "lucide-react";
 import {
   suppliersApi,
   type Supplier,
   type SupplierEndpoint,
 } from "@/lib/api/suppliers";
+import { suppliersKeys } from "@/lib/query/suppliers";
 import { getAppLabel } from "@/config/appConfig";
 import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
@@ -14,25 +22,22 @@ import { extractErrorMessage } from "@/utils/errorUtils";
 import { AppPageHeader } from "@/components/shell/AppPageHeader";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { HelpTip } from "@/components/ui/help-tip";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
+import { protocolLabel } from "./protocolLabel";
 
-/** 供应商总览的查询键；改完地址直接用后端返回的新总览覆盖它。 */
-const SUPPLIERS_QUERY_KEY = ["suppliersOverview"] as const;
-
-/** 协议标识是技术名词，不做翻译；后端也可能拼出 `opencode:<npm>` 这类值，原样显示。 */
-const PROTOCOL_LABELS: Record<string, string> = {
-  anthropic: "Anthropic",
-  openai_chat: "OpenAI Chat",
-  openai_responses: "OpenAI Responses",
-  gemini_native: "Gemini",
-  kimi_managed: "Kimi",
-};
-
-function protocolLabel(protocol: string): string {
-  return PROTOCOL_LABELS[protocol] ?? protocol;
-}
+/**
+ * 「采用到…」的候选 app：后端 adopt_supplier 目前只支持 claude / claude-desktop，
+ * 其它 app 会 reject 并给出中文原因（它要求配置里按供应商维护模型列表 / 认证）。
+ */
+const ADOPT_TARGET_APPS = ["claude", "claude-desktop"] as const;
 
 interface EditingBaseUrl {
   endpointId: string;
@@ -48,7 +53,7 @@ export function SupplierPage() {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data, isPending, isError, error, refetch, isFetching } = useQuery({
-    queryKey: SUPPLIERS_QUERY_KEY,
+    queryKey: suppliersKeys.overview,
     queryFn: () => suppliersApi.overview(),
   });
 
@@ -58,6 +63,10 @@ export function SupplierPage() {
   );
   const [editing, setEditing] = useState<EditingBaseUrl | null>(null);
   const [savingEndpointId, setSavingEndpointId] = useState<string | null>(null);
+  // 正在「采用到…」的端点：按钮期间禁用，防止连点给同一个 agent 重复建配置
+  const [adoptingEndpointId, setAdoptingEndpointId] = useState<string | null>(
+    null,
+  );
 
   const suppliers = data ?? [];
 
@@ -97,7 +106,7 @@ export function SupplierPage() {
     try {
       const updated = await suppliersApi.updateBaseUrl(endpoint.id, nextUrl);
       // 后端返回的就是更新后的总览，直接落缓存，不再多拉一次
-      queryClient.setQueryData<Supplier[]>(SUPPLIERS_QUERY_KEY, updated);
+      queryClient.setQueryData<Supplier[]>(suppliersKeys.overview, updated);
       // 各应用里存的供应商配置已经被一起改写，让这些列表下次进入时重新读
       void queryClient.invalidateQueries({ queryKey: ["providers"] });
       setEditing(null);
@@ -109,6 +118,37 @@ export function SupplierPage() {
       );
     } finally {
       setSavingEndpointId(null);
+    }
+  };
+
+  // 一键采用：地址和密钥都从网关读，用户在 agent 侧一个 key 都不用填
+  const adoptInto = async (endpoint: SupplierEndpoint, app: string) => {
+    if (adoptingEndpointId) return;
+
+    setAdoptingEndpointId(endpoint.id);
+    try {
+      const adopted = await suppliersApi.adopt(app, endpoint.id);
+      // agent 侧多了一条配置、网关侧这个端点多了使用者：两张表都要重新读
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["providers"] }),
+        queryClient.invalidateQueries({ queryKey: ["suppliers"] }),
+        queryClient.invalidateQueries({
+          queryKey: suppliersKeys.overview,
+        }),
+      ]);
+      toast.success(
+        t("suppliers.adoptSuccess", {
+          app: getAppLabel(app),
+          name: adopted.providerName,
+        }),
+      );
+    } catch (adoptError) {
+      // 后端会说清楚为什么拒（协议不匹配、密钥是环境变量引用 / 托管登录…），别吞掉
+      toast.error(
+        extractErrorMessage(adoptError) || t("suppliers.adoptFailed"),
+      );
+    } finally {
+      setAdoptingEndpointId(null);
     }
   };
 
@@ -236,6 +276,7 @@ export function SupplierPage() {
                       {supplier.endpoints.map((endpoint) => {
                         const isEditing = editing?.endpointId === endpoint.id;
                         const isSaving = savingEndpointId === endpoint.id;
+                        const isAdopting = adoptingEndpointId === endpoint.id;
                         return (
                           <li
                             key={endpoint.id}
@@ -347,18 +388,62 @@ export function SupplierPage() {
                                     </Button>
                                   </>
                                 ) : (
-                                  <Button
-                                    type="button"
-                                    variant="neutral"
-                                    size="compact"
-                                    onClick={() => startEditing(endpoint)}
-                                  >
-                                    <Pencil
-                                      aria-hidden="true"
-                                      className="h-3.5 w-3.5"
-                                    />
-                                    {t("suppliers.editUrl")}
-                                  </Button>
+                                  <>
+                                    <Button
+                                      type="button"
+                                      variant="neutral"
+                                      size="compact"
+                                      onClick={() => startEditing(endpoint)}
+                                    >
+                                      <Pencil
+                                        aria-hidden="true"
+                                        className="h-3.5 w-3.5"
+                                      />
+                                      {t("suppliers.editUrl")}
+                                    </Button>
+                                    {/* 「采用到…」：把这家端点一键接进某个 agent，key 从网关读 */}
+                                    <DropdownMenu>
+                                      <DropdownMenuTrigger asChild>
+                                        <Button
+                                          type="button"
+                                          variant="neutral"
+                                          size="compact"
+                                          // 采用进行中把所有「采用到…」都禁掉：并发采用会被
+                                          // 上面的守卫直接丢掉，按钮可点却没反应更让人困惑
+                                          disabled={adoptingEndpointId !== null}
+                                          aria-busy={isAdopting}
+                                        >
+                                          {isAdopting ? (
+                                            <Loader2
+                                              aria-hidden="true"
+                                              className="h-3.5 w-3.5 animate-spin"
+                                            />
+                                          ) : (
+                                            <Download
+                                              aria-hidden="true"
+                                              className="h-3.5 w-3.5"
+                                            />
+                                          )}
+                                          {t("suppliers.adoptTo")}
+                                        </Button>
+                                      </DropdownMenuTrigger>
+                                      <DropdownMenuContent
+                                        align="end"
+                                        className="min-w-[160px]"
+                                      >
+                                        {ADOPT_TARGET_APPS.map((app) => (
+                                          <DropdownMenuItem
+                                            key={app}
+                                            onSelect={() =>
+                                              void adoptInto(endpoint, app)
+                                            }
+                                          >
+                                            {getAppLabel(app)}
+                                          </DropdownMenuItem>
+                                        ))}
+                                      </DropdownMenuContent>
+                                    </DropdownMenu>
+                                  </>
                                 )}
                               </div>
                             </div>

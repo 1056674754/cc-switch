@@ -4240,6 +4240,7 @@
     "expandSidebar": "サイドバーを展開",
     "collapseSidebar": "サイドバーを折りたたむ",
     "appsGroup": "アプリ",
+    "gatewayGroup": "ゲートウェイ",
     "today": "今日 {{value}}",
     "todayRequests": "{{value}} 回",
     "todayHitRate": "ヒット {{value}}",
@@ -4249,6 +4250,7 @@
     "prompts": "プロンプト",
     "sessions": "セッション",
     "suppliers": "プロバイダー",
+    "bindings": "接続先",
     "apps": "アプリ",
     "appsTitle": "アプリ：インストール、アップグレード、サイドバーに表示するもの",
     "appsHasUpdate": "アプリ · 更新があります",
@@ -4342,7 +4344,26 @@
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "アドレスを入力してください",
     "updateSuccess": "アドレスを更新しました。接続しているアプリすべてに反映されます",
-    "updateFailed": "アドレスを更新できませんでした"
+    "updateFailed": "アドレスを更新できませんでした",
+    "adoptTo": "取り込み先…",
+    "adoptSuccess": "{{app}} にプロバイダー {{name}} を追加しました",
+    "adoptFailed": "取り込みに失敗しました。もう一度お試しください。"
+  },
+  "bindings": {
+    "description": "各エージェントはここでプロバイダーを選びます。アドレスとキーはプロバイダー側で設定します。",
+    "helpTitle": "接続先",
+    "helpBody": "接続先は各エージェントの「選択」入口です。アプリが選んだプロバイダーがそのまま上流になります。アドレスとキーはここでは入力しません。プロバイダー側で一度変更すれば、接続しているすべてのアプリに反映されます。",
+    "loading": "接続先を読み込み中",
+    "loadFailed": "接続先を読み込めませんでした",
+    "loadFailedHint": "しばらくしてからもう一度お試しください。改善しない場合は、ローカルデータベースが読めるか確認してください。",
+    "empty": "プロバイダーに接続しているアプリはまだありません。まず「プロバイダー」ページで追加し、ここに戻って選択してください。",
+    "currentSuppliers": "現在のプロバイダー",
+    "appEmpty": "このアプリはまだプロバイダーを選んでいません",
+    "pickSupplierFor": "{{app}} で使うプロバイダーを選ぶ",
+    "pickPlaceholder": "プロバイダーのエンドポイントを選択…",
+    "noCandidates": "選択できるエンドポイントがありません（Anthropic プロトコルで、このアプリが未使用のものが必要です）。",
+    "adopting": "取り込み中…",
+    "manualOnly": "このアプリは手動設定が必要です（ワンクリック採用は未対応）"
   },
   "mode": {
     "tabsLabel": "接続モード",

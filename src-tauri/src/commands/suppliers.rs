@@ -228,6 +228,160 @@ pub async fn update_supplier_base_url(
     collect(&state.db).map_err(|error| error.to_string())
 }
 
+/// 一键采用：把网关上的某家供应商接进某个 agent。
+///
+/// 这是「填 0 次 key」的实现——地址和密钥都从网关读，agent 侧只生成一条配置。
+///
+/// 只对**能忠实渲染**的 app 开放：渲染错了比不渲染更糟。
+/// 目前支持 `claude` / `claude-desktop`（同一套 `env` 形状）；
+/// opencode 需要逐家维护 models 列表、codex 需要 TOML + auth，都不能凭空生成，
+/// 因此明确拒绝而不是给个半成品。
+#[tauri::command]
+pub async fn adopt_supplier(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+    endpoint_id: String,
+) -> Result<AdoptedProvider, String> {
+    adopt_into(&state.db, &app_type, &endpoint_id)
+}
+
+fn adopt_into(
+    db: &crate::database::Database,
+    app_type: &str,
+    endpoint_id: &str,
+) -> Result<AdoptedProvider, String> {
+    if !matches!(app_type, "claude" | "claude-desktop") {
+        return Err(format!(
+            "{app_type} 暂不支持一键采用：它的配置需要按供应商维护模型列表/认证，无法凭空生成。请在应用页手动添加。"
+        ));
+    }
+
+    let (name, base_url, protocol, secret) = {
+        let conn = lock_conn!(db.conn);
+        let row = conn
+            .query_row(
+                "SELECT u.name, e.base_url, e.protocol
+                 FROM upstream_endpoints e JOIN upstreams u ON u.id = e.upstream_id
+                 WHERE e.id = ?1",
+                rusqlite::params![endpoint_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
+            )
+            .map_err(|_| "找不到这个端点".to_string())?;
+
+        let credential: Option<(Option<String>, String)> = conn
+            .query_row(
+                "SELECT secret, COALESCE(secret_kind, 'none') FROM upstream_credentials
+                 WHERE endpoint_id = ?1 ORDER BY app_type LIMIT 1",
+                rusqlite::params![endpoint_id],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok();
+
+        match credential {
+            Some((Some(secret), kind)) if kind == "literal" && !secret.trim().is_empty() => {
+                (row.0, row.1, row.2, secret)
+            }
+            Some((_, kind)) if kind == "env_ref" => {
+                return Err(
+                    "这家供应商的密钥只存了环境变量名，库里没有明文，无法一键采用".to_string()
+                )
+            }
+            Some((_, kind)) if kind == "managed" => {
+                return Err("这家供应商用的是托管登录态，无法一键采用".to_string())
+            }
+            _ => return Err("这家供应商还没有可用的密钥，请先补上".to_string()),
+        }
+    };
+
+    if protocol != "anthropic" {
+        return Err(format!(
+            "这个端点是 {protocol} 协议，{app_type} 只吃 anthropic 协议，无法直接采用"
+        ));
+    }
+
+    let provider_id = format!("sup-{endpoint_id}");
+    let provider = crate::provider::Provider::with_id(
+        provider_id.clone(),
+        name.clone(),
+        serde_json::json!({
+            "env": {
+                "ANTHROPIC_BASE_URL": base_url,
+                "ANTHROPIC_AUTH_TOKEN": secret,
+            }
+        }),
+        None,
+    );
+    db.save_provider(app_type, &provider)
+        .map_err(|error| error.to_string())?;
+
+    Ok(AdoptedProvider {
+        app_type: app_type.to_string(),
+        provider_id,
+        provider_name: name,
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptedProvider {
+    pub app_type: String,
+    pub provider_id: String,
+    pub provider_name: String,
+}
+
+/// 换一把密钥：所有使用这个端点的 app 一起换。
+#[tauri::command]
+pub async fn update_supplier_secret(
+    state: tauri::State<'_, AppState>,
+    endpoint_id: String,
+    secret: String,
+) -> Result<Vec<Supplier>, String> {
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        return Err("密钥不能为空".to_string());
+    }
+
+    {
+        let mut conn = lock_conn!(state.db.conn);
+        let outcome = crate::database::Database::rewrite_endpoint_secret(
+            &mut conn,
+            &endpoint_id,
+            &secret,
+        )
+        .map_err(|error| error.to_string())?;
+
+        if outcome.changed == 0 {
+            return Err(if outcome.skipped.is_empty() {
+                "该端点没有任何接入".to_string()
+            } else {
+                format!(
+                    "这些接入的密钥存在环境变量里，库里没有明文可换：{}",
+                    outcome.skipped.join("、")
+                )
+            });
+        }
+        if !outcome.skipped.is_empty() {
+            log::warn!(
+                "[suppliers] 端点 {endpoint_id} 换密钥时跳过 {} 条接入：{}",
+                outcome.skipped.len(),
+                outcome.skipped.join("、")
+            );
+        }
+        for app in &outcome.apps {
+            crate::database::Database::reconcile_provider_bindings(&mut conn, app)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    collect(&state.db).map_err(|error| error.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,6 +423,102 @@ mod tests {
         assert_eq!(endpoint.apps, vec!["claude", "claude-desktop"]);
         assert_eq!(endpoint.credential_count, 2);
         assert!(endpoint.consumers.contains(&"claude:a".to_string()));
+    }
+
+    /// 一键采用：密钥和地址都从网关来，agent 侧一条配置都不用手填。
+    #[test]
+    fn adopt_renders_agent_config_from_gateway() -> Result<(), AppError> {
+        let db = Database::memory().expect("内存库");
+        insert_provider(
+            &db,
+            "claude",
+            "src",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://ai.ctaigw.cn/v1",
+                "ANTHROPIC_AUTH_TOKEN": "sk-secret"
+            }}),
+        );
+        let suppliers = collect(&db).expect("总览");
+        let endpoint = suppliers
+            .iter()
+            .flat_map(|supplier| supplier.endpoints.iter())
+            .find(|endpoint| endpoint.base_url == "https://ai.ctaigw.cn/v1")
+            .expect("端点");
+
+        let adopted = adopt_into(&db, "claude-desktop", &endpoint.id).expect("应能采用");
+        // 供应商名沿用网关上的上游名（这里由 provider 名派生）
+        assert!(!adopted.provider_name.trim().is_empty());
+        assert!(adopted.provider_id.starts_with("sup-"));
+
+        let stored: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT settings_config FROM providers
+                 WHERE app_type = 'claude-desktop' AND id = ?1",
+                rusqlite::params![adopted.provider_id],
+                |row| row.get(0),
+            )
+            .expect("provider 应已落库")
+        };
+        let stored: serde_json::Value = serde_json::from_str(&stored).expect("可解析");
+        assert_eq!(
+            stored["env"]["ANTHROPIC_BASE_URL"],
+            json!("https://ai.ctaigw.cn/v1")
+        );
+        assert_eq!(
+            stored["env"]["ANTHROPIC_AUTH_TOKEN"],
+            json!("sk-secret")
+        );
+
+        // 采用后两个 app 应落在同一个网关上
+        let suppliers = collect(&db).expect("总览2");
+        let ctaigw: Vec<_> = suppliers
+            .iter()
+            .filter(|supplier| supplier.host == "ai.ctaigw.cn")
+            .collect();
+        assert_eq!(ctaigw.len(), 1, "同一网关只能出现一条供应商");
+        assert_eq!(ctaigw[0].app_count, 2, "claude 与 claude-desktop 都应算上");
+        Ok(())
+    }
+
+    /// 不能忠实渲染的 app 必须明确拒绝，不能给个半成品配置。
+    #[test]
+    fn adopt_rejects_apps_without_faithful_renderer() {
+        let db = Database::memory().expect("内存库");
+        insert_provider(
+            &db,
+            "claude",
+            "src",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://ai.ctaigw.cn/v1",
+                "ANTHROPIC_AUTH_TOKEN": "sk-secret"
+            }}),
+        );
+        let suppliers = collect(&db).expect("总览");
+        let endpoint_id = suppliers[0].endpoints[0].id.clone();
+        let error = adopt_into(&db, "opencode", &endpoint_id).expect_err("应拒绝");
+        assert!(error.contains("暂不支持"), "错误应说明原因: {error}");
+    }
+
+    /// 协议不匹配要拒绝：anthropic 的端点塞不进只吃 openai 协议的 agent。
+    #[test]
+    fn adopt_rejects_protocol_mismatch() {
+        let db = Database::memory().expect("内存库");
+        insert_provider(
+            &db,
+            "opencode",
+            "src",
+            json!({"options": {
+                "baseURL": "https://wishub-x6.ctyun.cn/v1",
+                "apiKey": "sk-oc"
+            }}),
+        );
+        let suppliers = collect(&db).expect("总览");
+        let endpoint = &suppliers[0].endpoints[0];
+        // opencode 的协议由 npm 包决定，派生不出 anthropic —— 正是要拒绝的情况
+        assert_ne!(endpoint.protocol, "anthropic");
+        let error = adopt_into(&db, "claude", &endpoint.id).expect_err("应拒绝");
+        assert!(error.contains("协议"), "错误应说明协议不匹配: {error}");
     }
 
     /// 没有显式 URL 的托管 provider 自成上游，不能被误并入别的网关。

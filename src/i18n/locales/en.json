@@ -4240,6 +4240,7 @@
     "expandSidebar": "Expand sidebar",
     "collapseSidebar": "Collapse sidebar",
     "appsGroup": "Apps",
+    "gatewayGroup": "Gateway",
     "today": "Today {{value}}",
     "todayRequests": "{{value}} req",
     "todayHitRate": "Hit {{value}}",
@@ -4249,6 +4250,7 @@
     "prompts": "Prompts",
     "sessions": "Sessions",
     "suppliers": "Suppliers",
+    "bindings": "Bindings",
     "apps": "Apps",
     "appsTitle": "Apps: install, upgrade, choose which show in the sidebar",
     "appsHasUpdate": "Apps · updates available",
@@ -4345,7 +4347,26 @@
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "Enter an address first",
     "updateSuccess": "Address updated for every connected app",
-    "updateFailed": "Couldn't update the address"
+    "updateFailed": "Couldn't update the address",
+    "adoptTo": "Adopt into…",
+    "adoptSuccess": "Added supplier {{name}} to {{app}}",
+    "adoptFailed": "Couldn't adopt this supplier; please try again."
+  },
+  "bindings": {
+    "description": "Each agent picks its supplier here. Addresses and keys are configured once on the supplier side.",
+    "helpTitle": "Bindings",
+    "helpBody": "Bindings are where each agent picks a supplier: whichever supplier an app picks becomes its upstream. Addresses and keys are not entered here — change them once on the supplier side and every bound app follows.",
+    "loading": "Loading bindings",
+    "loadFailed": "Couldn't load bindings",
+    "loadFailedHint": "Try again in a moment. If it keeps failing, check that the local database is readable.",
+    "empty": "No app is bound to a supplier yet. Add one on the Suppliers page, then come back here to pick it.",
+    "currentSuppliers": "Current suppliers",
+    "appEmpty": "This app hasn't picked a supplier yet",
+    "pickSupplierFor": "Pick a supplier for {{app}}",
+    "pickPlaceholder": "Choose a supplier endpoint…",
+    "noCandidates": "No endpoints to choose from: you need an Anthropic-protocol supplier that this app isn't using yet.",
+    "adopting": "Binding…",
+    "manualOnly": "This app needs manual setup; one-click adopting isn't supported yet"
   },
   "mode": {
     "tabsLabel": "Connection mode",

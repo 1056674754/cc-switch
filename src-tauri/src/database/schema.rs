@@ -2256,6 +2256,52 @@ impl Database {
         None
     }
 
+    /// 把配置里所有「凭证字段」的值换成新密钥。
+    ///
+    /// 取值位置与 `dao::providers::credential_values` 对称：`env.*` / `options.*`
+    /// 里名字像凭证的字段，加顶层 `apiKey` / `api_key`。一次全换，避免同一份配置里
+    /// 残留新旧两把 key。
+    pub(crate) fn p1_set_secret(config: &mut serde_json::Value, new_secret: &str) -> bool {
+        fn is_credential_field(name: &str) -> bool {
+            let lower = name.to_ascii_lowercase();
+            lower.contains("key")
+                || lower.contains("token")
+                || lower.contains("secret")
+                || lower.contains("password")
+                || lower.contains("auth")
+        }
+
+        let mut changed = false;
+        for scope in ["env", "options"] {
+            let Some(object) = config.get_mut(scope).and_then(|value| value.as_object_mut())
+            else {
+                continue;
+            };
+            for (name, value) in object.iter_mut() {
+                if !is_credential_field(name) {
+                    continue;
+                }
+                if value.as_str().is_some_and(|text| !text.trim().is_empty()) {
+                    *value = serde_json::Value::from(new_secret);
+                    changed = true;
+                }
+            }
+        }
+        if let Some(object) = config.as_object_mut() {
+            for name in ["apiKey", "api_key"] {
+                if object
+                    .get(name)
+                    .and_then(|value| value.as_str())
+                    .is_some_and(|text| !text.trim().is_empty())
+                {
+                    object.insert(name.to_string(), serde_json::Value::from(new_secret));
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     /// 把配置里「当前生效的那个 base_url 字段」改成新值。
     ///
     /// 与 [`Self::p1_extract_base_url`] 的字段顺序**逐一对齐**：提取器读哪个字段，

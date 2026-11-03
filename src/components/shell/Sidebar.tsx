@@ -17,6 +17,7 @@ import {
   KeyRound,
   Layers,
   LayoutGrid,
+  Plug,
   Route,
   Server,
   Settings,
@@ -68,7 +69,8 @@ interface SidebarProps {
 type DirectoryProps = SidebarProps & { collapsed: boolean };
 
 /**
- * 主导航（v7）：顶条 44 → 应用列表（唯一滚动的区域）→ 全局 6 项（贴底）→ 底栏「应用 · 设置」。
+ * 主导航（v8）：顶条 44 →「网关」分组（供应商 / 接入端，排在所有应用之前）
+ * →「应用」分组（唯一滚动的区域）→ 全局 6 项（贴底）→ 底栏「应用 · 设置」。
  * 进入设置后整条侧栏换成设置目录。收起时是 72px 的图标轨；
  * 展开 / 收起时宽度一步到位，边缘的滑动由盖板的 transform 动画画出（见 useSidebarCollapsed），文字不换行、被裁掉而不是挤成两行。
  * 收起时各行只剩图标，名字由 HoverTip 从右侧报；展开时文字可见，不再挂提示。
@@ -266,6 +268,12 @@ function MainDirectory({
       : undefined;
   const todayTrailing = todayValues.length > 1 ? todayValues : todayText;
 
+  // 侧栏最前面的「网关」：供应商是上游，接入端是各 agent 的选用入口
+  const gateway: { page: GlobalPage; label: string; icon: IconComponent }[] = [
+    { page: "suppliers", label: t("nav.suppliers"), icon: Boxes },
+    { page: "bindings", label: t("nav.bindings"), icon: Plug },
+  ];
+
   const globals: {
     page: GlobalPage;
     label: string;
@@ -291,7 +299,6 @@ function MainDirectory({
       trailing: todayTrailing,
       trailingLabel: todayText,
     },
-    { page: "suppliers", label: t("nav.suppliers"), icon: Boxes },
   ];
 
   const isGlobalSelected = (page: GlobalPage) =>
@@ -306,6 +313,44 @@ function MainDirectory({
           collapsed && "no-scrollbar",
         )}
       >
+        {/* 分组标题只是视觉分节：读屏由 role="group" 的 aria-label 报同一句话，不让它重复 */}
+        {!collapsed && (
+          <div
+            aria-hidden="true"
+            className="shrink-0 px-4 pb-1 pt-1 text-badge text-fg-3"
+          >
+            {t("nav.gatewayGroup")}
+          </div>
+        )}
+        <div
+          role="group"
+          aria-label={t("nav.gatewayGroup")}
+          className="flex shrink-0 flex-col"
+        >
+          {gateway.map((item) => (
+            <NavItem
+              key={item.page}
+              collapsed={collapsed}
+              selected={isGlobalSelected(item.page)}
+              icon={item.icon}
+              label={item.label}
+              onClick={() => onSelectPage(item.page)}
+            />
+          ))}
+        </div>
+
+        {/* 收起时没有分组标题，用一条分隔线把网关和应用分开 */}
+        {collapsed ? (
+          <div className="mx-[18px] my-1.5 h-px shrink-0 bg-border" />
+        ) : (
+          <div
+            aria-hidden="true"
+            className="shrink-0 px-4 pb-1 pt-3 text-badge text-fg-3"
+          >
+            {t("nav.appsGroup")}
+          </div>
+        )}
+
         <div
           role="group"
           aria-label={t("nav.appsGroup")}

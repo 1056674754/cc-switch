@@ -1,10 +1,12 @@
 import type { AppId } from "@/lib/api";
 
 /**
- * 主窗口的导航模型（v7）：侧栏选一个应用或一个全局页；设置单独占一屏。
+ * 主窗口的导航模型（v8）：侧栏最前面是「网关」（供应商 / 接入端），然后是应用，最后是全局页；
+ * 设置单独占一屏。
  *
+ * - 网关页：供应商（配一次上游）、接入端（各 agent 选用供应商），排在所有应用之前。
  * - 应用页：点侧栏应用行进入供应商页；OpenClaw、Hermes 在页头下用分段控件切到自己的专属页。
- * - 全局页：用量统计、授权中心、MCP、Skills、提示词、会话、应用（安装与显示）、供应商，每样只出现一次。
+ * - 全局页：用量统计、授权中心、MCP、Skills、提示词、会话、应用（安装与显示），每样只出现一次。
  * - 设置：侧栏换成设置目录，6 个分组。
  */
 
@@ -23,7 +25,8 @@ export type GlobalPage =
   | "prompts"
   | "sessions"
   | "apps"
-  | "suppliers";
+  | "suppliers"
+  | "bindings";
 
 export type View = AppPage | GlobalPage | "settings";
 
@@ -61,6 +64,7 @@ const GLOBAL_PAGES: GlobalPage[] = [
   "sessions",
   "apps",
   "suppliers",
+  "bindings",
 ];
 
 export const VIEW_STORAGE_KEY = "cc-switch-last-view";

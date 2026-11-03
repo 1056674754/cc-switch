@@ -891,6 +891,33 @@ impl Database {
         endpoint_id: &str,
         new_url: &str,
     ) -> Result<EndpointRewrite, AppError> {
+        Self::rewrite_endpoint_configs(conn, endpoint_id, |config| {
+            Database::p1_set_base_url(config, new_url)
+        })
+    }
+
+    /// 换一把密钥，所有使用这个端点的 app 一起换。
+    ///
+    /// 只改 `settings_config` 里的凭证值；`upstream_credentials` 由随后的对账
+    /// 从配置重新派生，指纹跟着变——新 key 天然拿到一套干净的熔断状态。
+    ///
+    /// 返回的 `skipped` 里会有 `env_ref` 的 app：它配置里只有环境变量名，没有明文可换。
+    pub(crate) fn rewrite_endpoint_secret(
+        conn: &mut rusqlite::Connection,
+        endpoint_id: &str,
+        new_secret: &str,
+    ) -> Result<EndpointRewrite, AppError> {
+        Self::rewrite_endpoint_configs(conn, endpoint_id, |config| {
+            Database::p1_set_secret(config, new_secret)
+        })
+    }
+
+    /// 改地址与改密钥共用同一套「找接入 → 改配置 → 提交」的骨架。
+    fn rewrite_endpoint_configs(
+        conn: &mut rusqlite::Connection,
+        endpoint_id: &str,
+        apply: impl Fn(&mut serde_json::Value) -> bool,
+    ) -> Result<EndpointRewrite, AppError> {
         let targets: Vec<(String, String)> = {
             let mut stmt = conn
                 .prepare(
@@ -931,9 +958,9 @@ impl Database {
                 outcome.skipped.push(label);
                 continue;
             };
-            let mut config: serde_json::Value = serde_json::from_str(&config_text)
-                .unwrap_or(serde_json::Value::Null);
-            if !Database::p1_set_base_url(&mut config, new_url) {
+            let mut config: serde_json::Value =
+                serde_json::from_str(&config_text).unwrap_or(serde_json::Value::Null);
+            if !apply(&mut config) {
                 outcome.skipped.push(label);
                 continue;
             }
@@ -1522,6 +1549,90 @@ mod reconcile_binding_tests {
             |row| row.get(0),
         )?;
         assert_eq!(stale, 0, "旧端点必须被清理");
+        Ok(())
+    }
+
+    /// 换密钥：所有使用这个端点的 app 一起换，且熔断键跟着换。
+    #[test]
+    fn rewriting_endpoint_secret_updates_all_consumers() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let with_key = r#"{"env":{"ANTHROPIC_BASE_URL":"https://ai.ctaigw.cn/v1",
+            "ANTHROPIC_AUTH_TOKEN":"sk-secret"}}"#;
+        insert_provider(&db, "claude", "a", "CTYun", with_key)?;
+        insert_provider(&db, "claude-desktop", "b", "CTYun", with_key)?;
+        db.get_provider_upstream_keys("claude")?;
+        db.get_provider_upstream_keys("claude-desktop")?;
+        let before = db.get_provider_upstream_keys("claude")?;
+        let old_key = before["a"].circuit_key.clone();
+
+        let endpoint_id: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT endpoint_id FROM provider_bindings
+                 WHERE app_type = 'claude' AND provider_id = 'a'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut conn = lock_conn!(db.conn);
+        let outcome =
+            Database::rewrite_endpoint_secret(&mut conn, &endpoint_id, "sk-brand-new")?;
+        assert_eq!(outcome.changed, 2, "两个 app 的密钥都要换");
+        for app in &outcome.apps {
+            Database::reconcile_provider_bindings(&mut conn, app)?;
+        }
+        drop(conn);
+
+        let claude = db.get_provider_upstream_keys("claude")?;
+        assert_eq!(claude["a"].base_url, "https://ai.ctaigw.cn/v1", "地址不该被改动");
+        assert_ne!(
+            claude["a"].circuit_key, old_key,
+            "换密钥后熔断键必须变化，否则会沿用旧 key 的失败状态"
+        );
+
+        let stored: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT settings_config FROM providers WHERE app_type='claude-desktop' AND id='b'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        assert!(stored.contains("sk-brand-new"), "claude-desktop 也应换到新密钥");
+        assert!(!stored.contains("sk-secret"), "旧密钥不能残留");
+        Ok(())
+    }
+
+    /// 密钥只在环境变量里的接入（env_ref）换不了，必须如实 skipped。
+    #[test]
+    fn rewriting_secret_reports_env_ref_as_skipped() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(
+            &db,
+            "hermes",
+            "h",
+            "Ctyun",
+            r#"{"api":"https://ai.ctaigw.cn/v1","key_env":"CTYUN_API_KEY"}"#,
+        )?;
+        db.get_provider_upstream_keys("hermes")?;
+
+        let endpoint_id: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT endpoint_id FROM provider_bindings WHERE provider_id = 'h'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut conn = lock_conn!(db.conn);
+        let outcome = Database::rewrite_endpoint_secret(&mut conn, &endpoint_id, "sk-x")?;
+        assert_eq!(outcome.changed, 0);
+        assert_eq!(outcome.skipped, vec!["hermes:h".to_string()]);
         Ok(())
     }
 

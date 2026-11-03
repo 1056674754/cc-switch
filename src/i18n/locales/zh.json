@@ -4240,6 +4240,7 @@
     "expandSidebar": "展开侧栏",
     "collapseSidebar": "收起侧栏",
     "appsGroup": "应用",
+    "gatewayGroup": "网关",
     "today": "今日 {{value}}",
     "todayRequests": "{{value}} 次",
     "todayHitRate": "命中 {{value}}",
@@ -4249,6 +4250,7 @@
     "prompts": "提示词",
     "sessions": "会话",
     "suppliers": "供应商",
+    "bindings": "接入端",
     "apps": "应用",
     "appsTitle": "应用：安装、升级、在侧栏显示哪些",
     "appsHasUpdate": "应用 · 有可用更新",
@@ -4342,7 +4344,26 @@
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "请先填写地址",
     "updateSuccess": "地址已更新，接入的应用一起生效",
-    "updateFailed": "地址更新失败"
+    "updateFailed": "地址更新失败",
+    "adoptTo": "采用到…",
+    "adoptSuccess": "已在 {{app}} 里添加供应商 {{name}}",
+    "adoptFailed": "采用失败，请重试"
+  },
+  "bindings": {
+    "description": "各 agent 从这里选用供应商；地址和密钥都在供应商那边配。",
+    "helpTitle": "接入端",
+    "helpBody": "接入端是各 agent 的「选用」入口：一个应用选了哪家供应商，就走哪家的上游。地址和密钥不在这里填，在供应商那边改一次，所有接入的应用一起生效。",
+    "loading": "正在读取接入端",
+    "loadFailed": "读取接入端失败",
+    "loadFailedHint": "请稍后重试；如果一直失败，检查本地数据库是否能正常读取。",
+    "empty": "还没有应用接入供应商。先去「供应商」页添加一家，回来这里选用。",
+    "currentSuppliers": "当前供应商",
+    "appEmpty": "这个应用还没有选用供应商",
+    "pickSupplierFor": "为 {{app}} 选用供应商",
+    "pickPlaceholder": "选择供应商端点…",
+    "noCandidates": "没有可选的端点：需要 anthropic 协议的供应商，且这个应用还没在用。",
+    "adopting": "正在接入…",
+    "manualOnly": "该应用需要手动配置，暂不支持一键选用"
   },
   "mode": {
     "tabsLabel": "连接模式",
