@@ -13,6 +13,285 @@ struct LegacySkillMigrationRow {
     app_type: String,
 }
 
+/// v24→v25 搬运时读出的 provider 行。
+///
+/// 增量补绑定（`reconcile_provider_bindings`）复用同一形状，保证「整库迁移」
+/// 与「后补单行」两条路径产出的 id 完全一致。
+pub(crate) struct P1Row {
+    pub(crate) id: String,
+    pub(crate) app_type: String,
+    pub(crate) name: String,
+    pub(crate) config: String,
+    /// provider 元数据（托管账号标记在这里）；缺列时为空串
+    pub(crate) meta: String,
+    pub(crate) is_current: i64,
+    pub(crate) in_failover: i64,
+    pub(crate) sort_index: Option<i64>,
+}
+
+/// 一行 provider 派生出的上游归属。
+///
+/// 全部字段由 (host, protocol, url) 确定性派生，因此可以重复计算并用于比对漂移。
+pub(crate) struct P1Lift {
+    pub(crate) upstream_id: String,
+    pub(crate) endpoint_id: String,
+    pub(crate) protocol: String,
+    /// 空串 = 无显式 URL（官方托管 / 本地未填），此时每个 provider 自成上游
+    pub(crate) host: String,
+    pub(crate) url: String,
+    /// 配置里能解出的明文密钥；托管 OAuth / 本地推理为 None
+    pub(crate) secret: Option<String>,
+    /// 密钥形态：literal / env_ref / managed / none（凭证池必须区分，否则托管行是黑洞）
+    pub(crate) secret_kind: &'static str,
+    /// 该接入的模型映射（JSON），取自配置里的 ANTHROPIC_DEFAULT_*_MODEL
+    pub(crate) model_map: Option<String>,
+}
+
+/// 单元格按值取证：缺列时由 SQL 填字面量，脏类型（BLOB/REAL）也不 panic。
+fn p1_cell_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
+    Ok(match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Text(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        rusqlite::types::ValueRef::Blob(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        _ => String::new(),
+    })
+}
+
+fn p1_cell_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
+    Ok(match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Integer(value) => value,
+        rusqlite::types::ValueRef::Real(value) => value as i64,
+        _ => 0,
+    })
+}
+
+fn p1_cell_opt_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<i64>> {
+    Ok(match row.get_ref(index)? {
+        rusqlite::types::ValueRef::Integer(value) => Some(value),
+        rusqlite::types::ValueRef::Real(value) => Some(value as i64),
+        _ => None,
+    })
+}
+
+impl Database {
+    /// 读 provider 行；`only_app` 为 `Some` 时只读该 app。
+    ///
+    /// 缺表 / 缺列（老测试夹具）返回空集而不是报错。
+    pub(crate) fn p1_read_rows(
+        conn: &Connection,
+        only_app: Option<&str>,
+    ) -> Result<Vec<P1Row>, AppError> {
+        if !Self::table_exists(conn, "providers")? {
+            return Ok(Vec::new());
+        }
+        for required in ["id", "app_type", "name", "settings_config"] {
+            if !Self::has_column(conn, "providers", required)? {
+                return Ok(Vec::new());
+            }
+        }
+
+        let is_current_expr = if Self::has_column(conn, "providers", "is_current")? {
+            "is_current"
+        } else {
+            "0"
+        };
+        let in_failover_expr = if Self::has_column(conn, "providers", "in_failover_queue")? {
+            "in_failover_queue"
+        } else {
+            "0"
+        };
+        let sort_index_expr = if Self::has_column(conn, "providers", "sort_index")? {
+            "sort_index"
+        } else {
+            "NULL"
+        };
+        let meta_expr = if Self::has_column(conn, "providers", "meta")? {
+            "meta"
+        } else {
+            "''"
+        };
+
+        let mut statement = conn.prepare(&format!(
+            "SELECT id, app_type, name, settings_config, {is_current_expr}, {in_failover_expr}, {sort_index_expr}, {meta_expr}
+             FROM providers
+             WHERE (?1 IS NULL OR app_type = ?1)
+             ORDER BY app_type, name"
+        ))?;
+        let mapped = statement.query_map(params![only_app], |row| {
+            Ok(P1Row {
+                id: p1_cell_text(row, 0)?,
+                app_type: p1_cell_text(row, 1)?,
+                name: p1_cell_text(row, 2)?,
+                config: p1_cell_text(row, 3)?,
+                is_current: p1_cell_int(row, 4)?,
+                in_failover: p1_cell_int(row, 5)?,
+                sort_index: p1_cell_opt_int(row, 6)?,
+                meta: p1_cell_text(row, 7)?,
+            })
+        })?;
+        Ok(mapped.collect::<Result<Vec<_>, _>>()?)
+    }
+
+    /// 由 provider 行派生上游归属（纯函数，不碰库）
+    pub(crate) fn p1_derive(row: &P1Row) -> P1Lift {
+        let config: serde_json::Value =
+            serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
+        let protocol = Self::p1_protocol_for(&row.app_type, &config);
+        let secret = super::dao::providers::primary_credential_value(&config);
+        let secret_kind = Self::p1_secret_kind(&config, &row.meta, &row.id, secret.is_some());
+        let model_map = Self::p1_model_map(&config);
+        match Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw)) {
+            Some((host, url)) => {
+                let upstream_id = format!("up-{host}");
+                let endpoint_id = format!(
+                    "ep-{}",
+                    Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
+                );
+                P1Lift {
+                    upstream_id,
+                    endpoint_id,
+                    protocol,
+                    host,
+                    url,
+                    secret,
+                    secret_kind,
+                    model_map,
+                }
+            }
+            None => {
+                // 官方托管 / 无显式 URL：每个 provider 自成上游，保证一行都不丢
+                let upstream_id = format!("up-provider-{}", row.id);
+                let endpoint_id = format!(
+                    "ep-{}",
+                    Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|"))
+                );
+                P1Lift {
+                    upstream_id,
+                    endpoint_id,
+                    protocol,
+                    host: String::new(),
+                    secret,
+                    secret_kind,
+                    model_map,
+                    url: String::new(),
+                }
+            }
+        }
+    }
+
+    /// 每个 host 的规范显示名（current 行优先，否则按 app_type,name 排序取首个）。
+    ///
+    /// 必须跨 app 计算：同一个网关被多个 app 引用时，增量补绑定不能各叫各的名字。
+    pub(crate) fn p1_canonical_names(
+        conn: &Connection,
+    ) -> Result<std::collections::BTreeMap<String, String>, AppError> {
+        let mut canonical: std::collections::BTreeMap<String, String> = Default::default();
+        for row in &Self::p1_read_rows(conn, None)? {
+            let lift = Self::p1_derive(row);
+            if lift.host.is_empty() {
+                continue;
+            }
+            let entry = canonical
+                .entry(lift.host.clone())
+                .or_insert_with(|| row.name.clone());
+            if row.is_current != 0 {
+                *entry = row.name.clone();
+            }
+        }
+        Ok(canonical)
+    }
+
+    /// 把一行 provider 搬进上游模型：建/复用上游、端点，写凭证占位与绑定。
+    ///
+    /// 全程 `INSERT OR IGNORE` / `OR REPLACE`，id 确定性派生 → 可反复执行。
+    pub(crate) fn lift_provider_row(
+        conn: &Connection,
+        row: &P1Row,
+        lift: &P1Lift,
+        canonical: &std::collections::BTreeMap<String, String>,
+        now: i64,
+    ) -> Result<(), AppError> {
+        // 已有上游不被改写：显示名只在首次创建时落库（canonical 只是首选名）
+        let display_name = canonical
+            .get(&lift.host)
+            .cloned()
+            .unwrap_or_else(|| row.name.clone());
+        conn.execute(
+            "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![lift.upstream_id, display_name, lift.host, now],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO upstream_endpoints
+             (id, upstream_id, protocol, base_url, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![lift.endpoint_id, lift.upstream_id, lift.protocol, lift.url, now],
+        )?;
+        // 凭证占位：只记录来源，不搬 key。
+        // 用 upsert 而不是 IGNORE：base_url 变了要跟着换 endpoint_id，
+        // 但 secret / limits / cooldown 是用户数据，只能保留不能覆盖。
+        // 密钥单向真源：`upstream_credentials.secret` 是唯一权威。
+        // `COALESCE` 保证「新配置解不出密钥时不要抹掉已存的」——托管 OAuth 这类
+        // 没有明文密钥的行，重跑对账不会把它清空。
+        let secret = lift.secret.as_deref();
+        conn.execute(
+            "INSERT INTO upstream_credentials
+             (id, endpoint_id, app_type, provider_id, secret, secret_kind, limits_json, cooldown_until, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, NULL, ?7)
+             ON CONFLICT(id) DO UPDATE SET
+                 endpoint_id = excluded.endpoint_id,
+                 secret = COALESCE(excluded.secret, secret),
+                 secret_kind = excluded.secret_kind",
+            params![
+                format!("cred-{}-{}", row.app_type, row.id),
+                lift.endpoint_id,
+                row.app_type,
+                row.id,
+                secret,
+                lift.secret_kind,
+                now
+            ],
+        )?;
+        // 绑定用 REPLACE：主键是 (app_type, provider_id)，base_url 变了应是换绑而非新增。
+        // is_current / in_failover_queue / sort_index 只是快照——选路以 providers 为准。
+        conn.execute(
+            "INSERT OR REPLACE INTO provider_bindings
+             (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, model_map, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                row.app_type,
+                row.id,
+                lift.endpoint_id,
+                row.is_current,
+                row.in_failover,
+                row.sort_index,
+                lift.model_map.as_deref(),
+                now
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// 清理再没有任何绑定引用的凭证 / 端点 / 上游
+    pub(crate) fn cleanup_orphan_upstreams(conn: &Connection) -> Result<(), AppError> {
+        conn.execute(
+            "DELETE FROM upstream_credentials
+             WHERE endpoint_id NOT IN (SELECT endpoint_id FROM provider_bindings)",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM upstream_endpoints
+             WHERE id NOT IN (SELECT endpoint_id FROM provider_bindings)",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM upstreams
+             WHERE id NOT IN (SELECT upstream_id FROM upstream_endpoints)",
+            [],
+        )?;
+        Ok(())
+    }
+}
+
 impl Database {
     /// 创建所有数据库表
     pub(crate) fn create_tables(&self) -> Result<(), AppError> {
@@ -658,6 +937,13 @@ impl Database {
                         );
                         Self::migrate_v24_to_v25(conn)?;
                         Self::set_user_version(conn, 25)?;
+                    }
+                    25 => {
+                        log::info!(
+                            "迁移数据库从 v25 到 v26（绑定模型映射 + 凭证形态）"
+                        );
+                        Self::migrate_v25_to_v26(conn)?;
+                        Self::set_user_version(conn, 26)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -1761,6 +2047,7 @@ impl Database {
                  app_type TEXT NOT NULL,
                  provider_id TEXT NOT NULL,
                  secret TEXT,
+                 secret_kind TEXT NOT NULL DEFAULT 'none',
                  limits_json TEXT,
                  cooldown_until INTEGER,
                  created_at INTEGER NOT NULL,
@@ -1776,6 +2063,7 @@ impl Database {
                  is_current INTEGER NOT NULL DEFAULT 0,
                  in_failover_queue INTEGER NOT NULL DEFAULT 0,
                  sort_index INTEGER,
+                 model_map TEXT,
                  created_at INTEGER NOT NULL,
                  PRIMARY KEY (app_type, provider_id),
                  FOREIGN KEY (endpoint_id) REFERENCES upstream_endpoints(id) ON DELETE CASCADE
@@ -1787,10 +2075,94 @@ impl Database {
         Ok(())
     }
 
+    /// v25 -> v26：补两列，都是「为下一阶段铺路」的加列，不改任何既有读写路径。
+    ///
+    /// - `provider_bindings.model_map`：模型映射归接入（决策：按 app 各自一份）
+    /// - `upstream_credentials.secret_kind`：凭证形态，凭证池必须先能区分
+    ///   明文 / 环境变量引用 / 托管令牌，否则那 14 条在池子里是黑洞
+    fn migrate_v25_to_v26(conn: &Connection) -> Result<(), AppError> {
+        Self::create_upstream_tables(conn)?;
+        if Self::table_exists(conn, "provider_bindings")?
+            && !Self::has_column(conn, "provider_bindings", "model_map")?
+        {
+            conn.execute("ALTER TABLE provider_bindings ADD COLUMN model_map TEXT", [])
+                .map_err(|e| AppError::Database(format!("加列 provider_bindings.model_map 失败: {e}")))?;
+        }
+        if Self::table_exists(conn, "upstream_credentials")?
+            && !Self::has_column(conn, "upstream_credentials", "secret_kind")?
+        {
+            conn.execute(
+                "ALTER TABLE upstream_credentials ADD COLUMN secret_kind TEXT NOT NULL DEFAULT 'none'",
+                [],
+            )
+            .map_err(|e| AppError::Database(format!("加列 upstream_credentials.secret_kind 失败: {e}")))?;
+        }
+        Ok(())
+    }
+
     /// 派生协议标签。默认由 app_type 决定，但 **opencode 的协议写在 `npm` 适配器字段里**，
     /// 必须按它来——否则会把 `@ai-sdk/anthropic` 的端点误标成 openai_chat（实测该库里有
     /// 3 条 `@ai-sdk/anthropic`、1 条 `@ai-sdk/alibaba`，与其余 openai-compatible 混用
     /// 同一批 URL，正是 `(host, protocol)` 才算身份的另一处证据）。
+    /// 密钥形态判定。
+    ///
+    /// 实测真实库 41 条凭证里有 14 条拿不到明文，原因分三类，凭证池必须能区分：
+    /// - `literal`：配置里就有密钥字符串，可直接搬进 `upstream_credentials.secret`
+    /// - `env_ref`：只存了环境变量名（hermes 的 `key_env`），**密钥根本不在库里**
+    /// - `managed`：托管账号 / OAuth，凭的是账号令牌
+    /// - `none`：本地推理等无鉴权端点
+    fn p1_secret_kind(
+        config: &serde_json::Value,
+        meta: &str,
+        provider_id: &str,
+        has_secret: bool,
+    ) -> &'static str {
+        if has_secret {
+            return "literal";
+        }
+        let has_key_env = config
+            .get("key_env")
+            .and_then(|value| value.as_str())
+            .is_some_and(|name| !name.trim().is_empty());
+        if has_key_env {
+            return "env_ref";
+        }
+        let managed = meta.contains("managed_account")
+            || meta.contains("liveConfigManaged")
+            || provider_id.ends_with("-official");
+        if managed {
+            return "managed";
+        }
+        "none"
+    }
+
+    /// 从配置里抽模型映射（claude 侧的 `ANTHROPIC_DEFAULT_*_MODEL` 一族）。
+    ///
+    /// 搬进绑定的意义：模型映射属于「某个 app 怎么用这条接入」，不属于网关本身。
+    /// 现阶段只是照搬现有取值，读路径仍走 provider，行为不变。
+    fn p1_model_map(config: &serde_json::Value) -> Option<String> {
+        const KEYS: &[(&str, &str)] = &[
+            ("haiku", "ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            ("sonnet", "ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            ("opus", "ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            ("fable", "ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
+            ("default", "ANTHROPIC_MODEL"),
+        ];
+        let env = config.get("env")?;
+        let mut map = serde_json::Map::new();
+        for (slot, env_key) in KEYS {
+            let Some(value) = env.get(*env_key).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if value.trim().is_empty() {
+                continue;
+            }
+            map.insert((*slot).to_string(), serde_json::Value::from(value.trim()));
+        }
+        (!map.is_empty()).then(|| serde_json::Value::Object(map).to_string())
+    }
+
     fn p1_protocol_for(app_type: &str, config: &serde_json::Value) -> String {
         if app_type == "opencode" {
             let npm = config
@@ -1870,6 +2242,10 @@ impl Database {
                 }
             }
         }
+        // hermes：地址直接放在顶层 `api`（字符串，不是对象）
+        if let Some(found) = text(config.get("api")) {
+            return Some(found);
+        }
         if let Some(provider) = config.get("provider") {
             for key in ["baseUrl", "base_url"] {
                 if let Some(found) = text(provider.get(key)) {
@@ -1880,17 +2256,102 @@ impl Database {
         None
     }
 
+    /// 把配置里「当前生效的那个 base_url 字段」改成新值。
+    ///
+    /// 与 [`Self::p1_extract_base_url`] 的字段顺序**逐一对齐**：提取器读哪个字段，
+    /// 这里就改哪个，否则改了地址下次派生又会读回旧值。
+    ///
+    /// 返回是否真的改动了（没有可改字段时返回 false，调用方据此报告"该 app 不支持"）。
+    pub(crate) fn p1_set_base_url(config: &mut serde_json::Value, new_url: &str) -> bool {
+        const ENV_KEYS: &[&str] = &[
+            "ANTHROPIC_BASE_URL",
+            "OPENAI_BASE_URL",
+            "GEMINI_BASE_URL",
+            "GOOGLE_GEMINI_BASE_URL",
+        ];
+
+        fn non_empty_str(value: &serde_json::Value) -> bool {
+            value.as_str().is_some_and(|text| !text.trim().is_empty())
+        }
+
+        if let Some(env) = config.get_mut("env").and_then(|v| v.as_object_mut()) {
+            for key in ENV_KEYS {
+                if env.get(*key).is_some_and(non_empty_str) {
+                    env.insert((*key).to_string(), serde_json::Value::from(new_url));
+                    return true;
+                }
+            }
+        }
+        if let Some(options) = config.get_mut("options").and_then(|v| v.as_object_mut()) {
+            for key in ["baseURL", "baseUrl", "base_url"] {
+                if options.get(key).is_some_and(non_empty_str) {
+                    options.insert(key.to_string(), serde_json::Value::from(new_url));
+                    return true;
+                }
+            }
+        }
+        if let Some(object) = config.as_object_mut() {
+            for key in ["baseUrl", "base_url", "url"] {
+                if object.get(key).is_some_and(non_empty_str) {
+                    object.insert(key.to_string(), serde_json::Value::from(new_url));
+                    return true;
+                }
+            }
+        }
+        // codex：`config` 是 TOML 文本，只替换第一处 base_url
+        if let Some(toml_text) = config
+            .get("config")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        {
+            if let Ok(pattern) = regex::Regex::new(r#"base_url\s*=\s*"[^"]*""#) {
+                if pattern.is_match(&toml_text) {
+                    let replaced = pattern
+                        .replacen(&toml_text, 1, format!(r#"base_url = "{new_url}""#))
+                        .to_string();
+                    if let Some(object) = config.as_object_mut() {
+                        object.insert("config".to_string(), serde_json::Value::from(replaced));
+                        return true;
+                    }
+                }
+            }
+        }
+        if let Some(api) = config.get("api") {
+            if api.as_str().is_some_and(|text| !text.trim().is_empty()) {
+                if let Some(object) = config.as_object_mut() {
+                    object.insert("api".to_string(), serde_json::Value::from(new_url));
+                    return true;
+                }
+            }
+        }
+        if let Some(provider) = config.get_mut("provider").and_then(|v| v.as_object_mut()) {
+            for key in ["baseUrl", "base_url"] {
+                if provider.get(key).is_some_and(non_empty_str) {
+                    provider.insert(key.to_string(), serde_json::Value::from(new_url));
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// 规范化 base_url，返回 `(host, normalized)`。
     ///
     /// 只统一大小写与**尾部斜杠**；不跨路径合并——`/coding` 与 `/coding/v1` 保留为
     /// 两个端点，因为不同客户端拼路径的方式不同，自动合并会改掉实际请求地址。
-    fn p1_normalize_url(raw: &str) -> Option<(String, String)> {
+    pub(crate) fn p1_normalize_url(raw: &str) -> Option<(String, String)> {
         let parsed = url::Url::parse(raw.trim()).ok()?;
         let scheme = parsed.scheme().to_ascii_lowercase();
         let host = parsed.host_str()?.to_ascii_lowercase();
         let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
         let path = parsed.path().trim_end_matches('/').to_string();
-        let normalized = format!("{scheme}://{host}{port}{path}");
+        // query 是 URL 语义的一部分（Azure 风格的 api-version 全靠它），必须保留，
+        // 否则请求侧会丢掉它；fragment 不会发给服务端，丢弃。
+        let query = parsed
+            .query()
+            .map(|q| format!("?{q}"))
+            .unwrap_or_default();
+        let normalized = format!("{scheme}://{host}{port}{path}{query}");
         Some((host, normalized))
     }
 
@@ -1933,99 +2394,13 @@ impl Database {
             [],
         );
 
-        struct P1Row {
-            id: String,
-            app_type: String,
-            name: String,
-            config: String,
-            is_current: i64,
-            in_failover: i64,
-            sort_index: Option<i64>,
-        }
-
-        /// 单元格按值取证：缺列时由 SQL 填字面量，脏类型（BLOB/REAL）也不 panic。
-        fn cell_text(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<String> {
-            Ok(match row.get_ref(index)? {
-                rusqlite::types::ValueRef::Text(bytes) => {
-                    String::from_utf8_lossy(bytes).into_owned()
-                }
-                rusqlite::types::ValueRef::Blob(bytes) => {
-                    String::from_utf8_lossy(bytes).into_owned()
-                }
-                _ => String::new(),
-            })
-        }
-        fn cell_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<i64> {
-            Ok(match row.get_ref(index)? {
-                rusqlite::types::ValueRef::Integer(value) => value,
-                rusqlite::types::ValueRef::Real(value) => value as i64,
-                _ => 0,
-            })
-        }
-        fn cell_opt_int(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<Option<i64>> {
-            Ok(match row.get_ref(index)? {
-                rusqlite::types::ValueRef::Integer(value) => Some(value),
-                rusqlite::types::ValueRef::Real(value) => Some(value as i64),
-                _ => None,
-            })
-        }
-
-        let is_current_expr = if Self::has_column(conn, "providers", "is_current")? {
-            "is_current"
-        } else {
-            "0"
-        };
-        let in_failover_expr = if Self::has_column(conn, "providers", "in_failover_queue")? {
-            "in_failover_queue"
-        } else {
-            "0"
-        };
-        let sort_index_expr = if Self::has_column(conn, "providers", "sort_index")? {
-            "sort_index"
-        } else {
-            "NULL"
-        };
-
-        let rows: Vec<P1Row> = {
-            let mut statement = conn.prepare(&format!(
-                "SELECT id, app_type, name, settings_config, {is_current_expr}, {in_failover_expr}, {sort_index_expr}
-                 FROM providers ORDER BY app_type, name"
-            ))?;
-            let mapped = statement.query_map([], |row| {
-                Ok(P1Row {
-                    id: cell_text(row, 0)?,
-                    app_type: cell_text(row, 1)?,
-                    name: cell_text(row, 2)?,
-                    config: cell_text(row, 3)?,
-                    is_current: cell_int(row, 4)?,
-                    in_failover: cell_int(row, 5)?,
-                    sort_index: cell_opt_int(row, 6)?,
-                })
-            })?;
-            mapped.collect::<Result<Vec<_>, _>>()?
-        };
+        let rows = Self::p1_read_rows(conn, None)?;
         if rows.is_empty() {
             return Ok(());
         }
 
-        // 第一遍：确定每个 host 的规范名（current 行优先，否则按 app_type,name 排序取首个）
-        let mut canonical: std::collections::BTreeMap<String, String> = Default::default();
-        let mut resolved: Vec<Option<(String, String)>> = Vec::with_capacity(rows.len());
-        for row in &rows {
-            let config: serde_json::Value =
-                serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
-            let hit =
-                Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw));
-            if let Some((host, _url)) = &hit {
-                let entry = canonical
-                    .entry(host.clone())
-                    .or_insert_with(|| row.name.clone());
-                if row.is_current != 0 {
-                    *entry = row.name.clone();
-                }
-            }
-            resolved.push(hit);
-        }
+        // 第一遍：确定每个 host 的规范显示名
+        let canonical = Self::p1_canonical_names(conn)?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2033,84 +2408,9 @@ impl Database {
             .unwrap_or(0);
 
         // 第二遍：写入上游 / 端点 / 凭证占位 / 绑定
-        for (index, row) in rows.iter().enumerate() {
-            let config: serde_json::Value =
-                serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
-            let protocol = Self::p1_protocol_for(&row.app_type, &config);
-            let endpoint_id = match &resolved[index] {
-                Some((host, url)) => {
-                    let upstream_id = format!("up-{host}");
-                    let endpoint_id = format!(
-                        "ep-{}",
-                        Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
-                    );
-                    let display_name = canonical
-                        .get(host)
-                        .cloned()
-                        .unwrap_or_else(|| row.name.clone());
-                    conn.execute(
-                        "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
-                         VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![upstream_id, display_name, host, now],
-                    )?;
-                    conn.execute(
-                        "INSERT OR IGNORE INTO upstream_endpoints
-                         (id, upstream_id, protocol, base_url, created_at)
-                         VALUES (?1, ?2, ?3, ?4, ?5)",
-                        rusqlite::params![endpoint_id, upstream_id, protocol, url, now],
-                    )?;
-                    endpoint_id
-                }
-                None => {
-                    // 官方托管 / 无显式 URL：每个 provider 自成上游，保证一行都不丢
-                    let upstream_id = format!("up-provider-{}", row.id);
-                    let endpoint_id = format!(
-                        "ep-{}",
-                        Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|"))
-                    );
-                    conn.execute(
-                        "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
-                         VALUES (?1, ?2, '', ?3)",
-                        rusqlite::params![upstream_id, row.name, now],
-                    )?;
-                    conn.execute(
-                        "INSERT OR IGNORE INTO upstream_endpoints
-                         (id, upstream_id, protocol, base_url, created_at)
-                         VALUES (?1, ?2, ?3, '', ?4)",
-                        rusqlite::params![endpoint_id, upstream_id, protocol, now],
-                    )?;
-                    endpoint_id
-                }
-            };
-
-            // 凭证占位：只记录来源，不搬 key（P1 不触碰密钥）
-            conn.execute(
-                "INSERT OR IGNORE INTO upstream_credentials
-                 (id, endpoint_id, app_type, provider_id, secret, limits_json, cooldown_until, created_at)
-                 VALUES (?1, ?2, ?3, ?4, NULL, NULL, NULL, ?5)",
-                rusqlite::params![
-                    format!("cred-{}-{}", row.app_type, row.id),
-                    endpoint_id,
-                    row.app_type,
-                    row.id,
-                    now
-                ],
-            )?;
-
-            conn.execute(
-                "INSERT OR IGNORE INTO provider_bindings
-                 (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![
-                    row.app_type,
-                    row.id,
-                    endpoint_id,
-                    row.is_current,
-                    row.in_failover,
-                    row.sort_index,
-                    now
-                ],
-            )?;
+        for row in &rows {
+            let lift = Self::p1_derive(row);
+            Self::lift_provider_row(conn, row, &lift, &canonical, now)?;
         }
 
         Ok(())
@@ -4756,6 +5056,96 @@ mod tests {
         Ok(())
     }
 
+    /// v25 -> v26：补两列，并确认派生能把「模型映射」和「凭证形态」填进去。
+    ///
+    /// 用「建库 → 删列 → 回退版本号 → 再迁」来模拟老库，避免手写一份 v25 夹具
+    /// （夹具一旦和真实 DDL 漂移，测的就是夹具不是产品）。
+    /// 改地址必须与读地址对称：`p1_set_base_url` 改完，`p1_extract_base_url` 必须读回新值。
+    ///
+    /// 这条是「一处改、处处生效」的地基——两边字段顺序一旦漂移，
+    /// 就会出现「改了地址但下次派生又读回旧值」的鬼故事。
+    #[test]
+    fn set_base_url_mirrors_extract_fields() {
+        let cases = vec![
+            serde_json::json!({"env": {"ANTHROPIC_BASE_URL": "https://old.example.com"}}),
+            serde_json::json!({"options": {"baseURL": "https://old.example.com"}}),
+            serde_json::json!({"baseUrl": "https://old.example.com"}),
+            serde_json::json!({"config": "[model_providers.x]\nbase_url = \"https://old.example.com\"\n"}),
+            serde_json::json!({"provider": {"baseUrl": "https://old.example.com"}}),
+            // hermes：地址就是顶层 api 字符串
+            serde_json::json!({"api": "https://old.example.com", "key_env": "CTYUN_API_KEY"}),
+        ];
+        for mut config in cases {
+            let before = Database::p1_extract_base_url(&config);
+            assert!(before.is_some(), "夹具本身应能提取出 URL");
+            assert!(
+                Database::p1_set_base_url(&mut config, "https://new.example.com/v1"),
+                "setter 未命中任何字段: {config}"
+            );
+            assert_eq!(
+                Database::p1_extract_base_url(&config).as_deref(),
+                Some("https://new.example.com/v1"),
+                "改完必须能读回新值"
+            );
+        }
+
+        // 认不出的形状必须明确返回 false，不能悄悄成功
+        let mut opaque = serde_json::json!({"something": "else"});
+        assert!(!Database::p1_set_base_url(&mut opaque, "https://new.example.com"));
+    }
+
+    #[test]
+    fn migrate_v25_to_v26_adds_model_map_and_secret_kind() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let mut conn = lock_conn!(db.conn);
+
+        conn.execute_batch(
+            "ALTER TABLE provider_bindings DROP COLUMN model_map;
+             ALTER TABLE upstream_credentials DROP COLUMN secret_kind;",
+        )?;
+        Database::set_user_version(&conn, 25)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        assert!(Database::has_column(&conn, "provider_bindings", "model_map")?);
+        assert!(Database::has_column(&conn, "upstream_credentials", "secret_kind")?);
+
+        // 派生：模型映射来自 env，凭证形态按配置判定
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, created_at) VALUES
+                ('mapped', 'claude', 'Mapped',
+                 '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://api.kimi.com/coding\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-abc\",\"ANTHROPIC_DEFAULT_SONNET_MODEL\":\"kimi-k2\",\"ANTHROPIC_MODEL\":\"kimi-k2\"}}', 1),
+                ('envref', 'hermes', 'EnvRef',
+                 '{\"key_env\":\"CTYUN_API_KEY\",\"api\":{\"base_url\":\"https://ai.ctaigw.cn/v1\"}}', 1),
+                ('local', 'hermes', 'Local',
+                 '{\"api\":{\"base_url\":\"http://10.10.49.36:1234/v1\"}}', 1)",
+            [],
+        )?;
+        for app in ["claude", "hermes"] {
+            Database::reconcile_provider_bindings(&mut conn, app)?;
+        }
+
+        let model_map: String = conn.query_row(
+            "SELECT COALESCE(model_map, '') FROM provider_bindings
+             WHERE app_type = 'claude' AND provider_id = 'mapped'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert!(model_map.contains("kimi-k2"), "model_map 未填入: {model_map}");
+        assert!(model_map.contains("\"sonnet\""), "应按槽位存: {model_map}");
+
+        let kind = |provider: &str| -> Result<String, AppError> {
+            Ok(conn.query_row(
+                "SELECT COALESCE(secret_kind, 'none') FROM upstream_credentials
+                 WHERE app_type = 'hermes' AND provider_id = ?1",
+                rusqlite::params![provider],
+                |row| row.get(0),
+            )?)
+        };
+        assert_eq!(kind("envref")?, "env_ref", "只存环境变量名的必须标成 env_ref");
+        assert_eq!(kind("local")?, "none", "本地推理无鉴权");
+        Ok(())
+    }
+
     #[test]
     fn migrate_v24_to_v25_lifts_providers_into_gateway_upstreams() -> Result<(), AppError> {
         // 真实形状：claude 与 claude-desktop 各录一遍同一个上游（其中一行带尾斜杠），
@@ -4921,6 +5311,288 @@ mod tests {
             "每个 provider 行都必须有且只有一条绑定"
         );
 
+        Ok(())
+    }
+
+    /// 迁移产出 vs 增量补产出必须逐行一致。
+    ///
+    /// 这条是重构的保险丝：一旦有人把 host/protocol/url 的派生规则只改在
+    /// 其中一条路径上，这里立刻炸。
+    #[test]
+    fn incremental_reconcile_matches_full_migration() -> Result<(), AppError> {
+        fn snapshot(conn: &Connection) -> Result<Vec<String>, AppError> {
+            let mut out = Vec::new();
+            {
+                let mut stmt = conn.prepare("SELECT id, name, host FROM upstreams ORDER BY id")?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(format!(
+                        "u|{}|{}|{}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, upstream_id, protocol, base_url FROM upstream_endpoints ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(format!(
+                        "e|{}|{}|{}|{}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT app_type, provider_id, endpoint_id, COALESCE(model_map, '')
+                     FROM provider_bindings
+                     ORDER BY app_type, provider_id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(format!(
+                        "b|{}|{}|{}|{}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            {
+                let mut stmt = conn.prepare(
+                    "SELECT id, endpoint_id, COALESCE(secret, ''), COALESCE(secret_kind, 'none')
+                     FROM upstream_credentials ORDER BY id",
+                )?;
+                let rows = stmt.query_map([], |row| {
+                    Ok(format!(
+                        "c|{}|{}|{}|{}",
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?
+                    ))
+                })?;
+                for row in rows {
+                    out.push(row?);
+                }
+            }
+            Ok(out)
+        }
+
+        let mut conn = Connection::open_in_memory()?;
+        conn.execute_batch(
+            "CREATE TABLE providers (
+                 id TEXT NOT NULL,
+                 app_type TEXT NOT NULL,
+                 name TEXT NOT NULL,
+                 settings_config TEXT NOT NULL,
+                 is_current BOOLEAN NOT NULL DEFAULT 0,
+                 in_failover_queue BOOLEAN NOT NULL DEFAULT 0,
+                 sort_index INTEGER,
+                 PRIMARY KEY (id, app_type)
+             );
+             INSERT INTO providers VALUES
+               ('p1','claude','DeepSeek',
+                '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://ai.ctaigw.cn/v1/chat/completions\"}}',0,0,0),
+               ('p1','claude-desktop','CTYun',
+                '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://ai.ctaigw.cn/v1/chat/completions/\"}}',1,0,0),
+               ('p2','opencode','ctaigw',
+                '{\"npm\":\"@ai-sdk/openai-compatible\",\"options\":{\"baseURL\":\"https://ai.ctaigw.cn/v1\"}}',0,0,0),
+               ('p3','gemini','Google Official','{\"env\":{}}',0,0,0);",
+        )?;
+        Database::set_user_version(&conn, 24)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        let migrated = snapshot(&conn)?;
+
+        // 只留 providers，把上游模型清空，让读时对账从零重建
+        conn.execute_batch(
+            "DELETE FROM provider_bindings;
+             DELETE FROM upstream_credentials;
+             DELETE FROM upstream_endpoints;
+             DELETE FROM upstreams;",
+        )?;
+        for app in ["claude", "claude-desktop", "gemini", "opencode"] {
+            Database::reconcile_provider_bindings(&mut conn, app)?;
+        }
+        let reconciled = snapshot(&conn)?;
+
+        assert_eq!(
+            migrated, reconciled,
+            "增量补绑定必须与整库迁移产出完全一致"
+        );
+        assert!(!reconciled.is_empty(), "快照不该为空（否则断言无意义）");
+        Ok(())
+    }
+
+    /// 在真实库副本上验证读时对账（需要 `CCS_RECONCILE_VERIFY_DB` 指向副本）。
+    #[test]
+    #[ignore]
+    fn reconcile_on_real_copy() -> Result<(), AppError> {
+        let Ok(path) = std::env::var("CCS_RECONCILE_VERIFY_DB") else {
+            return Ok(());
+        };
+        let mut conn = Connection::open(&path)?;
+        // 真实库可能是老版本：先走一遍迁移，再对账，才是「升级后首次启动」的真实路径
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        let mut apps: Vec<String> = {
+            let mut stmt = conn.prepare("SELECT DISTINCT app_type FROM providers ORDER BY app_type")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        apps.retain(|app| !app.is_empty());
+
+        let before = (
+            count(&conn, "providers")?,
+            count(&conn, "provider_bindings")?,
+            count(&conn, "upstreams")?,
+            count(&conn, "upstream_endpoints")?,
+        );
+        for app in &apps {
+            Database::reconcile_provider_bindings(&mut conn, app)?;
+        }
+        let after = (
+            count(&conn, "providers")?,
+            count(&conn, "provider_bindings")?,
+            count(&conn, "upstreams")?,
+            count(&conn, "upstream_endpoints")?,
+        );
+        println!("apps = {apps:?}");
+        let by_kind: String = conn.query_row(
+            "SELECT COALESCE(GROUP_CONCAT(kind || '=' || n), '') FROM (
+                 SELECT COALESCE(secret_kind, '?') AS kind, COUNT(*) AS n
+                 FROM upstream_credentials GROUP BY 1 ORDER BY 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        let with_model_map: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM provider_bindings WHERE COALESCE(model_map, '') <> ''",
+            [],
+            |row| row.get(0),
+        )?;
+        println!("secret_kind: {by_kind}");
+        println!("model_map 非空绑定: {with_model_map}");
+        println!("providers/bindings/upstreams/endpoints: {before:?} -> {after:?}");
+
+        // 原本没有绑定的 provider，补完后指向哪里
+        let mut stmt = conn.prepare(
+            "SELECT b.app_type, b.provider_id, e.upstream_id, e.protocol
+             FROM provider_bindings b
+             JOIN upstream_endpoints e ON e.id = b.endpoint_id
+             ORDER BY b.app_type",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok(format!(
+                "{}:{} -> {} [{}]",
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?
+            ))
+        })?;
+        for row in rows {
+            println!("  {}", row?);
+        }
+        Ok(())
+    }
+
+    fn count(conn: &Connection, table: &str) -> Result<i64, AppError> {
+        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?)
+    }
+
+    /// 端点表里的 base_url 必须能安全替代适配器解析。
+    ///
+    /// 切换请求侧读取源之前，先证明这条不回退规则在所有 app 上等价：
+    /// **端点有 URL 就用端点，没有才用适配器**。危险情形只有一种——
+    /// 适配器能算出 URL、端点表也有 URL、但两者不同：那意味着切换会悄悄改掉请求地址。
+    /// 本测试要求这个集合为空。
+    #[test]
+    #[ignore]
+    fn endpoint_base_url_safely_replaces_adapter() -> Result<(), AppError> {
+        use std::str::FromStr;
+
+        let Ok(path) = std::env::var("CCS_RECONCILE_VERIFY_DB") else {
+            return Ok(());
+        };
+        let conn = Connection::open(&path)?;
+        let rows = Database::p1_read_rows(&conn, None)?;
+
+        let mut agree = 0usize;
+        let mut endpoint_only = 0usize;
+        let mut adapter_only = 0usize;
+        let mut dangerous: Vec<String> = Vec::new();
+
+        for row in &rows {
+            let Ok(app) = crate::app_config::AppType::from_str(&row.app_type) else {
+                continue;
+            };
+            let Some(adapter) = crate::proxy::providers::get_adapter(&app) else {
+                continue;
+            };
+            let Ok(config) = serde_json::from_str::<serde_json::Value>(&row.config) else {
+                continue;
+            };
+            let Ok(provider) = serde_json::from_value::<crate::provider::Provider>(
+                serde_json::json!({
+                    "id": row.id,
+                    "name": row.name,
+                    "settingsConfig": config,
+                }),
+            ) else {
+                continue;
+            };
+
+            let endpoint_url = Database::p1_derive(row).url;
+            let adapter_url = adapter
+                .extract_base_url(&provider)
+                .ok()
+                .and_then(|raw| Database::p1_normalize_url(&raw))
+                .map(|(_, url)| url);
+
+            match (endpoint_url.is_empty(), adapter_url) {
+                // 端点为空 → 回落适配器（托管 OAuth 走这里）
+                (true, Some(_)) => adapter_only += 1,
+                // 适配器放弃但端点有值 → 用端点，比现在更能用
+                (false, None) => endpoint_only += 1,
+                (true, None) => {}
+                (false, Some(adapter_url)) => {
+                    if adapter_url == endpoint_url {
+                        agree += 1;
+                    } else {
+                        dangerous.push(format!(
+                            "{}:{} 端点 [{}] ≠ 适配器 [{}]",
+                            row.app_type, row.id, endpoint_url, adapter_url
+                        ));
+                    }
+                }
+            }
+        }
+
+        println!(
+            "一致 {agree} 行；仅端点有值 {endpoint_only} 行；仅适配器有值 {adapter_only} 行；冲突 {} 行",
+            dangerous.len()
+        );
+        for line in &dangerous {
+            println!("  冲突: {line}");
+        }
+        assert!(
+            dangerous.is_empty(),
+            "端点表与适配器都给出 URL 但不一致，切换会悄悄改掉请求地址"
+        );
         Ok(())
     }
 }

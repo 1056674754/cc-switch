@@ -5,6 +5,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import {
   ArrowLeft,
   BookOpen,
+  Boxes,
   ChartColumn,
   ChevronsLeft,
   ChevronsRight,
@@ -290,6 +291,7 @@ function MainDirectory({
       trailing: todayTrailing,
       trailingLabel: todayText,
     },
+    { page: "suppliers", label: t("nav.suppliers"), icon: Boxes },
   ];
 
   const isGlobalSelected = (page: GlobalPage) =>

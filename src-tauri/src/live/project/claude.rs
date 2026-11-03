@@ -1135,7 +1135,10 @@ mod tests {
                 json!({ "id": "p", "name": "P", "settingsConfig": { "env": env } }),
             )
             .expect("provider");
-            let (mapped, _, _) = apply_model_mapping(json!({ "model": client_id }), &provider);
+            let (mapped, _, _) = apply_model_mapping(
+                json!({ "model": client_id }),
+                &crate::proxy::model_mapper::ModelMapping::from_provider(&provider),
+            );
             let sent = mapped["model"].as_str().unwrap();
             let configured = env["CLAUDE_CODE_SUBAGENT_MODEL"].as_str().unwrap();
             assert_eq!(

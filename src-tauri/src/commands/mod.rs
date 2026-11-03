@@ -34,6 +34,7 @@ mod settings;
 pub mod skill;
 mod stream_check;
 mod subscription;
+mod suppliers;
 mod sync_support;
 mod xai_oauth;
 
@@ -82,6 +83,7 @@ pub use settings::*;
 pub use skill::*;
 pub use stream_check::*;
 pub use subscription::*;
+pub use suppliers::*;
 pub use xai_oauth::*;
 
 pub use lightweight::*;

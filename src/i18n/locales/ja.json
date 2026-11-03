@@ -4248,6 +4248,7 @@
     "authNeedsReauth": "再ログインが必要なアカウントがあります",
     "prompts": "プロンプト",
     "sessions": "セッション",
+    "suppliers": "プロバイダー",
     "apps": "アプリ",
     "appsTitle": "アプリ：インストール、アップグレード、サイドバーに表示するもの",
     "appsHasUpdate": "アプリ · 更新があります",
@@ -4313,6 +4314,35 @@
     "memory": "メモリ",
     "webUi": "Web UI",
     "viewUsage": "このアプリの使用量を見る"
+  },
+  "suppliers": {
+    "description": "ここで上流のアドレスとキーを一度設定すると、使うすべてのエージェントで共有されます。エンドポイントのアドレスを変えると、接続しているアプリがまとめて書き換わります。",
+    "helpTitle": "プロバイダー",
+    "helpBody": "プロバイダーはゲートウェイ単位の上流です。1 つのプロバイダーにプロトコルの異なる複数のエンドポイントを持て、それぞれにアドレスと認証情報があります。エンドポイントのアドレスを変えると、そこに接続しているすべてのアプリがまとめて書き換わります。",
+    "loadFailed": "プロバイダーを読み込めませんでした",
+    "loadFailedHint": "しばらくしてからもう一度お試しください。改善しない場合は、ローカルデータベースが読めるか確認してください。",
+    "empty": "まだプロバイダーがありません。いずれかのアプリのプロバイダーページで追加すると、ここに上流ごとにまとまって表示されます。",
+    "noHost": "マネージドログイン",
+    "noBaseUrl": "アドレスなし（マネージドログイン）",
+    "noEndpoints": "このプロバイダーにはまだエンドポイントがありません",
+    "endpointCount_other": "{{count}} エンドポイント",
+    "appCount_other": "{{count}} アプリ",
+    "credentialCount_other": "{{count}} 認証情報",
+    "credentialKinds": "認証情報の種類",
+    "credentialKind": {
+      "literal": "平文キー",
+      "env_ref": "環境変数",
+      "managed": "マネージドログイン",
+      "none": "認証情報なし"
+    },
+    "usedBy": "使用中",
+    "unused": "使用しているアプリはまだありません",
+    "editUrl": "アドレスを編集",
+    "baseUrlLabel": "エンドポイントのアドレス",
+    "baseUrlPlaceholder": "https://api.example.com",
+    "baseUrlRequired": "アドレスを入力してください",
+    "updateSuccess": "アドレスを更新しました。接続しているアプリすべてに反映されます",
+    "updateFailed": "アドレスを更新できませんでした"
   },
   "mode": {
     "tabsLabel": "接続モード",

@@ -1362,6 +1362,16 @@ impl RequestForwarder {
         })
     }
 
+    /// 请求侧的端点 base_url；`CCS_GATEWAY_BASE_URL=off` 可整体回退到适配器解析。
+    async fn gateway_base_url(&self, app_type: &AppType, provider: &Provider) -> Option<String> {
+        if !gateway_base_url_enabled() {
+            return None;
+        }
+        self.router
+            .endpoint_base_url(app_type.as_str(), &provider.id)
+            .await
+    }
+
     /// 转发单个请求（使用适配器）
     ///
     /// 成功时返回 `(response, claude_api_format, outbound_model)`，其中
@@ -1382,8 +1392,13 @@ impl RequestForwarder {
         codex_upstream_format_out: &mut Option<CodexUpstreamFormat>,
     ) -> Result<(ProxyResponse, Option<String>, Option<String>), ProxyError> {
         *codex_upstream_format_out = None;
-        // 使用适配器提取 base_url
-        let mut base_url = adapter.extract_base_url(provider)?;
+        // base_url 只有一个真源：网关端点表。
+        // 没有绑定或端点无显式 URL（codex-official 这类托管 OAuth）时回落适配器，
+        // 此时适配器不只是"读配置"，还会按 OAuth 身份算出 URL，不能替代。
+        let mut base_url = match self.gateway_base_url(app_type, provider).await {
+            Some(url) => url,
+            None => adapter.extract_base_url(provider)?,
+        };
 
         let is_full_url = provider
             .meta
@@ -1478,8 +1493,17 @@ impl RequestForwarder {
         } else if self.keeps_resolved_model() {
             body.clone()
         } else {
+            // 模型映射以绑定为准（归接入），绑定里没有才回落到 provider 配置。
+            let mapping = match self
+                .router
+                .model_mapping(app_type.as_str(), &provider.id)
+                .await
+            {
+                Some(mapping) => mapping,
+                None => super::model_mapper::ModelMapping::from_provider(provider),
+            };
             let (mapped_body, _original_model, _mapped_model) =
-                super::model_mapper::apply_model_mapping(body.clone(), provider);
+                super::model_mapper::apply_model_mapping(body.clone(), &mapping);
             mapped_body
         };
 
@@ -3596,6 +3620,18 @@ fn prepend_claude_code_system_prompt(body: &mut Value) {
 /// stainless SDK layer) do. Dropped for every Codex→Anthropic request so the upstream sees a
 /// clean Anthropic client fingerprint. Centralized here so the set stays in one place and future
 /// additions can't miss a code path. `key_str` is already lowercased by the http crate.
+/// 请求侧 base_url 读取源：默认读网关端点表，`off` 回退到适配器（应急处置用）。
+fn gateway_base_url_enabled() -> bool {
+    match std::env::var("CCS_GATEWAY_BASE_URL")
+        .ok()
+        .map(|v| v.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("off") | Some("0") | Some("false") | Some("legacy") => false,
+        _ => true,
+    }
+}
+
 /// Whether `base_url` already ends in `endpoint_suffix` (e.g. `/v1/messages` or
 /// `/chat/completions`), ignoring surrounding whitespace, any `?query`/`#fragment`, and a
 /// trailing slash. Used to avoid double-appending the endpoint when a user pastes a full

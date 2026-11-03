@@ -92,6 +92,7 @@ import { SettingsPage } from "@/components/settings/SettingsPage";
 import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
 import { RefreshAllQuotaButton } from "@/components/settings/auth/RefreshAllQuotaButton";
 import { AppsPage } from "@/components/apps/AppsPage";
+import { SupplierPage } from "@/components/suppliers/SupplierPage";
 import {
   checkToolUpdatesInBackground,
   useToolUpdatesAvailable,
@@ -1735,6 +1736,8 @@ function App() {
         );
       case "apps":
         return <AppsPage />;
+      case "suppliers":
+        return <SupplierPage />;
       default:
         return null;
     }

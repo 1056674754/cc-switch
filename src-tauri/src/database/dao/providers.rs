@@ -10,12 +10,31 @@ use std::collections::{HashMap, HashSet};
 ///
 /// 熔断需要两个粒度：**凭证级**（`circuit_key`，管 401/429/配额）和
 /// **host 级**（`host`，管 DNS/连接/TLS/5xx/超时）。
+/// 改写端点地址的结果。
+#[derive(Debug, Default)]
+pub struct EndpointRewrite {
+    /// 被改写的 provider 数
+    pub changed: usize,
+    /// 受影响的 app（去重）
+    pub apps: Vec<String>,
+    /// 改不了的 `app:provider`（URL 不在配置里，或配置不可解析）
+    pub skipped: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct UpstreamBinding {
     /// `up:{upstream_id}:{protocol}:{密钥指纹}`
     pub circuit_key: String,
     /// 上游 host；无显式 URL（官方托管 / 本地未填）时为空串，此时不参与 host 级熔断
     pub host: String,
+    /// 端点主键
+    pub endpoint_id: String,
+    /// 端点协议（anthropic / openai_chat / ...）
+    pub protocol: String,
+    /// 端点 base_url，已归一化（去尾斜杠、保留 query）
+    pub base_url: String,
+    /// 该接入的模型映射（JSON 文本，可能为空）
+    pub model_map: Option<String>,
 }
 
 /// 鉴权字段名判定：`env` / `options` 里命中这些后缀的才参与指纹计算。
@@ -33,7 +52,11 @@ fn is_credential_field(name: &str) -> bool {
 /// 会把用另一把 key 的 agent 一起熔断——属于误伤。
 ///
 /// 只输出指纹：不落库、不打印、不可逆。
-fn credential_fingerprint(config: &serde_json::Value) -> String {
+/// 收集配置里所有凭证字段的**值**（不含字段名）。
+///
+/// 同一把 key 在不同 app 下可能分别叫 `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` /
+/// `options.apiKey`，它们是同一个凭证，不该因为字段名不同而被拆开。
+pub(crate) fn credential_values(config: &serde_json::Value) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
     for scope in ["env", "options"] {
         let Some(object) = config.get(scope).and_then(|value| value.as_object()) else {
@@ -62,6 +85,12 @@ fn credential_fingerprint(config: &serde_json::Value) -> String {
             }
         }
     }
+    parts
+}
+
+/// 由 provider 的 `settings_config` 计算密钥指纹。**只输出指纹：不落库、不打印、不可逆。**
+fn credential_fingerprint(config: &serde_json::Value) -> String {
+    let mut parts = credential_values(config);
     if parts.is_empty() {
         // 本地推理服务（LM Studio 等）通常无鉴权；同 host 同协议本就该归一组
         return "nokey".to_string();
@@ -69,6 +98,16 @@ fn credential_fingerprint(config: &serde_json::Value) -> String {
     parts.sort();
     let digest = Sha256::digest(parts.join("\u{1f}").as_bytes());
     digest[..4].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// 搬进 `upstream_credentials.secret` 用的主密钥。
+///
+/// 一个 provider 理论上只有一把；多把时取排序后第一把（与指纹的排序口径一致），
+/// 保证同一配置永远得到同一把，迁移可重跑。
+pub(crate) fn primary_credential_value(config: &serde_json::Value) -> Option<String> {
+    let mut parts = credential_values(config);
+    parts.sort();
+    parts.into_iter().next()
 }
 
 type OmoProviderRow = (
@@ -550,12 +589,26 @@ impl Database {
     }
 
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
-        let conn = lock_conn!(self.conn);
-        conn.execute(
+        let mut conn = lock_conn!(self.conn);
+        // 绑定要跟着删：否则 provider_bindings 留下孤儿行，`up-provider-{id}`
+        // 这类上游也会永久堆积（读时对账只补不删，补不到这里）。
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        tx.execute(
             "DELETE FROM providers WHERE id = ?1 AND app_type = ?2",
             params![id, app_type],
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        if Database::table_exists(&tx, "provider_bindings")? {
+            tx.execute(
+                "DELETE FROM provider_bindings WHERE provider_id = ?1 AND app_type = ?2",
+                params![id, app_type],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+            Database::cleanup_orphan_upstreams(&tx)?;
+        }
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
         Ok(())
     }
 
@@ -819,11 +872,197 @@ impl Database {
     ///   用另一把 key 的 agent 一起熔断——那是误伤，不是共享。
     ///
     /// 没有绑定的 provider（迁移后新建、或迁移被跳过）不出现在返回值里，调用方回落到旧键。
+    /// 把「provider 行 → 上游绑定」对齐到最新状态。
+    ///
+    /// 为什么不挂在 `save_provider` 上：直接写 `providers` 表的 SQL 有二十多处
+    /// （导入、恢复备份、启动同步、故障转移开关……），漏掉任何一处就会重演
+    /// 「`dsh` 那行没有绑定」的问题。挂在读路径上则天然覆盖所有写入方。
+    ///
+    /// 幂等且只在真有漂移时写库；无论调用多少次，结果都与整库迁移一致。
+    /// 改一个网关端点，所有使用它的 app 一起跟着变。
+    ///
+    /// 这是「配置归网关、选择归 app」的第一次写操作：用户在上游改一次地址，
+    /// 底下每个 app 的 `settings_config` 都被改写，下次派生自然指向新端点。
+    ///
+    /// 返回值里 `skipped` 不是错误——有些 provider 的 URL 根本不是配置里的字符串
+    /// （托管 OAuth 由适配器按身份算），那些行必须原样保留并如实报回去。
+    pub(crate) fn rewrite_endpoint_base_url(
+        conn: &mut rusqlite::Connection,
+        endpoint_id: &str,
+        new_url: &str,
+    ) -> Result<EndpointRewrite, AppError> {
+        let targets: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT app_type, provider_id FROM provider_bindings
+                     WHERE endpoint_id = ?1 ORDER BY app_type, provider_id",
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let mapped = stmt
+                .query_map(params![endpoint_id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            mapped
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut outcome = EndpointRewrite::default();
+        if targets.is_empty() {
+            return Ok(outcome);
+        }
+
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+
+        for (app_type, provider_id) in &targets {
+            let label = format!("{app_type}:{provider_id}");
+            let config_text: Option<String> = tx
+                .query_row(
+                    "SELECT settings_config FROM providers WHERE app_type = ?1 AND id = ?2",
+                    params![app_type, provider_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let Some(config_text) = config_text else {
+                outcome.skipped.push(label);
+                continue;
+            };
+            let mut config: serde_json::Value = serde_json::from_str(&config_text)
+                .unwrap_or(serde_json::Value::Null);
+            if !Database::p1_set_base_url(&mut config, new_url) {
+                outcome.skipped.push(label);
+                continue;
+            }
+            tx.execute(
+                "UPDATE providers SET settings_config = ?1 WHERE app_type = ?2 AND id = ?3",
+                params![config.to_string(), app_type, provider_id],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+            outcome.changed += 1;
+            if !outcome.apps.contains(app_type) {
+                outcome.apps.push(app_type.clone());
+            }
+        }
+
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(outcome)
+    }
+
+    pub(crate) fn reconcile_provider_bindings(
+        conn: &mut rusqlite::Connection,
+        app_type: &str,
+    ) -> Result<(), AppError> {
+        let rows = Database::p1_read_rows(conn, Some(app_type))?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+
+        // 已存绑定：provider_id → (endpoint_id, model_map)
+        let stored: HashMap<String, (String, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT provider_id, endpoint_id, COALESCE(model_map, '')
+                     FROM provider_bindings WHERE app_type = ?1",
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let mapped = stmt
+                .query_map(params![app_type], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (row.get::<_, String>(1)?, row.get::<_, String>(2)?),
+                    ))
+                })
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            mapped
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        // 已存密钥：provider_id → (是否已有值, 形态)。
+        // 密钥单向真源要求「配置里能解出、库里还没有」也算漂移，否则老库升级后
+        // 永远补不上密钥（绑定没错，就没理由重搬）。
+        let stored_secret: HashMap<String, (bool, String)> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT provider_id, COALESCE(secret, '') <> '', COALESCE(secret_kind, 'none')
+                     FROM upstream_credentials WHERE app_type = ?1",
+                )
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            let mapped = stmt
+                .query_map(params![app_type], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        (row.get::<_, bool>(1)?, row.get::<_, String>(2)?),
+                    ))
+                })
+                .map_err(|e| AppError::Database(e.to_string()))?;
+            mapped
+                .collect::<Result<HashMap<_, _>, _>>()
+                .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        // 漂移 = 以下任一：
+        //   1. 没有绑定，或端点与当前配置派生不一致（换了 base_url）
+        //   2. 能解出密钥但库里没有（老库升级后必须补得上）
+        //   3. 凭证形态变了（literal / env_ref / managed / none）
+        //   4. 绑定的模型映射与配置派生不一致
+        let mut drifted = Vec::new();
+        for row in &rows {
+            let lift = Database::p1_derive(row);
+            let stored_binding = stored.get(&row.id);
+            let endpoint_drifted = stored_binding.map(|(endpoint, _)| endpoint.as_str())
+                != Some(lift.endpoint_id.as_str());
+            let stored_secret_entry = stored_secret.get(&row.id);
+            let secret_missing = lift.secret.is_some()
+                && !stored_secret_entry.map(|(has, _)| *has).unwrap_or(false);
+            let kind_drifted = stored_secret_entry
+                .map(|(_, kind)| kind.as_str() != lift.secret_kind)
+                .unwrap_or(false);
+            let model_map_drifted = lift.model_map.is_some()
+                && stored_binding
+                    .map(|(_, model)| model.as_str() != lift.model_map.as_deref().unwrap_or(""))
+                    .unwrap_or(true);
+            if endpoint_drifted || secret_missing || kind_drifted || model_map_drifted {
+                drifted.push((row, lift));
+            }
+        }
+        if drifted.is_empty() {
+            return Ok(());
+        }
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+        // 规范名跨 app 统一：否则增量补出来的上游名会跟整库迁移不一致。
+        // 整库扫一遍只发生在「有漂移」时，代价可以忽略。
+        let canonical = Database::p1_canonical_names(conn)?;
+
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        for (row, lift) in &drifted {
+            Database::lift_provider_row(&tx, row, lift, &canonical, now)?;
+        }
+        Database::cleanup_orphan_upstreams(&tx)?;
+        tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
+
+        log::debug!(
+            "[{app_type}] 上游绑定对账：补/换 {} 条",
+            drifted.len()
+        );
+        Ok(())
+    }
+
     pub fn get_provider_upstream_keys(
         &self,
         app_type: &str,
     ) -> Result<HashMap<String, UpstreamBinding>, AppError> {
-        let conn = lock_conn!(self.conn);
+        let mut conn = lock_conn!(self.conn);
         // 表不存在（未跑过 v25 迁移的库）时返回空映射，绝不因此让路由失败
         let has_bindings: bool = conn
             .query_row(
@@ -837,9 +1076,16 @@ impl Database {
             return Ok(HashMap::new());
         }
 
+        // 读时对账：v25 迁移只跑一次，之后新建 / 改了 base_url 的 provider 全靠这里补齐。
+        // 失败只记日志——对账坏了也不能让路由跟着坏（回落旧键即可）。
+        if let Err(err) = Self::reconcile_provider_bindings(&mut conn, app_type) {
+            log::warn!("[{app_type}] 上游绑定对账失败，本次沿用已有绑定: {err}");
+        }
+
         let mut stmt = conn
             .prepare(
-                "SELECT b.provider_id, e.upstream_id, e.protocol, u.host, p.settings_config
+                "SELECT b.provider_id, e.upstream_id, e.protocol, u.host, p.settings_config,
+                        e.id, e.base_url, b.model_map
                  FROM provider_bindings b
                  JOIN upstream_endpoints e ON e.id = b.endpoint_id
                  JOIN upstreams u ON u.id = e.upstream_id
@@ -856,14 +1102,25 @@ impl Database {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                 ))
             })
             .map_err(|e| AppError::Database(e.to_string()))?;
 
         let mut keys = HashMap::new();
         for row in rows {
-            let (provider_id, upstream_id, protocol, host, settings_config) =
-                row.map_err(|e| AppError::Database(e.to_string()))?;
+            let (
+                provider_id,
+                upstream_id,
+                protocol,
+                host,
+                settings_config,
+                endpoint_id,
+                base_url,
+                model_map,
+            ) = row.map_err(|e| AppError::Database(e.to_string()))?;
             let fingerprint = settings_config
                 .as_deref()
                 .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
@@ -874,6 +1131,10 @@ impl Database {
                 UpstreamBinding {
                     circuit_key: format!("up:{upstream_id}:{protocol}:{fingerprint}"),
                     host,
+                    endpoint_id,
+                    base_url,
+                    protocol,
+                    model_map,
                 },
             );
         }
@@ -1169,5 +1430,291 @@ mod ensure_official_seed_tests {
         let result =
             db.ensure_official_seed_by_id(CLAUDE_DESKTOP_OFFICIAL_PROVIDER_ID, AppType::Claude);
         assert!(result.is_err(), "(id, app_type) mismatch should be Err");
+    }
+}
+
+/// 读时对账：迁移只跑一次，之后新建 / 改 base_url / 删除的 provider 靠这里与库对齐。
+#[cfg(test)]
+mod reconcile_binding_tests {
+    use super::*;
+
+    fn insert_provider(
+        db: &Database,
+        app_type: &str,
+        id: &str,
+        name: &str,
+        config: &str,
+    ) -> Result<(), AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, created_at, sort_index)
+             VALUES (?1, ?2, ?3, ?4, 1, 0)",
+            params![id, app_type, name, config],
+        )
+        .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    fn count(db: &Database, table: &str) -> Result<i64, AppError> {
+        let conn = lock_conn!(db.conn);
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
+            .map_err(|e| AppError::Database(e.to_string()))
+    }
+
+    fn anthropic(name: &str, url: &str) -> String {
+        format!(
+            "{{\"env\":{{\"ANTHROPIC_BASE_URL\":\"{url}\"}},\"n\":\"{name}\"}}"
+        )
+    }
+
+    /// 改一次网关地址，所有使用它的 app 都必须跟着变，且旧端点被清理。
+    #[test]
+    fn rewriting_endpoint_url_moves_all_consumers() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "claude", "a", "CTYun", &anthropic("CTYun", "https://ai.ctaigw.cn/v1"))?;
+        insert_provider(
+            &db,
+            "claude-desktop",
+            "b",
+            "CTYun",
+            &anthropic("CTYun", "https://ai.ctaigw.cn/v1"),
+        )?;
+        db.get_provider_upstream_keys("claude")?;
+        db.get_provider_upstream_keys("claude-desktop")?;
+
+        let endpoint_id: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT endpoint_id FROM provider_bindings
+                 WHERE app_type = 'claude' AND provider_id = 'a'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut conn = lock_conn!(db.conn);
+        let outcome = Database::rewrite_endpoint_base_url(
+            &mut conn,
+            &endpoint_id,
+            "https://new.example.com/v1",
+        )?;
+        assert_eq!(outcome.changed, 2, "两个 app 都应被改写");
+        assert_eq!(outcome.apps.len(), 2);
+        assert!(outcome.skipped.is_empty());
+        for app in &outcome.apps {
+            Database::reconcile_provider_bindings(&mut conn, app)?;
+        }
+        drop(conn);
+
+        // 两个 app 的 base_url 都变了
+        let claude = db.get_provider_upstream_keys("claude")?;
+        assert_eq!(claude["a"].base_url, "https://new.example.com/v1");
+        assert_eq!(claude["a"].host, "new.example.com");
+        let desktop = db.get_provider_upstream_keys("claude-desktop")?;
+        assert_eq!(desktop["b"].base_url, "https://new.example.com/v1");
+
+        // 旧端点已无绑定引用，应当被清掉
+        let conn = lock_conn!(db.conn);
+        let stale: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_endpoints WHERE base_url LIKE '%ai.ctaigw.cn%'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(stale, 0, "旧端点必须被清理");
+        Ok(())
+    }
+
+    /// 改写不认识的配置形状时必须如实报 skipped，不能假装成功。
+    #[test]
+    fn rewriting_unknown_shape_reports_skipped() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "pi", "opaque", "Opaque", r#"{"something":"else"}"#)?;
+        db.get_provider_upstream_keys("pi")?;
+
+        let endpoint_id: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT endpoint_id FROM provider_bindings WHERE provider_id = 'opaque'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+
+        let mut conn = lock_conn!(db.conn);
+        let outcome =
+            Database::rewrite_endpoint_base_url(&mut conn, &endpoint_id, "https://x.example.com")?;
+        assert_eq!(outcome.changed, 0);
+        assert_eq!(outcome.skipped, vec!["pi:opaque".to_string()]);
+        Ok(())
+    }
+
+    /// 密钥单向真源：密钥要落进 `upstream_credentials.secret`；
+    /// 解不出密钥的配置（托管 OAuth / 本地推理）不得把已存的值抹掉。
+    #[test]
+    fn credential_secret_is_backfilled_and_never_blanked() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(
+            &db,
+            "claude",
+            "p-key",
+            "CTYun",
+            r#"{"env":{"ANTHROPIC_BASE_URL":"https://ai.ctaigw.cn/v1","ANTHROPIC_AUTH_TOKEN":"sk-secret-a"}}"#,
+        )?;
+        insert_provider(&db, "claude", "p-managed", "Official", r#"{"env":{}}"#)?;
+
+        db.get_provider_upstream_keys("claude")?;
+
+        fn secret(db: &Database, provider_id: &str) -> Result<Option<String>, AppError> {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT secret FROM upstream_credentials
+                 WHERE app_type = 'claude' AND provider_id = ?1",
+                params![provider_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))
+        }
+
+        assert_eq!(secret(&db, "p-key")?.as_deref(), Some("sk-secret-a"));
+        assert_eq!(secret(&db, "p-managed")?, None, "解不出密钥时应为 NULL");
+
+        // 模拟以后接入托管账号：先塞一把 token，再对账，已存的不能被抹掉
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE upstream_credentials SET secret = 'managed-token'
+                 WHERE provider_id = 'p-managed'",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+        db.get_provider_upstream_keys("claude")?;
+        assert_eq!(
+            secret(&db, "p-managed")?.as_deref(),
+            Some("managed-token"),
+            "重跑对账不得抹掉已存密钥"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn backfills_provider_added_after_migration() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        // 迁移之后才出现的 provider（启动同步 / 导入都会这样），没有任何绑定
+        insert_provider(
+            &db,
+            "claude",
+            "p-new",
+            "CTYun",
+            &anthropic("CTYun", "https://ai.ctaigw.cn/v1"),
+        )?;
+        assert_eq!(count(&db, "provider_bindings")?, 0);
+
+        let keys = db.get_provider_upstream_keys("claude")?;
+        let binding = keys.get("p-new").expect("缺绑定的 provider 必须被补齐");
+        assert_eq!(binding.host, "ai.ctaigw.cn");
+        assert!(
+            binding
+                .circuit_key
+                .starts_with("up:up-ai.ctaigw.cn:anthropic:"),
+            "熔断键应指向网关级上游，实际 {}",
+            binding.circuit_key
+        );
+        assert_eq!(count(&db, "provider_bindings")?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn reconcile_is_idempotent_and_merges_same_host() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(&db, "claude", "p1", "CTYun", &anthropic("CTYun", "https://ai.ctaigw.cn/v1"))?;
+        insert_provider(&db, "claude", "p2", "Alias", &anthropic("Alias", "https://ai.ctaigw.cn/v1"))?;
+        insert_provider(
+            &db,
+            "claude-desktop",
+            "p3",
+            "CTYun Desktop",
+            &anthropic("CTYun Desktop", "https://ai.ctaigw.cn/v1"),
+        )?;
+
+        db.get_provider_upstream_keys("claude")?;
+        let (bindings, endpoints, upstreams) = (
+            count(&db, "provider_bindings")?,
+            count(&db, "upstream_endpoints")?,
+            count(&db, "upstreams")?,
+        );
+        assert_eq!((bindings, endpoints, upstreams), (2, 1, 1));
+
+        // 重复读同一个 app 不能产生任何重复
+        db.get_provider_upstream_keys("claude")?;
+        assert_eq!(count(&db, "provider_bindings")?, bindings);
+        assert_eq!(count(&db, "upstream_endpoints")?, endpoints);
+        assert_eq!(count(&db, "upstreams")?, upstreams);
+
+        // 换到另一个 app 读：只多一条绑定，上游与端点仍然只有一个
+        db.get_provider_upstream_keys("claude-desktop")?;
+        assert_eq!(count(&db, "provider_bindings")?, 3, "第三个 app 的那行也要补上");
+        assert_eq!(count(&db, "upstream_endpoints")?, endpoints);
+        assert_eq!(count(&db, "upstreams")?, upstreams, "同一网关只应有一个上游");
+        Ok(())
+    }
+
+    #[test]
+    fn base_url_change_moves_binding_instead_of_duplicating() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(
+            &db,
+            "claude",
+            "p1",
+            "Old",
+            &anthropic("Old", "https://old.example.com/v1"),
+        )?;
+        let before = db.get_provider_upstream_keys("claude")?;
+        assert_eq!(before.get("p1").map(|b| b.host.as_str()), Some("old.example.com"));
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE providers SET settings_config = ?1 WHERE id = 'p1' AND app_type = 'claude'",
+                params![anthropic("New", "https://new.example.com/v1")],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        let after = db.get_provider_upstream_keys("claude")?;
+        assert_eq!(
+            after.get("p1").map(|b| b.host.as_str()),
+            Some("new.example.com"),
+            "改 base_url 后绑定必须跟着换"
+        );
+        assert_eq!(count(&db, "provider_bindings")?, 1, "换绑不是新增");
+        assert_eq!(count(&db, "upstream_endpoints")?, 1, "旧端点应被清理");
+        assert_eq!(count(&db, "upstreams")?, 1, "旧上游应被清理");
+        assert_eq!(count(&db, "upstream_credentials")?, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn delete_provider_removes_binding_and_orphans() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        insert_provider(
+            &db,
+            "claude",
+            "p1",
+            "CTYun",
+            &anthropic("CTYun", "https://ai.ctaigw.cn/v1"),
+        )?;
+        db.get_provider_upstream_keys("claude")?;
+        assert_eq!(count(&db, "provider_bindings")?, 1);
+
+        db.delete_provider("claude", "p1")?;
+
+        assert_eq!(count(&db, "provider_bindings")?, 0, "绑定必须跟着删");
+        assert_eq!(count(&db, "upstream_credentials")?, 0);
+        assert_eq!(count(&db, "upstream_endpoints")?, 0);
+        assert_eq!(count(&db, "upstreams")?, 0, "无人引用的上游必须清理");
+        Ok(())
     }
 }

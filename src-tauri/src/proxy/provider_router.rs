@@ -193,6 +193,31 @@ impl ProviderRouter {
         loaded.get(provider_id).cloned()
     }
 
+    /// 该 provider 所在端点的 base_url（网关表真源）。
+    ///
+    /// `None` 表示没有绑定、或端点没有显式 URL（官方托管 / OAuth 由适配器算），
+    /// 调用方应回落到适配器解析。
+    pub async fn endpoint_base_url(&self, app_type: &str, provider_id: &str) -> Option<String> {
+        self.resolve_binding(app_type, provider_id)
+            .await
+            .map(|binding| binding.base_url)
+            .filter(|url| !url.is_empty())
+    }
+
+    /// 该接入的模型映射（**绑定优先**，取自 `provider_bindings.model_map`）。
+    ///
+    /// 模型映射属于「某个 agent 怎么用这条接入」，所以归接入而不是网关。
+    /// 解析不出时返回 `None`，调用方回落 `ModelMapping::from_provider`——
+    /// 现阶段绑定里的值是派生自 provider 的，两条路径结果相同，切换不改行为。
+    pub async fn model_mapping(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Option<super::model_mapper::ModelMapping> {
+        let binding = self.resolve_binding(app_type, provider_id).await?;
+        super::model_mapper::ModelMapping::from_json(binding.model_map.as_deref())
+    }
+
     /// 启动诊断：报告「哪些旧键会因为网关级改造而合并」。
     ///
     /// 只在 `shadow` / `on` 下打日志。合并项 > 0 说明确实存在跨 app 的重复上游——
@@ -304,11 +329,31 @@ impl ProviderRouter {
                 .map(|item| item.provider_id)
                 .collect();
 
+            // 同一「上游 + 协议 + 密钥」在一次选路里只尝试一次：完全相同的路由重试，
+            // 只会把同一个失败再撞一遍。注意**不能按端点折叠**——同一端点换一把 key
+            // 仍然值得重试，那正是凭证级故障转移存在的意义。
+            let mut seen_routes: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+
             for provider_id in ordered_ids {
                 let Some(provider) = all_providers.get(&provider_id).cloned() else {
                     continue;
                 };
                 if !provider_supports_failover(app_type, &provider) {
+                    continue;
+                }
+
+                // 去重看的是「真实路由身份」，与熔断键模式无关：即使还在 shadow，
+                // 两条完全相同的上游+协议+密钥也没有重试价值。
+                let route_identity = match self.resolve_binding(app_type, &provider.id).await {
+                    Some(binding) => binding.circuit_key,
+                    None => format!("{app_type}:{}", provider.id),
+                };
+                if !seen_routes.insert(route_identity) {
+                    log::debug!(
+                        "[{app_type}] 跳过重复路由候选 {}（与队列中前面的条目同一条路由）",
+                        provider.id
+                    );
                     continue;
                 }
                 total_providers += 1;
@@ -723,22 +768,105 @@ mod tests {
     /// 造一个「两个 app 在同一 host、但用不同 key」的库
     fn seed_same_host_two_credentials(db: &Database) -> Result<(), AppError> {
         let conn = lock_conn!(db.conn);
+        // 只种 providers：上游 / 端点 / 绑定由读时对账派生，跟真实路径一致
         conn.execute_batch(
-            "INSERT INTO upstreams (id, name, host, created_at)
-                VALUES ('up-kimi', 'Kimi', 'api.kimi.com', 1);
-             INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
-                VALUES ('ep-kimi', 'up-kimi', 'anthropic', 'https://api.kimi.com/coding', 1);
-             INSERT INTO providers (id, app_type, name, settings_config, created_at) VALUES
+            "INSERT INTO providers (id, app_type, name, settings_config, created_at) VALUES
                 ('p-a', 'claude', 'A',
-                 '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
+                 '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://api.kimi.com/coding\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
                 ('p-b', 'claude-desktop', 'B',
-                 '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);
-             INSERT INTO provider_bindings
-                (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
-                VALUES ('claude', 'p-a', 'ep-kimi', 0, 0, 0, 1),
-                       ('claude-desktop', 'p-b', 'ep-kimi', 0, 0, 0, 1);",
+                 '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://api.kimi.com/coding\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);",
         )
         .map_err(|e| AppError::Database(e.to_string()))?;
+        Ok(())
+    }
+
+    /// 模型映射的读路径已经走绑定。
+    ///
+    /// 注意现阶段**写源仍是 provider**：手工改 `provider_bindings.model_map` 会被下一次
+    /// 对账按 provider 覆盖回来。这是预期行为——读路径先切，等界面上能编辑模型映射时，
+    /// 再按 base_url 那套「改一处 + 向下传播」把写源翻过来。
+    #[tokio::test]
+    #[serial]
+    async fn model_mapping_is_read_from_binding() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let provider = Provider::with_id(
+            "p".to_string(),
+            "P".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-abc",
+                    "ANTHROPIC_DEFAULT_SONNET_MODEL": "kimi-k2",
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)?;
+
+        // 第一次读会派生绑定
+        let router = ProviderRouter::new(db.clone());
+        assert_eq!(
+            router
+                .model_mapping("claude", "p")
+                .await
+                .and_then(|mapping| mapping.sonnet_model),
+            Some("kimi-k2".to_string()),
+            "映射应从绑定读出来（当前由 provider 派生）"
+        );
+
+        // 绑定里确实落库了槽位化 JSON，而不是空
+        let stored: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT COALESCE(model_map, '') FROM provider_bindings
+                 WHERE app_type = 'claude' AND provider_id = 'p'",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?
+        };
+        assert!(
+            stored.contains("kimi-k2") && stored.contains("sonnet"),
+            "绑定里的 model_map 应是槽位化 JSON，实际 {stored}"
+        );
+
+        // 没有绑定的 provider：返回 None，调用方回落 provider
+        assert!(router.model_mapping("claude", "missing").await.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn endpoint_base_url_comes_from_gateway_table() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+        seed_same_host_two_credentials(&db)?;
+        // 再加一个没有显式 URL 的 provider：它必须交回 None，让适配器去算
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "INSERT INTO providers (id, app_type, name, settings_config, created_at)
+                 VALUES ('official', 'claude', 'Official', '{\"env\":{}}', 1)",
+                [],
+            )
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        }
+
+        let router = ProviderRouter::new(db.clone());
+
+        let a = router.endpoint_base_url("claude", "p-a").await;
+        let b = router.endpoint_base_url("claude-desktop", "p-b").await;
+        assert_eq!(a.as_deref(), Some("https://api.kimi.com/coding"));
+        assert_eq!(a, b, "同一网关的端点 URL 必须一致");
+
+        assert_eq!(
+            router.endpoint_base_url("claude", "official").await,
+            None,
+            "无显式 URL 的 provider 不得编造 base_url"
+        );
+        assert_eq!(router.endpoint_base_url("claude", "missing-id").await, None);
         Ok(())
     }
 
@@ -831,20 +959,13 @@ mod tests {
         let db = Arc::new(Database::memory().unwrap());
         {
             let conn = lock_conn!(db.conn);
+            // 只种 providers，其余交给读时对账派生
             conn.execute_batch(
-                "INSERT INTO upstreams (id, name, host, created_at)
-                    VALUES ('up-kimi', 'Kimi', 'api.kimi.com', 1);
-                 INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
-                    VALUES ('ep-kimi', 'up-kimi', 'anthropic', 'https://api.kimi.com/coding', 1);
-                 INSERT INTO providers (id, app_type, name, settings_config, created_at)
+                "INSERT INTO providers (id, app_type, name, settings_config, created_at)
                     VALUES ('kimi-coding', 'claude', 'Kimi For Coding',
-                            '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
+                            '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://api.kimi.com/coding\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-aaa\"}}', 1),
                            ('kimi-coding', 'claude-desktop', 'Kimi For Coding',
-                            '{\"env\":{\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);
-                 INSERT INTO provider_bindings
-                    (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
-                    VALUES ('claude', 'kimi-coding', 'ep-kimi', 0, 0, 0, 1),
-                           ('claude-desktop', 'kimi-coding', 'ep-kimi', 0, 0, 0, 1);",
+                            '{\"env\":{\"ANTHROPIC_BASE_URL\":\"https://api.kimi.com/coding\",\"ANTHROPIC_AUTH_TOKEN\":\"sk-bbb\"}}', 1);",
             )
             .map_err(|e| AppError::Database(e.to_string()))?;
         }
@@ -855,7 +976,7 @@ mod tests {
         let a = router.circuit_key_for("claude", "kimi-coding").await;
         let b = router.circuit_key_for("claude-desktop", "kimi-coding").await;
 
-        assert!(a.starts_with("up:up-kimi:anthropic:"), "实际键: {a}");
+        assert!(a.starts_with("up:up-api.kimi.com:anthropic:"), "实际键: {a}");
         assert_ne!(
             a, b,
             "同一上游但 key 不同：一把 key 配额耗尽不得把另一把也熔断"
@@ -976,6 +1097,52 @@ mod tests {
 
         assert_eq!(providers.len(), 1);
         assert_eq!(providers[0].id, "b");
+    }
+
+    /// 同一条路由（上游 + 协议 + 密钥完全相同）在队列里出现两次时只尝试一次；
+    /// 但同一端点换一把 key 必须保留——那是凭证级故障转移的意义。
+    #[tokio::test]
+    #[serial]
+    async fn failover_queue_skips_duplicate_routes_but_keeps_distinct_keys(
+    ) -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let make = |id: &str, key: &str| {
+            Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://api.kimi.com/coding",
+                        "ANTHROPIC_AUTH_TOKEN": key,
+                    }
+                }),
+                None,
+            )
+        };
+
+        db.save_provider("claude", &make("dup-a", "sk-same"))?;
+        db.save_provider("claude", &make("dup-b", "sk-same"))?;
+        db.save_provider("claude", &make("other-key", "sk-diff"))?;
+        for id in ["dup-a", "dup-b", "other-key"] {
+            db.add_to_failover_queue("claude", id)?;
+        }
+
+        let mut config = db.get_proxy_config_for_app("claude").await?;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await?;
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await?;
+        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+
+        assert_eq!(
+            ids,
+            vec!["dup-a", "other-key"],
+            "同一路由应折叠，不同密钥不得折叠"
+        );
+        Ok(())
     }
 
     #[tokio::test]

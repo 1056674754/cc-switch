@@ -4248,6 +4248,7 @@
     "authNeedsReauth": "有账号需要重新登录",
     "prompts": "提示词",
     "sessions": "会话",
+    "suppliers": "供应商",
     "apps": "应用",
     "appsTitle": "应用：安装、升级、在侧栏显示哪些",
     "appsHasUpdate": "应用 · 有可用更新",
@@ -4313,6 +4314,35 @@
     "memory": "记忆",
     "webUi": "Web UI",
     "viewUsage": "查看此应用的用量"
+  },
+  "suppliers": {
+    "description": "在这里配一次上游地址和密钥，所有使用它的 agent 共用。改端点地址时，接入这个端点的应用会一起被改写。",
+    "helpTitle": "供应商",
+    "helpBody": "供应商是网关级的上游：一家供应商下可以有几个协议不同的端点，每个端点带着自己的地址和凭据。改一个端点的地址，所有接入这个端点的应用会一起被改写。",
+    "loadFailed": "读取供应商失败",
+    "loadFailedHint": "请稍后重试；如果一直失败，检查本地数据库是否能正常读取。",
+    "empty": "还没有供应商。在任意应用的供应商页添加一家之后，这里会按上游汇总显示。",
+    "noHost": "托管登录",
+    "noBaseUrl": "无地址（托管登录）",
+    "noEndpoints": "这家供应商还没有端点",
+    "endpointCount_other": "{{count}} 个端点",
+    "appCount_other": "{{count}} 个应用",
+    "credentialCount_other": "{{count}} 个凭据",
+    "credentialKinds": "凭据形态",
+    "credentialKind": {
+      "literal": "明文密钥",
+      "env_ref": "环境变量",
+      "managed": "托管登录",
+      "none": "无凭据"
+    },
+    "usedBy": "被使用",
+    "unused": "还没有应用使用",
+    "editUrl": "编辑地址",
+    "baseUrlLabel": "端点地址",
+    "baseUrlPlaceholder": "https://api.example.com",
+    "baseUrlRequired": "请先填写地址",
+    "updateSuccess": "地址已更新，接入的应用一起生效",
+    "updateFailed": "地址更新失败"
   },
   "mode": {
     "tabsLabel": "连接模式",

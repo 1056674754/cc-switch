@@ -1,6 +1,7 @@
 export type { AppId } from "./types";
 export { piApi } from "./pi";
 export { providersApi, universalProvidersApi } from "./providers";
+export { suppliersApi } from "./suppliers";
 export { settingsApi } from "./settings";
 export { backupsApi } from "./settings";
 export { mcpApi } from "./mcp";
@@ -17,6 +18,7 @@ export { workspaceApi } from "./workspace";
 export * as authApi from "./auth";
 export * as copilotApi from "./copilot";
 export type { ProviderSwitchEvent } from "./providers";
+export type { Supplier, SupplierEndpoint } from "./suppliers";
 export type { Prompt } from "./prompts";
 export type { Profile, ProfilePayload, ProfilesResponse } from "./profiles";
 export type {
