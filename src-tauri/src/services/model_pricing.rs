@@ -493,7 +493,8 @@ fn update_model_pricing_batch_inner(
             .retain(|model_id| !updated_ids.contains(model_id));
 
         let mut conn = lock_conn!(db.conn);
-        let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let transaction =
+            conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let mut changed = 0;
         for entry in &entries {
             changed += upsert_pricing(&transaction, entry)?;

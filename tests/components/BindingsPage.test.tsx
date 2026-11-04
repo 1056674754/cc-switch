@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { BindingsPage } from "@/components/bindings/BindingsPage";
-import type { Supplier, SupplierEndpoint } from "@/lib/api/suppliers";
+import type { Supplier, SupplierBindingDetail } from "@/lib/api/suppliers";
 
 const mocks = vi.hoisted(() => ({
   overview: vi.fn(),
@@ -16,8 +16,8 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api/suppliers", () => ({
   suppliersApi: {
     overview: () => mocks.overview(),
-    adopt: (appType: string, endpointId: string) =>
-      mocks.adopt(appType, endpointId),
+    adopt: (appType: string, supplierId: string) =>
+      mocks.adopt(appType, supplierId),
     updateBindingModelMap: (
       appType: string,
       providerId: string,
@@ -44,15 +44,12 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-const endpoint = (
-  overrides: Partial<SupplierEndpoint> & Pick<SupplierEndpoint, "id">,
-): SupplierEndpoint => ({
-  protocol: "anthropic",
-  baseUrl: `https://${overrides.id}.dev`,
-  apps: [],
-  consumers: [],
-  credentialCount: 0,
-  bindings: [],
+const binding = (
+  overrides: Partial<SupplierBindingDetail> &
+    Pick<SupplierBindingDetail, "appType" | "providerId">,
+): SupplierBindingDetail => ({
+  modelMap: {},
+  downstreamProtocol: "anthropic",
   ...overrides,
 });
 
@@ -60,77 +57,77 @@ const supplier = (
   overrides: Partial<Supplier> & Pick<Supplier, "id" | "name">,
 ): Supplier => ({
   host: "",
-  appCount: 1,
+  baseUrl: "",
+  upstreamProtocol: "anthropic",
+  apps: [],
+  consumers: [],
+  bindings: [],
+  credentialCount: 0,
   credentialKinds: ["literal"],
-  endpoints: [],
   ...overrides,
 });
 
 /**
- * claude 在用 Acme 的 ep-1，codex 在用 Acme 的 ep-2 和 Beta 的 openai_chat 端点；
- * Gemini 只出现在端点 apps 里（没有 consumer 明细），用来覆盖单张卡片的空态。
+ * claude 在用 Acme（anthropic）；codex 在用 Beta（openai_chat）；
+ * Gemini 只出现在 Beta 的 apps 里（没有接入明细），用来覆盖单张卡片的空态；
+ * Gamma 是还没被 claude 使用的 anthropic 供应商，应当出现在「选用」下拉里。
  */
 const overview: Supplier[] = [
   supplier({
-    id: "sup-1",
+    id: "sup-acme",
     name: "Acme Gateway",
     host: "api.acme.dev",
-    appCount: 2,
-    endpoints: [
-      endpoint({
-        id: "ep-1",
-        baseUrl: "https://api.acme.dev",
-        apps: ["claude"],
-        consumers: ["claude:p1"],
-        credentialCount: 1,
-        bindings: [
-          {
-            appType: "claude",
-            providerId: "p1",
-            modelMap: { haiku: "kimi-k2-small", sonnet: "kimi-k2" },
-          },
-        ],
-      }),
-      endpoint({
-        id: "ep-2",
-        baseUrl: "https://api.acme.dev/v2",
-        apps: ["codex"],
-        consumers: ["codex:p2"],
-        credentialCount: 1,
+    baseUrl: "https://api.acme.dev",
+    upstreamProtocol: "anthropic",
+    apps: ["claude"],
+    consumers: ["claude:p1"],
+    credentialCount: 1,
+    bindings: [
+      binding({
+        appType: "claude",
+        providerId: "p1",
+        modelMap: { haiku: "kimi-k2-small", sonnet: "kimi-k2" },
       }),
     ],
   }),
   supplier({
-    id: "sup-2",
+    id: "sup-beta",
     name: "Beta Gate",
     host: "beta.dev",
-    appCount: 2,
-    endpoints: [
-      endpoint({
-        id: "ep-3",
-        protocol: "openai_chat",
-        baseUrl: "https://beta.dev",
-        apps: ["codex", "gemini"],
-        consumers: ["codex:p3"],
-        credentialCount: 1,
+    baseUrl: "https://beta.dev",
+    upstreamProtocol: "openai_chat",
+    apps: ["codex", "gemini"],
+    consumers: ["codex:p3"],
+    credentialCount: 1,
+    bindings: [
+      binding({
+        appType: "codex",
+        providerId: "p3",
+        downstreamProtocol: "openai_responses",
       }),
     ],
+  }),
+  supplier({
+    id: "sup-gamma",
+    name: "Gamma Gate",
+    host: "gamma.dev",
+    baseUrl: "https://gamma.dev/v1",
+    upstreamProtocol: "anthropic",
   }),
 ];
 
 /** 用一份新的 claude 模型映射重建总览（后端保存后返回的形状）。 */
 const withClaudeModelMap = (modelMap: Record<string, string>): Supplier[] =>
-  overview.map((item) => ({
-    ...item,
-    endpoints: item.endpoints.map((endpoint) =>
-      endpoint.id === "ep-1"
-        ? {
-            ...endpoint,
-            bindings: [{ appType: "claude", providerId: "p1", modelMap }],
-          }
-        : endpoint,
-    ),
-  }));
+  overview.map((supplier) =>
+    supplier.id === "sup-acme"
+      ? {
+          ...supplier,
+          bindings: [
+            binding({ appType: "claude", providerId: "p1", modelMap }),
+          ],
+        }
+      : supplier,
+  );
 
 const renderPage = () => {
   const client = new QueryClient({
@@ -178,11 +175,10 @@ describe("BindingsPage", () => {
       screen.queryByRole("heading", { name: "OpenClaw" }),
     ).not.toBeInTheDocument();
 
-    // 在用的供应商 + 端点地址 + 协议徽标
+    // 在用的供应商 + 服务根地址 + 上游协议徽标
     expect(screen.getAllByText("Acme Gateway").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Beta Gate").length).toBeGreaterThan(0);
     expect(screen.getByText("https://api.acme.dev")).toBeInTheDocument();
-    expect(screen.getByText("https://api.acme.dev/v2")).toBeInTheDocument();
     expect(screen.getByText("https://beta.dev")).toBeInTheDocument();
     expect(screen.getAllByText("Anthropic").length).toBeGreaterThan(0);
     expect(screen.getByText("OpenAI Chat")).toBeInTheDocument();
@@ -193,15 +189,29 @@ describe("BindingsPage", () => {
 
     await screen.findByRole("heading", { name: "Gemini" });
 
-    // Gemini 出现在端点 apps 里，但没有 consumer 明细：这张卡片给空态
+    // Gemini 出现在供应商 apps 里，但没有接入明细：这张卡片给空态
     expect(screen.getByText("bindings.appEmpty")).toBeInTheDocument();
   });
 
-  it("offers only unused Anthropic endpoints and adopts the picked one", async () => {
+  it("offers only unused Anthropic suppliers and adopts the picked one", async () => {
+    // 托管登录账号没有网关地址，不能作为「选用」候选
+    mocks.overview.mockResolvedValue([
+      ...overview,
+      supplier({
+        id: "sup-managed",
+        name: "Claude Official",
+        upstreamProtocol: "anthropic",
+        apps: ["claude"],
+        consumers: ["claude:official"],
+        credentialCount: 1,
+        credentialKinds: ["managed"],
+        bindings: [binding({ appType: "claude", providerId: "official" })],
+      }),
+    ]);
     mocks.adopt.mockResolvedValue({
       appType: "claude",
-      providerId: "sup-ep-2",
-      providerName: "Acme Gateway",
+      providerId: "sup-adopted",
+      providerName: "Gamma Gate",
     });
 
     const { invalidateQueries } = renderPage();
@@ -210,20 +220,20 @@ describe("BindingsPage", () => {
 
     await user.click(picker("Claude"));
 
-    // Claude 已经在用 ep-1，所以候选只剩同一家的 ep-2；
-    // Beta 的 openai_chat 端点协议不对，不进候选。
+    // Claude 已经在用 Acme、Claude Official，候选只剩还没用过的 Gamma；
+    // Beta 的 openai_chat 协议不对，不进候选。
     const options = await screen.findAllByRole("option");
     expect(options).toHaveLength(1);
-    expect(options[0]).toHaveTextContent("Acme Gateway");
-    expect(options[0]).toHaveTextContent("https://api.acme.dev/v2");
+    expect(options[0]).toHaveTextContent("Gamma Gate");
+    expect(options[0]).toHaveTextContent("https://gamma.dev/v1");
 
     await user.click(options[0]);
 
     await waitFor(() =>
-      expect(mocks.adopt).toHaveBeenCalledWith("claude", "ep-2"),
+      expect(mocks.adopt).toHaveBeenCalledWith("claude", "sup-gamma"),
     );
     expect(mocks.success).toHaveBeenCalledWith(
-      "suppliers.adoptSuccess:Claude|Acme Gateway",
+      "suppliers.adoptSuccess:Claude|Gamma Gate",
     );
     // agent 侧和网关侧两个列表都要重读
     await waitFor(() => {
@@ -294,8 +304,8 @@ describe("BindingsPage", () => {
     expect(
       screen.getByText("haiku → kimi-k2-small · sonnet → kimi-k2"),
     ).toBeInTheDocument();
-    // Codex 的两条接入都没有映射：如实显示「未配置」，不是留白
-    expect(screen.getAllByText("bindings.modelMapEmpty")).toHaveLength(2);
+    // Codex 的接入没有映射：如实显示「未配置」，不是留白
+    expect(screen.getByText("bindings.modelMapEmpty")).toBeInTheDocument();
   });
 
   it("prefills the six slots from the binding and saves the edited mapping", async () => {

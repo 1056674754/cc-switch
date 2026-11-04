@@ -4318,17 +4318,14 @@
     "viewUsage": "查看此应用的用量"
   },
   "suppliers": {
-    "description": "在这里配一次上游地址和密钥，所有使用它的 agent 共用。改端点地址时，接入这个端点的应用会一起被改写。",
+    "description": "一家供应商 = 一个上游地址 + 一种上游协议。在这里改一次地址或密钥，接入它的所有 agent 一起生效。",
     "helpTitle": "供应商",
-    "helpBody": "供应商是网关级的上游：一家供应商下可以有几个协议不同的端点，每个端点带着自己的地址和凭据。改一个端点的地址，所有接入这个端点的应用会一起被改写。",
+    "helpBody": "供应商是网关级的上游：每家对应一个确切的上游 API（服务根 + 上游协议），可以同时接入多个 agent。上游协议与客户端协议不同时，请求会经过代理转换；地址和密钥改一次，所有接入的应用一起生效。",
     "loadFailed": "读取供应商失败",
     "loadFailedHint": "请稍后重试；如果一直失败，检查本地数据库是否能正常读取。",
     "empty": "还没有供应商。在任意应用的供应商页添加一家之后，这里会按上游汇总显示。",
     "noHost": "托管登录",
     "noBaseUrl": "无地址（托管登录）",
-    "noEndpoints": "这家供应商还没有端点",
-    "endpointCount_other": "{{count}} 个端点",
-    "appCount_other": "{{count}} 个应用",
     "credentialCount_other": "{{count}} 个凭据",
     "credentialKinds": "凭据形态",
     "credentialKind": {
@@ -4340,7 +4337,7 @@
     "usedBy": "被使用",
     "unused": "还没有应用使用",
     "editUrl": "编辑地址",
-    "baseUrlLabel": "端点地址",
+    "baseUrlLabel": "上游地址",
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "请先填写地址",
     "updateSuccess": "地址已更新，接入的应用一起生效",
@@ -4375,7 +4372,12 @@
     "createAppsRequired": "至少勾选一个应用",
     "createSubmit": "创建",
     "createSuccess": "已新增供应商 {{name}}",
-    "createFailed": "新增供应商失败，请重试"
+    "createFailed": "新增供应商失败，请重试",
+    "upstreamProtocol": "上游协议",
+    "protocolConversion": "{{downstream}} → {{upstream}}",
+    "protocolConversionHint": "客户端协议与上游协议不同，请求会经过代理转换",
+    "adoptDisabledHint": "直连模式的 claude 只吃 anthropic 上游",
+    "modelMapAction": "模型映射"
   },
   "bindings": {
     "description": "各 agent 从这里选用供应商；地址和密钥都在供应商那边配。",
@@ -4388,8 +4390,8 @@
     "currentSuppliers": "当前供应商",
     "appEmpty": "这个应用还没有选用供应商",
     "pickSupplierFor": "为 {{app}} 选用供应商",
-    "pickPlaceholder": "选择供应商端点…",
-    "noCandidates": "没有可选的端点：需要 anthropic 协议的供应商，且这个应用还没在用。",
+    "pickPlaceholder": "选择供应商…",
+    "noCandidates": "没有可选的供应商：需要 anthropic 协议、有网关地址，且这个应用还没在用。",
     "adopting": "正在接入…",
     "manualOnly": "该应用需要手动配置，暂不支持一键选用",
     "modelMap": "模型映射",
@@ -4397,7 +4399,7 @@
     "modelMapEdit": "编辑映射",
     "modelMapFor": "{{app}} 的模型映射",
     "modelMapPlaceholder": "模型名称",
-    "modelMapHint": "槽位留空表示清掉对应的模型字段；保存只影响这个应用，不动同一端点上别的应用。",
+    "modelMapHint": "槽位留空表示清掉对应的模型字段；保存只影响这个应用，不动同一供应商上别的应用。",
     "modelMapSaved": "模型映射已保存",
     "modelMapFailed": "模型映射保存失败",
     "modelSlot": {
@@ -4409,7 +4411,7 @@
       "default": "默认"
     },
     "duplicateBadge": "重复接入 ×{{count}}",
-    "duplicateHint": "同一个应用里有 {{count}} 条配置指向这个网关，可以在应用页合并掉多余的"
+    "duplicateHint": "同一个应用里有 {{count}} 条配置指向这家供应商，可以在应用页合并掉多余的"
   },
   "mode": {
     "tabsLabel": "连接模式",

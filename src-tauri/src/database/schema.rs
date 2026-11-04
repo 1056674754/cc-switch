@@ -224,7 +224,13 @@ impl Database {
             "INSERT OR IGNORE INTO upstream_endpoints
              (id, upstream_id, protocol, base_url, created_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![lift.endpoint_id, lift.upstream_id, lift.protocol, lift.url, now],
+            params![
+                lift.endpoint_id,
+                lift.upstream_id,
+                lift.protocol,
+                lift.url,
+                now
+            ],
         )?;
         // 凭证占位：只记录来源，不搬 key。
         // 用 upsert 而不是 IGNORE：base_url 变了要跟着换 endpoint_id，
@@ -939,9 +945,7 @@ impl Database {
                         Self::set_user_version(conn, 25)?;
                     }
                     25 => {
-                        log::info!(
-                            "迁移数据库从 v25 到 v26（绑定模型映射 + 凭证形态）"
-                        );
+                        log::info!("迁移数据库从 v25 到 v26（绑定模型映射 + 凭证形态）");
                         Self::migrate_v25_to_v26(conn)?;
                         Self::set_user_version(conn, 26)?;
                     }
@@ -2085,8 +2089,13 @@ impl Database {
         if Self::table_exists(conn, "provider_bindings")?
             && !Self::has_column(conn, "provider_bindings", "model_map")?
         {
-            conn.execute("ALTER TABLE provider_bindings ADD COLUMN model_map TEXT", [])
-                .map_err(|e| AppError::Database(format!("加列 provider_bindings.model_map 失败: {e}")))?;
+            conn.execute(
+                "ALTER TABLE provider_bindings ADD COLUMN model_map TEXT",
+                [],
+            )
+            .map_err(|e| {
+                AppError::Database(format!("加列 provider_bindings.model_map 失败: {e}"))
+            })?;
         }
         if Self::table_exists(conn, "upstream_credentials")?
             && !Self::has_column(conn, "upstream_credentials", "secret_kind")?
@@ -2182,7 +2191,10 @@ impl Database {
             ("subagent", "CLAUDE_CODE_SUBAGENT_MODEL"),
             ("default", "ANTHROPIC_MODEL"),
         ];
-        let Some(env) = config.get_mut("env").and_then(|value| value.as_object_mut()) else {
+        let Some(env) = config
+            .get_mut("env")
+            .and_then(|value| value.as_object_mut())
+        else {
             return false;
         };
 
@@ -2314,7 +2326,9 @@ impl Database {
 
         let mut changed = false;
         for scope in ["env", "options"] {
-            let Some(object) = config.get_mut(scope).and_then(|value| value.as_object_mut())
+            let Some(object) = config
+                .get_mut(scope)
+                .and_then(|value| value.as_object_mut())
             else {
                 continue;
             };
@@ -2434,10 +2448,7 @@ impl Database {
         let path = parsed.path().trim_end_matches('/').to_string();
         // query 是 URL 语义的一部分（Azure 风格的 api-version 全靠它），必须保留，
         // 否则请求侧会丢掉它；fragment 不会发给服务端，丢弃。
-        let query = parsed
-            .query()
-            .map(|q| format!("?{q}"))
-            .unwrap_or_default();
+        let query = parsed.query().map(|q| format!("?{q}")).unwrap_or_default();
         let normalized = format!("{scheme}://{host}{port}{path}{query}");
         Some((host, normalized))
     }
@@ -5183,7 +5194,10 @@ mod tests {
 
         // 认不出的形状必须明确返回 false，不能悄悄成功
         let mut opaque = serde_json::json!({"something": "else"});
-        assert!(!Database::p1_set_base_url(&mut opaque, "https://new.example.com"));
+        assert!(!Database::p1_set_base_url(
+            &mut opaque,
+            "https://new.example.com"
+        ));
     }
 
     /// 模型映射读写必须闭合：写进去的槽位，`p1_model_map` 要能原样读回来。
@@ -5206,18 +5220,23 @@ mod tests {
             "kimi-k2-small"
         );
         // 地址不能被模型映射动到
-        assert_eq!(config["env"]["ANTHROPIC_BASE_URL"], "https://ai.ctaigw.cn/v1");
+        assert_eq!(
+            config["env"]["ANTHROPIC_BASE_URL"],
+            "https://ai.ctaigw.cn/v1"
+        );
 
         // 读回来一致
-        let extracted: serde_json::Value = serde_json::from_str(
-            &Database::p1_model_map(&config).expect("应能提取"),
-        )
-        .expect("合法 JSON");
+        let extracted: serde_json::Value =
+            serde_json::from_str(&Database::p1_model_map(&config).expect("应能提取"))
+                .expect("合法 JSON");
         assert_eq!(extracted["sonnet"], "kimi-k2");
         assert_eq!(extracted["haiku"], "kimi-k2-small");
 
         // 清空某个槽位应删除对应 env 键，而不是留空串
-        assert!(Database::p1_set_model_map(&mut config, &serde_json::json!({"sonnet": "kimi-k2"})));
+        assert!(Database::p1_set_model_map(
+            &mut config,
+            &serde_json::json!({"sonnet": "kimi-k2"})
+        ));
         assert!(
             config["env"].get("ANTHROPIC_DEFAULT_HAIKU_MODEL").is_none(),
             "被清掉的槽位要删除 env 键"
@@ -5240,8 +5259,16 @@ mod tests {
         Database::set_user_version(&conn, 25)?;
 
         Database::apply_schema_migrations_on_conn(&conn)?;
-        assert!(Database::has_column(&conn, "provider_bindings", "model_map")?);
-        assert!(Database::has_column(&conn, "upstream_credentials", "secret_kind")?);
+        assert!(Database::has_column(
+            &conn,
+            "provider_bindings",
+            "model_map"
+        )?);
+        assert!(Database::has_column(
+            &conn,
+            "upstream_credentials",
+            "secret_kind"
+        )?);
 
         // 派生：模型映射来自 env，凭证形态按配置判定
         conn.execute(
@@ -5264,7 +5291,10 @@ mod tests {
             [],
             |row| row.get(0),
         )?;
-        assert!(model_map.contains("kimi-k2"), "model_map 未填入: {model_map}");
+        assert!(
+            model_map.contains("kimi-k2"),
+            "model_map 未填入: {model_map}"
+        );
         assert!(model_map.contains("\"sonnet\""), "应按槽位存: {model_map}");
 
         let kind = |provider: &str| -> Result<String, AppError> {
@@ -5275,7 +5305,11 @@ mod tests {
                 |row| row.get(0),
             )?)
         };
-        assert_eq!(kind("envref")?, "env_ref", "只存环境变量名的必须标成 env_ref");
+        assert_eq!(
+            kind("envref")?,
+            "env_ref",
+            "只存环境变量名的必须标成 env_ref"
+        );
         assert_eq!(kind("local")?, "none", "本地推理无鉴权");
         Ok(())
     }
@@ -5401,9 +5435,13 @@ mod tests {
         let upstreams: i64 =
             conn.query_row("SELECT COUNT(*) FROM upstreams", [], |row| row.get(0))?;
         let endpoints: i64 =
-            conn.query_row("SELECT COUNT(*) FROM upstream_endpoints", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM upstream_endpoints", [], |row| {
+                row.get(0)
+            })?;
         let bindings: i64 =
-            conn.query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| row.get(0))?;
+            conn.query_row("SELECT COUNT(*) FROM provider_bindings", [], |row| {
+                row.get(0)
+            })?;
         let with_url: i64 = conn.query_row(
             "SELECT COUNT(*) FROM upstreams WHERE host <> ''",
             [],
@@ -5434,7 +5472,10 @@ mod tests {
                 row.get::<_, i64>(4)?,
             ))
         })?;
-        println!("\n{:<26}{:<28}{:<16}{:<52}绑定", "上游名", "host", "协议", "base_url");
+        println!(
+            "\n{:<26}{:<28}{:<16}{:<52}绑定",
+            "上游名", "host", "协议", "base_url"
+        );
         for item in listing {
             let (name, host, protocol, url, count) = item?;
             println!("{name:<26}{host:<28}{protocol:<16}{url:<52}{count}");
@@ -5564,10 +5605,7 @@ mod tests {
         }
         let reconciled = snapshot(&conn)?;
 
-        assert_eq!(
-            migrated, reconciled,
-            "增量补绑定必须与整库迁移产出完全一致"
-        );
+        assert_eq!(migrated, reconciled, "增量补绑定必须与整库迁移产出完全一致");
         assert!(!reconciled.is_empty(), "快照不该为空（否则断言无意义）");
         Ok(())
     }
@@ -5584,7 +5622,8 @@ mod tests {
         Database::apply_schema_migrations_on_conn(&conn)?;
 
         let mut apps: Vec<String> = {
-            let mut stmt = conn.prepare("SELECT DISTINCT app_type FROM providers ORDER BY app_type")?;
+            let mut stmt =
+                conn.prepare("SELECT DISTINCT app_type FROM providers ORDER BY app_type")?;
             let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
             rows.collect::<Result<Vec<_>, _>>()?
         };
@@ -5645,7 +5684,11 @@ mod tests {
     }
 
     fn count(conn: &Connection, table: &str) -> Result<i64, AppError> {
-        Ok(conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))?)
+        Ok(
+            conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })?,
+        )
     }
 
     /// 端点表里的 base_url 必须能安全替代适配器解析。
@@ -5680,13 +5723,13 @@ mod tests {
             let Ok(config) = serde_json::from_str::<serde_json::Value>(&row.config) else {
                 continue;
             };
-            let Ok(provider) = serde_json::from_value::<crate::provider::Provider>(
-                serde_json::json!({
+            let Ok(provider) =
+                serde_json::from_value::<crate::provider::Provider>(serde_json::json!({
                     "id": row.id,
                     "name": row.name,
                     "settingsConfig": config,
-                }),
-            ) else {
+                }))
+            else {
                 continue;
             };
 

@@ -1,49 +1,49 @@
 import { invoke } from "@tauri-apps/api/core";
 
 /**
- * 一条接入明细：哪个 app 的哪条配置挂在这个端点上，以及它自己的模型映射。
+ * 一条接入明细：哪个 app 的哪条配置挂在这家供应商上，以及它自己的模型映射。
  *
- * 模型映射归「接入」而不归网关：同一个端点，claude 里可以映射成 kimi-k2、
+ * 模型映射归「接入」而不归供应商：同一个上游，claude 里可以映射成 kimi-k2、
  * claude-desktop 里映射成别的，所以每条接入各带一份。
  */
-export interface SupplierEndpointBinding {
+export interface SupplierBindingDetail {
   /** app 类型，如 "claude" / "claude-desktop" */
   appType: string;
-  /** 该 app 里挂在这个端点上的 providerId */
+  /** 该 app 里挂在这家供应商上的 providerId */
   providerId: string;
   /** 槽位化映射（haiku/sonnet/opus/fable/subagent/default）；没配过时是空对象 */
   modelMap: Record<string, string>;
+  /** 客户端 → 代理 这一段的协议（由 app 决定） */
+  downstreamProtocol: string;
 }
 
-/** 网关端点：某家供应商在某一种协议上的上游地址。 */
-export interface SupplierEndpoint {
-  /** 端点主键 */
+/**
+ * 一家供应商 = 一个确切的上游 API（服务根 + 上游协议）+ 用它的一组接入。
+ *
+ * 同一家供应商在不同 app 的配置里可能写成不同的完整 URL（`.../v1`、
+ * `.../v1/chat/completions`），后端会把它们归并到同一个服务根，所以界面上
+ * 一家供应商只有一个地址。
+ */
+export interface Supplier {
+  /** 稳定 id，如 "sup-1a2b3c…" */
   id: string;
-  /** 协议：anthropic / openai_chat / openai_responses / gemini_native …（未知协议原样透出） */
-  protocol: string;
-  /** 归一化后的地址；托管 OAuth 类供应商没有地址时是空串 */
+  /** 供应商显示名（可能重名，靠 baseUrl / 协议区分） */
+  name: string;
+  /** 域名；托管登录账号为空串 */
+  host: string;
+  /** 服务根，如 https://ai.ctaigw.cn/v1；托管登录账号为空串 */
   baseUrl: string;
-  /** 使用该端点的 app，如 ["claude", "claude-desktop"] */
+  /** 代理 → 上游 的协议：openai_chat / anthropic / openai_responses / gemini_native … */
+  upstreamProtocol: string;
+  /** 使用它的 app，如 ["claude", "claude-desktop"] */
   apps: string[];
   /** `app:providerId` 明细，方便跳回各应用的原有配置 */
   consumers: string[];
-  /** 挂在这个端点上的凭据数 */
+  /** 接入明细（含模型映射与下游协议），模型映射编辑器用它预填 */
+  bindings: SupplierBindingDetail[];
+  /** 挂在这个地址上的凭据数 */
   credentialCount: number;
-  /** 接入明细（含模型映射），模型映射编辑器用它预填 */
-  bindings: SupplierEndpointBinding[];
-}
-
-/** 供应商（网关级上游）：一家服务商有几个端点、被哪些 app 使用。 */
-export interface Supplier {
-  id: string;
-  /** 供应商显示名 */
-  name: string;
-  /** 域名；托管 OAuth 类供应商为空串 */
-  host: string;
-  endpoints: SupplierEndpoint[];
-  /** 被几个 app 使用 */
-  appCount: number;
-  /** 这家供应商下出现过的凭据形态：literal / env_ref / managed / none 的子集 */
+  /** 这个地址上出现过的凭据形态：literal / env_ref / managed / none 的子集 */
   credentialKinds: string[];
 }
 
@@ -76,22 +76,22 @@ export const suppliersApi = {
     return invoke("get_suppliers_overview");
   },
 
-  // 改一个端点的地址：所有使用它的 app 会一起被改写，返回更新后的总览
+  // 改一家供应商的地址：所有使用它的 app 会一起被改写，返回更新后的总览
   async updateBaseUrl(
-    endpointId: string,
+    supplierId: string,
     baseUrl: string,
   ): Promise<Supplier[]> {
-    return invoke("update_supplier_base_url", { endpointId, baseUrl });
+    return invoke("update_supplier_base_url", { supplierId, baseUrl });
   },
 
-  // 换一把密钥：所有使用这个端点的 app 一起换，返回更新后的总览。
+  // 换一把密钥：所有使用这家供应商的 app 一起换，返回更新后的总览。
   // 密钥只写不读——后端从不返回明文，只返回 credentialCount，界面也拿不到旧值。
-  // 密钥存在环境变量里（库里没有明文）或端点没有任何接入时会 reject 一段中文原因。
-  async updateSecret(endpointId: string, secret: string): Promise<Supplier[]> {
-    return invoke("update_supplier_secret", { endpointId, secret });
+  // 密钥存在环境变量里（库里没有明文）或这家供应商没有任何接入时会 reject 一段中文原因。
+  async updateSecret(supplierId: string, secret: string): Promise<Supplier[]> {
+    return invoke("update_supplier_secret", { supplierId, secret });
   },
 
-  // 改一个接入的模型映射（app + provider 粒度，不动同一端点上别的 app）。
+  // 改一个接入的模型映射（app + provider 粒度，不动这家供应商上别的 app）。
   // modelMap 的槽位是固定的 haiku/sonnet/opus/fable/subagent/default，
   // 值为空串（或整个槽位缺省）表示清掉该槽位对应的模型字段。
   async updateBindingModelMap(
@@ -106,13 +106,13 @@ export const suppliersApi = {
     });
   },
 
-  // 一键采用：把端点接进某个 agent，地址和密钥都从网关读，用户不用填 key。
+  // 一键采用：把供应商接进某个 agent，地址和密钥都从网关读，用户不用填 key。
   // 目前后端只支持 claude / claude-desktop；协议不匹配、密钥是环境变量引用或托管登录时
   // 会 reject 一段中文原因，调用方原样 toast 出来。
   async adopt(
     appType: string,
-    endpointId: string,
+    supplierId: string,
   ): Promise<AdoptedSupplierProvider> {
-    return invoke("adopt_supplier", { appType, endpointId });
+    return invoke("adopt_supplier", { appType, supplierId });
   },
 };

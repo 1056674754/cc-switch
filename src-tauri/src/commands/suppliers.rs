@@ -1,9 +1,26 @@
 //! 供应商（网关级上游）总览。
 //!
 //! 这是「以供应商为一级公民」的读入口：前端不再从「某个 app 的 provider 列表」
-//! 出发，而是从网关出发看——一家服务商有几个端点、几把凭据、被哪些 app 使用。
+//! 出发，而是从网关出发看——一家供应商对应**一个确切的上游 API**，被哪些 app 使用。
 //!
-//! 当前只读，不改任何既有写入路径；后续的供应商编辑 / 接入选择器都建立在这层之上。
+//! ## 上游协议与下游协议
+//!
+//! 一条请求穿过代理时有两段协议，不能混为一谈：
+//!
+//! - **下游协议**：客户端 → 代理。由 **app** 决定（Claude Code 说 Anthropic Messages，
+//!   Codex 说 OpenAI Responses），是 app 的固有属性。
+//! - **上游协议**：代理 → 供应商。由 **`provider.meta.apiFormat`** 决定
+//!   （`openai_chat` / `anthropic` / `openai_responses` / `gemini_native`），是供应商的属性。
+//!
+//! 代理就是两段之间的转换器；两者不同正是路由模式存在的理由。**供应商的身份里只能有
+//! 上游协议**——按 app 推协议会把同一个上游拆成好几家（曾经就这么错过了：Claude 用户
+//! 接的 CTYun 上游其实是 `openai_chat`，却被标成 `anthropic`）。
+//!
+//! ## 为什么没有「端点」这一层
+//!
+//! 同一个上游 API 在不同 app 的配置里会写成不同的 URL 形式（OpenAI 客户端写 `.../v1`，
+//! 开了「完整 URL」的客户端写 `.../v1/chat/completions`）。这些是**同一条路由的不同写法**，
+//! 不是多个端点。这里把它们规范化到服务根再归并，界面上一个供应商只有**一个地址**。
 
 use crate::database::lock_conn;
 use crate::error::AppError;
@@ -11,24 +28,7 @@ use crate::store::AppState;
 use serde::Serialize;
 use std::collections::BTreeMap;
 
-/// 一个端点，以及它在各 agent 侧被谁使用。
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SupplierEndpoint {
-    pub id: String,
-    pub protocol: String,
-    pub base_url: String,
-    /// 使用该端点的 app（去重、有序）
-    pub apps: Vec<String>,
-    /// `app:providerId` 明细，方便前端跳回原配置
-    pub consumers: Vec<String>,
-    /// 挂在这个端点上的凭据数
-    pub credential_count: i64,
-    /// 接入明细（含模型映射），前端编辑映射时用来预填
-    pub bindings: Vec<BindingDetail>,
-}
-
-/// 一条接入：哪个 app、哪个 provider、当前模型映射。
+/// 一条接入：哪个 app、哪个 provider、当前模型映射、下游协议。
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct BindingDetail {
@@ -36,18 +36,200 @@ pub struct BindingDetail {
     pub provider_id: String,
     /// 槽位化 JSON（haiku/sonnet/opus/fable/subagent/default），空对象表示没配
     pub model_map: serde_json::Value,
+    /// 客户端 → 代理这一段用的协议（app 决定）
+    pub downstream_protocol: String,
 }
 
+/// 网关里的一家供应商 = **一个确切的上游 API**（服务根 + 上游协议）+ 用它的一组接入。
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Supplier {
+    /// `sup-{服务根+上游协议的哈希}`；托管登录账号（没有网关地址）用上游 id 兜底
     pub id: String,
     pub name: String,
     pub host: String,
-    pub endpoints: Vec<SupplierEndpoint>,
-    pub app_count: i64,
-    /// 该供应商下出现过的凭证形态：literal / env_ref / managed / none
+    /// 规范化后的服务根（去掉 `/chat/completions`、`/responses`、`/messages` 这类完整接口后缀）；
+    /// 托管登录账号为空
+    pub base_url: String,
+    /// 代理 → 上游这一段用的协议
+    pub upstream_protocol: String,
+    /// 使用它的 app（去重、有序）
+    pub apps: Vec<String>,
+    /// `app:providerId` 明细，方便前端跳回原配置
+    pub consumers: Vec<String>,
+    /// 接入明细（含模型映射与下游协议），前端编辑映射时用来预填
+    pub bindings: Vec<BindingDetail>,
+    /// 挂在这个地址上的凭据数
+    pub credential_count: i64,
+    /// 这个地址上出现过的凭据形态：literal / env_ref / managed / none
     pub credential_kinds: Vec<String>,
+}
+
+/// 把 `apiFormat` 的常见写法归一。
+fn normalize_api_format(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai_chat" | "openai-chat" | "chat" | "chat_completions" | "openai_chat_completions" => {
+            "openai_chat".to_string()
+        }
+        "openai_responses" | "responses" => "openai_responses".to_string(),
+        "anthropic" | "anthropic_messages" | "messages" => "anthropic".to_string(),
+        "gemini_native" | "gemini" | "gemini_generate_content" => "gemini_native".to_string(),
+        "kimi" | "kimi_managed" => "kimi_managed".to_string(),
+        "alibaba" => "alibaba".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// 上游协议：`meta.apiFormat` → `settings_config.api_format/apiFormat` → codex TOML 的
+/// `wire_api`。都没有时返回 `None`，由调用方回落到端点自身的协议列（那一列是 app 推出来的，
+/// 只在直连语义下等于上游协议）。
+fn upstream_protocol_from(meta: &str, config: &serde_json::Value) -> Option<String> {
+    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta) {
+        for key in ["apiFormat", "api_format"] {
+            if let Some(raw) = meta.get(key).and_then(|value| value.as_str()) {
+                if !raw.trim().is_empty() {
+                    return Some(normalize_api_format(raw));
+                }
+            }
+        }
+    }
+    for key in ["api_format", "apiFormat"] {
+        if let Some(raw) = config.get(key).and_then(|value| value.as_str()) {
+            if !raw.trim().is_empty() {
+                return Some(normalize_api_format(raw));
+            }
+        }
+    }
+    // codex 的 `config` 是一段 TOML，wire_api 在里面
+    let toml = config.get("config").and_then(|value| value.as_str())?;
+    for line in toml.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix("wire_api") else {
+            continue;
+        };
+        let Some(rest) = rest.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let value = rest.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(normalize_api_format(value));
+        }
+    }
+    None
+}
+
+/// 服务根：去掉「完整接口后缀」，让 `.../v1` 和 `.../v1/chat/completions` 归到同一家。
+fn canonical_base_url(base_url: &str) -> String {
+    let trimmed = base_url.trim();
+    let mut url = trimmed.trim_end_matches('/').to_string();
+    for suffix in ["/chat/completions", "/responses", "/messages"] {
+        if url.to_ascii_lowercase().ends_with(suffix) {
+            let keep = url.len() - suffix.len();
+            url.truncate(keep);
+            break;
+        }
+    }
+    url.trim_end_matches('/').to_string()
+}
+
+/// 一家供应商的稳定 id：服务根 + 上游协议。托管账号没有地址，用上游 id 兜底。
+fn supplier_id_for(base_url: &str, upstream_protocol: &str, upstream_id: &str) -> String {
+    let key = if base_url.trim().is_empty() {
+        format!("upstream|{upstream_id}")
+    } else {
+        format!("url|{}|{upstream_protocol}", canonical_base_url(base_url))
+    };
+    format!("sup-{}", crate::database::Database::p1_stable_hash(&key))
+}
+
+/// endpoint_id → 该端点的上游协议。
+///
+/// 端点上可能挂着多个 app 的接入，它们的 `apiFormat` 正常应该一致；不一致时按出现次数
+/// 取最多的那个（数据有冲突时至少不会把同一家拆开），并用 `mixed` 标出来。
+fn endpoint_upstream_protocols(
+    conn: &rusqlite::Connection,
+) -> Result<(BTreeMap<String, String>, BTreeMap<String, bool>), AppError> {
+    let mut providers: BTreeMap<(String, String), (String, serde_json::Value)> = BTreeMap::new();
+    {
+        let mut stmt = conn.prepare(
+            "SELECT app_type, id, COALESCE(meta, ''), COALESCE(settings_config, '{}') FROM providers",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        for row in rows {
+            let (app_type, provider_id, meta, config) = row?;
+            let config = serde_json::from_str(&config).unwrap_or(serde_json::Value::Null);
+            providers.insert((app_type, provider_id), (meta, config));
+        }
+    }
+
+    let mut votes: BTreeMap<String, BTreeMap<String, i64>> = BTreeMap::new();
+    {
+        let mut stmt =
+            conn.prepare("SELECT endpoint_id, app_type, provider_id FROM provider_bindings")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        for row in rows {
+            let (endpoint_id, app_type, provider_id) = row?;
+            let Some((meta, config)) = providers.get(&(app_type, provider_id)) else {
+                continue;
+            };
+            if let Some(protocol) = upstream_protocol_from(meta, config) {
+                *votes
+                    .entry(endpoint_id)
+                    .or_default()
+                    .entry(protocol)
+                    .or_insert(0) += 1;
+            }
+        }
+    }
+
+    // 没有 apiFormat 的端点回落到端点自身的协议列（直连语义下它等于上游协议）
+    {
+        let mut stmt =
+            conn.prepare("SELECT id, COALESCE(protocol, 'unknown') FROM upstream_endpoints")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (endpoint_id, protocol) = row?;
+            let counts = votes.entry(endpoint_id).or_default();
+            if counts.is_empty() {
+                *counts.entry(normalize_api_format(&protocol)).or_insert(0) += 1;
+            }
+        }
+    }
+
+    let mut protocols = BTreeMap::new();
+    let mut mixed = BTreeMap::new();
+    for (endpoint_id, counts) in votes {
+        if counts.is_empty() {
+            protocols.insert(endpoint_id, "unknown".to_string());
+            continue;
+        }
+        let total: i64 = counts.values().sum();
+        let (winner, votes_for_winner) = counts
+            .iter()
+            .max_by_key(|(_, count)| **count)
+            .map(|(protocol, count)| (protocol.clone(), *count))
+            .unwrap_or_else(|| ("unknown".to_string(), 0));
+        if total > votes_for_winner {
+            mixed.insert(endpoint_id.clone(), true);
+        }
+        protocols.insert(endpoint_id, winner);
+    }
+    Ok((protocols, mixed))
 }
 
 fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
@@ -67,29 +249,9 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
         }
     }
 
-    let mut suppliers: BTreeMap<String, Supplier> = BTreeMap::new();
-    {
-        let mut stmt = conn.prepare(
-            "SELECT id, name, host FROM upstreams
-             ORDER BY name COLLATE NOCASE, id",
-        )?;
-        let rows = stmt.query_map([], |row| {
-            Ok(Supplier {
-                id: row.get(0)?,
-                name: row.get(1)?,
-                host: row.get(2)?,
-                endpoints: Vec::new(),
-                app_count: 0,
-                credential_kinds: Vec::new(),
-            })
-        })?;
-        for row in rows {
-            let supplier = row?;
-            suppliers.insert(supplier.id.clone(), supplier);
-        }
-    }
+    let (upstream_protocols, _mixed) = endpoint_upstream_protocols(&conn)?;
 
-    // endpoint_id → 该端点上的使用情况
+    // endpoint_id → 该端点上的一条条接入
     let mut consumers: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
@@ -113,7 +275,7 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
         }
     }
 
-    // 每个端点的凭据数 + 形态
+    // endpoint_id → (凭据数, 凭据形态)
     let mut per_endpoint: BTreeMap<String, (i64, Vec<String>)> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
@@ -132,10 +294,12 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
         }
     }
 
+    let mut suppliers: BTreeMap<String, Supplier> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT id, upstream_id, protocol, base_url FROM upstream_endpoints
-             ORDER BY upstream_id, protocol, base_url",
+            "SELECT e.id, e.upstream_id, COALESCE(e.protocol, 'unknown'), e.base_url, u.name, u.host
+             FROM upstream_endpoints e JOIN upstreams u ON u.id = e.upstream_id
+             ORDER BY u.name COLLATE NOCASE, e.base_url, e.protocol",
         )?;
         let rows = stmt.query_map([], |row| {
             Ok((
@@ -143,54 +307,121 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
         for row in rows {
-            let (endpoint_id, upstream_id, protocol, base_url) = row?;
-            let Some(supplier) = suppliers.get_mut(&upstream_id) else {
-                continue;
-            };
-
-            let mut apps: Vec<String> = Vec::new();
-            let mut details: Vec<String> = Vec::new();
-            let mut binding_details: Vec<BindingDetail> = Vec::new();
-            for (app_type, provider_id, model_map) in consumers.get(&endpoint_id).into_iter().flatten()
-            {
-                if !apps.contains(app_type) {
-                    apps.push(app_type.clone());
-                }
-                details.push(format!("{app_type}:{provider_id}"));
-                binding_details.push(BindingDetail {
-                    app_type: app_type.clone(),
-                    provider_id: provider_id.clone(),
-                    model_map: serde_json::from_str(model_map)
-                        .unwrap_or_else(|_| serde_json::json!({})),
-                });
-            }
+            let (endpoint_id, upstream_id, fallback_protocol, base_url, name, host) = row?;
+            let protocol = upstream_protocols
+                .get(&endpoint_id)
+                .cloned()
+                .unwrap_or_else(|| normalize_api_format(&fallback_protocol));
+            let id = supplier_id_for(&base_url, &protocol, &upstream_id);
+            let supplier = suppliers.entry(id.clone()).or_insert_with(|| Supplier {
+                id,
+                name,
+                host,
+                base_url: canonical_base_url(&base_url),
+                upstream_protocol: protocol.clone(),
+                apps: Vec::new(),
+                consumers: Vec::new(),
+                bindings: Vec::new(),
+                credential_count: 0,
+                credential_kinds: Vec::new(),
+            });
 
             let (credential_count, kinds) = per_endpoint
                 .get(&endpoint_id)
                 .cloned()
                 .unwrap_or((0, Vec::new()));
+            supplier.credential_count += credential_count;
             for kind in kinds {
                 if !supplier.credential_kinds.contains(&kind) {
                     supplier.credential_kinds.push(kind);
                 }
             }
-            supplier.app_count += apps.len() as i64;
-            supplier.endpoints.push(SupplierEndpoint {
-                id: endpoint_id,
-                protocol,
-                base_url,
-                apps,
-                consumers: details,
-                credential_count,
-                bindings: binding_details,
-            });
+
+            for (app_type, provider_id, model_map) in
+                consumers.get(&endpoint_id).into_iter().flatten()
+            {
+                if !supplier.apps.contains(app_type) {
+                    supplier.apps.push(app_type.clone());
+                }
+                let consumer = format!("{app_type}:{provider_id}");
+                if !supplier.consumers.contains(&consumer) {
+                    supplier.consumers.push(consumer);
+                }
+                if supplier.bindings.iter().any(|binding| {
+                    binding.app_type == *app_type && binding.provider_id == *provider_id
+                }) {
+                    continue;
+                }
+                supplier.bindings.push(BindingDetail {
+                    app_type: app_type.clone(),
+                    provider_id: provider_id.clone(),
+                    model_map: serde_json::from_str(model_map)
+                        .unwrap_or_else(|_| serde_json::json!({})),
+                    downstream_protocol: downstream_protocol_of(app_type),
+                });
+            }
         }
     }
 
-    Ok(suppliers.into_values().collect())
+    let mut list: Vec<Supplier> = suppliers.into_values().collect();
+    list.sort_by(|a, b| {
+        a.name
+            .to_ascii_lowercase()
+            .cmp(&b.name.to_ascii_lowercase())
+            .then_with(|| a.upstream_protocol.cmp(&b.upstream_protocol))
+            .then_with(|| a.base_url.cmp(&b.base_url))
+    });
+    Ok(list)
+}
+
+/// 客户端 → 代理这一段的协议：由 app 决定，跟供应商无关。
+fn downstream_protocol_of(app_type: &str) -> String {
+    match app_type {
+        "claude" | "claude-desktop" => "anthropic".to_string(),
+        "codex" | "grokbuild" => "openai_responses".to_string(),
+        "gemini" => "gemini_native".to_string(),
+        "kimi" => "kimi_managed".to_string(),
+        "opencode" | "openclaw" | "hermes" | "omp" | "pi" | "mcode" | "dsh" | "agy" => {
+            "openai_chat".to_string()
+        }
+        other => other.to_string(),
+    }
+}
+
+/// 这个供应商下所有底层端点 id（改地址 / 换密钥要逐条写）。
+fn endpoint_ids_of(conn: &rusqlite::Connection, supplier_id: &str) -> Result<Vec<String>, String> {
+    let (protocols, _) = endpoint_upstream_protocols(conn).map_err(|error| error.to_string())?;
+    let mut stmt = conn
+        .prepare("SELECT id, upstream_id, COALESCE(protocol, 'unknown'), base_url FROM upstream_endpoints")
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut ids = Vec::new();
+    for row in rows {
+        let (endpoint_id, upstream_id, fallback_protocol, base_url) =
+            row.map_err(|error| error.to_string())?;
+        let protocol = protocols
+            .get(&endpoint_id)
+            .cloned()
+            .unwrap_or_else(|| normalize_api_format(&fallback_protocol));
+        if supplier_id_for(&base_url, &protocol, &upstream_id) == supplier_id {
+            ids.push(endpoint_id);
+        }
+    }
+    Ok(ids)
 }
 
 /// 供应商总览：网关级视角的只读聚合。
@@ -201,13 +432,14 @@ pub async fn get_suppliers_overview(
     collect(&state.db).map_err(|error| error.to_string())
 }
 
-/// 改一个网关端点的地址：所有使用它的 app 一起跟着变。
+/// 改一家供应商的地址：所有使用它的 app 一起跟着变。
 ///
-/// 返回更新后的总览，前端可以直接替换列表，不必再拉一次。
+/// 一个供应商只有一个地址，所以这里改的是这家供应商底下**所有**底层端点（它们只是
+/// 同一个 API 在不同 app 配置里的写法差异）。
 #[tauri::command]
 pub async fn update_supplier_base_url(
     state: tauri::State<'_, AppState>,
-    endpoint_id: String,
+    supplier_id: String,
     base_url: String,
 ) -> Result<Vec<Supplier>, String> {
     let normalized = crate::database::Database::p1_normalize_url(&base_url)
@@ -216,32 +448,109 @@ pub async fn update_supplier_base_url(
 
     {
         let mut conn = lock_conn!(state.db.conn);
-        let outcome = crate::database::Database::rewrite_endpoint_base_url(
-            &mut conn,
-            &endpoint_id,
-            &normalized,
-        )
-        .map_err(|error| error.to_string())?;
+        let endpoint_ids = endpoint_ids_of(&conn, &supplier_id)?;
+        if endpoint_ids.is_empty() {
+            return Err("找不到这家供应商（可能已被删除）".to_string());
+        }
 
-        if outcome.changed == 0 {
-            return Err(if outcome.skipped.is_empty() {
-                "该端点没有任何接入".to_string()
+        let mut changed = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        let mut touched_apps: Vec<String> = Vec::new();
+        for endpoint_id in &endpoint_ids {
+            let outcome = crate::database::Database::rewrite_endpoint_base_url(
+                &mut conn,
+                endpoint_id,
+                &normalized,
+            )
+            .map_err(|error| error.to_string())?;
+            changed += outcome.changed;
+            skipped.extend(outcome.skipped);
+            for app in outcome.apps {
+                if !touched_apps.contains(&app) {
+                    touched_apps.push(app);
+                }
+            }
+        }
+
+        if changed == 0 {
+            return Err(if skipped.is_empty() {
+                "这家供应商没有任何接入".to_string()
             } else {
                 format!(
                     "这些接入的地址不在配置里，无法自动改写：{}",
-                    outcome.skipped.join("、")
+                    skipped.join("、")
                 )
             });
         }
-        if !outcome.skipped.is_empty() {
+        if !skipped.is_empty() {
             log::warn!(
-                "[suppliers] 端点 {endpoint_id} 改址时跳过 {} 条接入：{}",
-                outcome.skipped.len(),
-                outcome.skipped.join("、")
+                "[suppliers] 供应商 {supplier_id} 改址时跳过 {} 条接入：{}",
+                skipped.len(),
+                skipped.join("、")
             );
         }
-        // 改完立即对账，让绑定指向新端点、旧端点被清理
-        for app in &outcome.apps {
+        for app in &touched_apps {
+            crate::database::Database::reconcile_provider_bindings(&mut conn, app)
+                .map_err(|error| error.to_string())?;
+        }
+    }
+
+    collect(&state.db).map_err(|error| error.to_string())
+}
+
+/// 换一把密钥：所有使用这家供应商的 app 一起换。
+#[tauri::command]
+pub async fn update_supplier_secret(
+    state: tauri::State<'_, AppState>,
+    supplier_id: String,
+    secret: String,
+) -> Result<Vec<Supplier>, String> {
+    let secret = secret.trim().to_string();
+    if secret.is_empty() {
+        return Err("密钥不能为空".to_string());
+    }
+
+    {
+        let mut conn = lock_conn!(state.db.conn);
+        let endpoint_ids = endpoint_ids_of(&conn, &supplier_id)?;
+        if endpoint_ids.is_empty() {
+            return Err("找不到这家供应商（可能已被删除）".to_string());
+        }
+
+        let mut changed = 0usize;
+        let mut skipped: Vec<String> = Vec::new();
+        let mut touched_apps: Vec<String> = Vec::new();
+        for endpoint_id in &endpoint_ids {
+            let outcome =
+                crate::database::Database::rewrite_endpoint_secret(&mut conn, endpoint_id, &secret)
+                    .map_err(|error| error.to_string())?;
+            changed += outcome.changed;
+            skipped.extend(outcome.skipped);
+            for app in outcome.apps {
+                if !touched_apps.contains(&app) {
+                    touched_apps.push(app);
+                }
+            }
+        }
+
+        if changed == 0 {
+            return Err(if skipped.is_empty() {
+                "这家供应商没有任何接入".to_string()
+            } else {
+                format!(
+                    "这些接入的密钥存在环境变量里，库里没有明文可换：{}",
+                    skipped.join("、")
+                )
+            });
+        }
+        if !skipped.is_empty() {
+            log::warn!(
+                "[suppliers] 供应商 {supplier_id} 换密钥时跳过 {} 条接入：{}",
+                skipped.len(),
+                skipped.join("、")
+            );
+        }
+        for app in &touched_apps {
             crate::database::Database::reconcile_provider_bindings(&mut conn, app)
                 .map_err(|error| error.to_string())?;
         }
@@ -262,15 +571,15 @@ pub async fn update_supplier_base_url(
 pub async fn adopt_supplier(
     state: tauri::State<'_, AppState>,
     app_type: String,
-    endpoint_id: String,
+    supplier_id: String,
 ) -> Result<AdoptedProvider, String> {
-    adopt_into(&state.db, &app_type, &endpoint_id)
+    adopt_into(&state.db, &app_type, &supplier_id)
 }
 
 fn adopt_into(
     db: &crate::database::Database,
     app_type: &str,
-    endpoint_id: &str,
+    supplier_id: &str,
 ) -> Result<AdoptedProvider, String> {
     if !matches!(app_type, "claude" | "claude-desktop") {
         return Err(format!(
@@ -278,56 +587,72 @@ fn adopt_into(
         ));
     }
 
-    let (name, base_url, protocol, secret) = {
-        let conn = lock_conn!(db.conn);
+    let conn = lock_conn!(db.conn);
+    let endpoint_ids = endpoint_ids_of(&conn, supplier_id)?;
+    if endpoint_ids.is_empty() {
+        return Err("找不到这家供应商（可能已被删除）".to_string());
+    }
+    let (protocols, _) = endpoint_upstream_protocols(&conn).map_err(|error| error.to_string())?;
+
+    // 直连模式下没有代理做转换，下游协议必须等于上游协议：
+    // claude / claude-desktop 的下游是 Anthropic Messages，只能接 anthropic 上游。
+    let mut target: Option<(String, String, String)> = None;
+    for endpoint_id in &endpoint_ids {
+        let protocol = protocols.get(endpoint_id).cloned().unwrap_or_default();
+        if protocol != "anthropic" {
+            continue;
+        }
         let row = conn
             .query_row(
-                "SELECT u.name, e.base_url, e.protocol
+                "SELECT u.name, e.base_url
                  FROM upstream_endpoints e JOIN upstreams u ON u.id = e.upstream_id
                  WHERE e.id = ?1",
                 rusqlite::params![endpoint_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
-            .map_err(|_| "找不到这个端点".to_string())?;
-
-        let credential: Option<(Option<String>, String)> = conn
-            .query_row(
-                "SELECT secret, COALESCE(secret_kind, 'none') FROM upstream_credentials
-                 WHERE endpoint_id = ?1 ORDER BY app_type LIMIT 1",
-                rusqlite::params![endpoint_id],
-                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
-            )
-            .ok();
-
-        match credential {
-            Some((Some(secret), kind)) if kind == "literal" && !secret.trim().is_empty() => {
-                (row.0, row.1, row.2, secret)
-            }
-            Some((_, kind)) if kind == "env_ref" => {
-                return Err(
-                    "这家供应商的密钥只存了环境变量名，库里没有明文，无法一键采用".to_string()
-                )
-            }
-            Some((_, kind)) if kind == "managed" => {
-                return Err("这家供应商用的是托管登录态，无法一键采用".to_string())
-            }
-            _ => return Err("这家供应商还没有可用的密钥，请先补上".to_string()),
-        }
+            .map_err(|error| error.to_string())?;
+        target = Some((endpoint_id.clone(), row.0, row.1));
+        break;
+    }
+    let Some((endpoint_id, name, base_url)) = target else {
+        let protocols: Vec<String> = endpoint_ids
+            .iter()
+            .map(|id| {
+                protocols
+                    .get(id)
+                    .cloned()
+                    .unwrap_or_else(|| "unknown".to_string())
+            })
+            .collect();
+        return Err(format!(
+            "这家供应商的上游协议是 {}，直连模式的 {app_type} 只吃 anthropic 协议，无法直接采用（要走它得开代理路由）。",
+            protocols.join("、")
+        ));
     };
 
-    if protocol != "anthropic" {
-        return Err(format!(
-            "这个端点是 {protocol} 协议，{app_type} 只吃 anthropic 协议，无法直接采用"
-        ));
-    }
+    let credential: Option<(Option<String>, String)> = conn
+        .query_row(
+            "SELECT secret, COALESCE(secret_kind, 'none') FROM upstream_credentials
+             WHERE endpoint_id = ?1 ORDER BY app_type LIMIT 1",
+            rusqlite::params![endpoint_id],
+            |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+        )
+        .ok();
 
-    let provider_id = format!("sup-{endpoint_id}");
+    let secret = match credential {
+        Some((Some(secret), kind)) if kind == "literal" && !secret.trim().is_empty() => secret,
+        Some((_, kind)) if kind == "env_ref" => {
+            return Err("这家供应商的密钥只存了环境变量名，库里没有明文，无法一键采用".to_string())
+        }
+        Some((_, kind)) if kind == "managed" => {
+            return Err("这家供应商用的是托管登录态，无法一键采用".to_string())
+        }
+        _ => return Err("这家供应商还没有可用的密钥，请先补上".to_string()),
+    };
+    drop(conn);
+
+    let digest = crate::database::Database::p1_stable_hash(&format!("{base_url}|{app_type}"));
+    let provider_id = format!("sup-{digest}");
     let provider = crate::provider::Provider::with_id(
         provider_id.clone(),
         name.clone(),
@@ -357,61 +682,11 @@ pub struct AdoptedProvider {
     pub provider_name: String,
 }
 
-/// 换一把密钥：所有使用这个端点的 app 一起换。
-#[tauri::command]
-pub async fn update_supplier_secret(
-    state: tauri::State<'_, AppState>,
-    endpoint_id: String,
-    secret: String,
-) -> Result<Vec<Supplier>, String> {
-    let secret = secret.trim().to_string();
-    if secret.is_empty() {
-        return Err("密钥不能为空".to_string());
-    }
-
-    {
-        let mut conn = lock_conn!(state.db.conn);
-        let outcome = crate::database::Database::rewrite_endpoint_secret(
-            &mut conn,
-            &endpoint_id,
-            &secret,
-        )
-        .map_err(|error| error.to_string())?;
-
-        if outcome.changed == 0 {
-            return Err(if outcome.skipped.is_empty() {
-                "该端点没有任何接入".to_string()
-            } else {
-                format!(
-                    "这些接入的密钥存在环境变量里，库里没有明文可换：{}",
-                    outcome.skipped.join("、")
-                )
-            });
-        }
-        if !outcome.skipped.is_empty() {
-            log::warn!(
-                "[suppliers] 端点 {endpoint_id} 换密钥时跳过 {} 条接入：{}",
-                outcome.skipped.len(),
-                outcome.skipped.join("、")
-            );
-        }
-        for app in &outcome.apps {
-            crate::database::Database::reconcile_provider_bindings(&mut conn, app)
-                .map_err(|error| error.to_string())?;
-        }
-    }
-
-    collect(&state.db).map_err(|error| error.to_string())
-}
-
-/// 改某个接入的模型映射（`app + provider` 粒度）。
-///
-/// 同一个网关，不同 app 可以映射成不同模型——这正是「映射归接入」的含义。
 /// 在网关侧新建一家供应商，并直接接进选中的 app。
 ///
-/// 这是"一次配齐"的入口：以前只能先在某个 app 里建一条 provider，再「采用」到别的
+/// 这是「一次配齐」的入口：以前只能先在某个 app 里建一条 provider，再「采用」到别的
 /// app；现在反过来——先在网关填名字/地址/密钥，勾选要吃这条路由的 agent。
-/// 每个 app 落一条**确定性 id**（同一名字+地址+app 永远同一条），重复提交不会出重复行。
+/// 每个 app 落一条**确定性 id**（同一地址+app 永远同一条），重复提交不会出重复行。
 #[tauri::command]
 pub async fn create_supplier(
     state: tauri::State<'_, AppState>,
@@ -466,8 +741,8 @@ fn create_into(
 
     // 全部校验通过后才落库，避免"建了一半"这种半成品状态
     for app in &targets {
-        let digest =
-            crate::database::Database::p1_stable_hash(&format!("{name}|{base_url}|{app}"));
+        // 直连写入：上游协议就是 anthropic（claude 系的下游协议）
+        let digest = crate::database::Database::p1_stable_hash(&format!("{base_url}|{app}"));
         let provider = crate::provider::Provider::with_id(
             format!("sup-{digest}"),
             name.to_string(),
@@ -536,7 +811,8 @@ mod tests {
     use serde_json::json;
 
     fn insert_provider(db: &Database, app: &str, id: &str, config: serde_json::Value) {
-        let provider = crate::provider::Provider::with_id(id.to_string(), id.to_string(), config, None);
+        let provider =
+            crate::provider::Provider::with_id(id.to_string(), id.to_string(), config, None);
         db.save_provider(app, &provider).expect("插入 provider");
     }
 
@@ -563,13 +839,11 @@ mod tests {
             .collect();
         assert_eq!(ctaigw.len(), 1, "同一网关只能出现一条供应商");
         let supplier = ctaigw[0];
-        assert_eq!(supplier.endpoints.len(), 1);
-        let endpoint = &supplier.endpoints[0];
-        assert_eq!(endpoint.protocol, "anthropic");
-        assert_eq!(endpoint.base_url, "https://ai.ctaigw.cn/v1");
-        assert_eq!(endpoint.apps, vec!["claude", "claude-desktop"]);
-        assert_eq!(endpoint.credential_count, 2);
-        assert!(endpoint.consumers.contains(&"claude:a".to_string()));
+        assert_eq!(supplier.upstream_protocol, "anthropic");
+        assert_eq!(supplier.base_url, "https://ai.ctaigw.cn/v1");
+        assert_eq!(supplier.apps, vec!["claude", "claude-desktop"]);
+        assert_eq!(supplier.credential_count, 2);
+        assert!(supplier.consumers.contains(&"claude:a".to_string()));
     }
 
     /// 一键采用：密钥和地址都从网关来，agent 侧一条配置都不用手填。
@@ -586,13 +860,12 @@ mod tests {
             }}),
         );
         let suppliers = collect(&db).expect("总览");
-        let endpoint = suppliers
+        let supplier = suppliers
             .iter()
-            .flat_map(|supplier| supplier.endpoints.iter())
-            .find(|endpoint| endpoint.base_url == "https://ai.ctaigw.cn/v1")
-            .expect("端点");
+            .find(|supplier| supplier.base_url == "https://ai.ctaigw.cn/v1")
+            .expect("供应商");
 
-        let adopted = adopt_into(&db, "claude-desktop", &endpoint.id).expect("应能采用");
+        let adopted = adopt_into(&db, "claude-desktop", &supplier.id).expect("应能采用");
         // 供应商名沿用网关上的上游名（这里由 provider 名派生）
         assert!(!adopted.provider_name.trim().is_empty());
         assert!(adopted.provider_id.starts_with("sup-"));
@@ -612,10 +885,7 @@ mod tests {
             stored["env"]["ANTHROPIC_BASE_URL"],
             json!("https://ai.ctaigw.cn/v1")
         );
-        assert_eq!(
-            stored["env"]["ANTHROPIC_AUTH_TOKEN"],
-            json!("sk-secret")
-        );
+        assert_eq!(stored["env"]["ANTHROPIC_AUTH_TOKEN"], json!("sk-secret"));
 
         // 采用后两个 app 应落在同一个网关上
         let suppliers = collect(&db).expect("总览2");
@@ -624,7 +894,7 @@ mod tests {
             .filter(|supplier| supplier.host == "ai.ctaigw.cn")
             .collect();
         assert_eq!(ctaigw.len(), 1, "同一网关只能出现一条供应商");
-        assert_eq!(ctaigw[0].app_count, 2, "claude 与 claude-desktop 都应算上");
+        assert_eq!(ctaigw[0].apps.len(), 2, "claude 与 claude-desktop 都应算上");
         Ok(())
     }
 
@@ -642,8 +912,8 @@ mod tests {
             }}),
         );
         let suppliers = collect(&db).expect("总览");
-        let endpoint_id = suppliers[0].endpoints[0].id.clone();
-        let error = adopt_into(&db, "opencode", &endpoint_id).expect_err("应拒绝");
+        let supplier_id = suppliers[0].id.clone();
+        let error = adopt_into(&db, "opencode", &supplier_id).expect_err("应拒绝");
         assert!(error.contains("暂不支持"), "错误应说明原因: {error}");
     }
 
@@ -661,11 +931,35 @@ mod tests {
             }}),
         );
         let suppliers = collect(&db).expect("总览");
-        let endpoint = &suppliers[0].endpoints[0];
+        let supplier = &suppliers[0];
         // opencode 的协议由 npm 包决定，派生不出 anthropic —— 正是要拒绝的情况
-        assert_ne!(endpoint.protocol, "anthropic");
-        let error = adopt_into(&db, "claude", &endpoint.id).expect_err("应拒绝");
+        assert_ne!(supplier.upstream_protocol, "anthropic");
+        let error = adopt_into(&db, "claude", &supplier.id).expect_err("应拒绝");
         assert!(error.contains("协议"), "错误应说明协议不匹配: {error}");
+    }
+
+    /// 临时：打印真实库副本的供应商总览，人工核对归并结果。
+    #[test]
+    #[ignore = "手动：仅调试用"]
+    fn manual_dump_real_overview() -> Result<(), AppError> {
+        let Ok(path) = std::env::var("CCS_VERIFY_DB") else {
+            return Ok(());
+        };
+        let db = Database::open_for_test(std::path::Path::new(&path))?;
+        let suppliers = collect(&db)?;
+        println!("共 {} 家：", suppliers.len());
+        for supplier in &suppliers {
+            println!(
+                "  {:<28} {:<14} {:<16} apps={:?} creds={} kinds={:?}",
+                supplier.name,
+                supplier.upstream_protocol,
+                supplier.base_url,
+                supplier.apps,
+                supplier.credential_count,
+                supplier.credential_kinds
+            );
+        }
+        Ok(())
     }
 
     /// 手动跑（不在 CI 里）：拿真实数据库的副本验证 create_supplier 的整条链路。
@@ -697,22 +991,17 @@ mod tests {
             .find(|supplier| supplier.name == "Verify Gateway")
             .expect("新供应商应在总览里");
         println!(
-            "命中：name={} host={} apps={} endpoints={}",
+            "命中：name={} host={} apps={:?} protocol={} base_url={} creds={}",
             supplier.name,
             supplier.host,
-            supplier.app_count,
-            supplier.endpoints.len()
+            supplier.apps,
+            supplier.upstream_protocol,
+            supplier.base_url,
+            supplier.credential_count
         );
-        for endpoint in &supplier.endpoints {
-            println!(
-                "  端点 {} [{}] base_url={} apps={:?} creds={}",
-                endpoint.id, endpoint.protocol, endpoint.base_url, endpoint.apps, endpoint.credential_count
-            );
-        }
         assert_eq!(supplier.host, "verify.example.com");
-        assert_eq!(supplier.app_count, 2);
-        assert_eq!(supplier.endpoints.len(), 1);
-        assert_eq!(supplier.endpoints[0].base_url, "https://verify.example.com/v1");
+        assert_eq!(supplier.apps.len(), 2);
+        assert_eq!(supplier.base_url, "https://verify.example.com/v1");
 
         // 每个 app 真的落了一条能读出地址/密钥的配置
         for app in ["claude", "claude-desktop"] {
@@ -768,12 +1057,13 @@ mod tests {
             .find(|supplier| supplier.name == "CTYun")
             .expect("新供应商应在总览里");
         assert_eq!(supplier.host, "ai.ctaigw.cn");
-        assert_eq!(supplier.app_count, 2, "两个 app 都该接上");
-        assert_eq!(supplier.endpoints.len(), 1, "同一地址只应有一个端点");
-        let endpoint = &supplier.endpoints[0];
-        assert_eq!(endpoint.base_url, "https://ai.ctaigw.cn/v1", "尾部斜杠应被规范化");
-        assert_eq!(endpoint.protocol, "anthropic");
-        assert_eq!(endpoint.apps.len(), 2);
+        assert_eq!(supplier.apps.len(), 2, "两个 app 都该接上");
+        assert_eq!(
+            supplier.base_url, "https://ai.ctaigw.cn/v1",
+            "尾部斜杠应被规范化"
+        );
+        assert_eq!(supplier.upstream_protocol, "anthropic");
+        assert_eq!(supplier.apps.len(), 2);
 
         // 每个 app 都真的落了一条能读出地址和密钥的配置
         for app in ["claude", "claude-desktop"] {
@@ -787,7 +1077,10 @@ mod tests {
                 .expect("配置应存在")
             };
             let config: serde_json::Value = serde_json::from_str(&config).expect("json");
-            assert_eq!(config["env"]["ANTHROPIC_BASE_URL"], "https://ai.ctaigw.cn/v1");
+            assert_eq!(
+                config["env"]["ANTHROPIC_BASE_URL"],
+                "https://ai.ctaigw.cn/v1"
+            );
             assert_eq!(config["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-test-123");
         }
         Ok(())
@@ -799,11 +1092,11 @@ mod tests {
         let db = Database::memory().expect("内存库");
         let apps = vec!["claude".to_string()];
         create_into(&db, "Acme", "https://acme.dev/v1", "sk-1", &apps).expect("第一次");
-        let suppliers = create_into(&db, "Acme", "https://acme.dev/v1", "sk-2", &apps)
-            .expect("第二次");
+        let suppliers =
+            create_into(&db, "Acme", "https://acme.dev/v1", "sk-2", &apps).expect("第二次");
 
         assert_eq!(suppliers.len(), 1, "同一家只应有一条供应商");
-        assert_eq!(suppliers[0].app_count, 1);
+        assert_eq!(suppliers[0].apps.len(), 1);
         // 第二次提交的密钥应覆盖第一条
         let config: String = {
             let conn = lock_conn!(db.conn);
@@ -858,10 +1151,9 @@ mod tests {
         let suppliers = collect(&db).expect("总览");
         let official = suppliers
             .iter()
-            .find(|supplier| supplier.id.contains("claude-official"))
+            .find(|supplier| supplier.base_url.is_empty())
             .expect("托管 provider 必须自成一条供应商");
         assert_eq!(official.host, "");
-        assert_eq!(official.endpoints.len(), 1);
-        assert_eq!(official.endpoints[0].base_url, "");
+        assert_eq!(official.name, "claude-official");
     }
 }

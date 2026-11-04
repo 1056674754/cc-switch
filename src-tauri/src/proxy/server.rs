@@ -112,7 +112,10 @@ impl ProxyServer {
             "熔断键模式: {:?}（环境变量 CCS_CIRCUIT_KEY_MODE=off|shadow|on 控制）",
             self.state.provider_router.circuit_key_mode()
         );
-        self.state.provider_router.log_upstream_key_diagnostics().await;
+        self.state
+            .provider_router
+            .log_upstream_key_diagnostics()
+            .await;
 
         let addr: SocketAddr =
             format!("{}:{}", self.config.listen_address, self.config.listen_port)

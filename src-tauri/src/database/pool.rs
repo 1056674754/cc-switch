@@ -132,7 +132,11 @@ impl ConnectionPool {
         // 先建一条：初始化阶段的 PRAGMA（auto_vacuum 等）必须落在真实的连接上，
         // 而且建表之前池里只有这一条，顺序是确定的。
         let conn = inner.open()?;
-        inner.idle.lock().map_err(|_| PoolError::Poisoned)?.push(conn);
+        inner
+            .idle
+            .lock()
+            .map_err(|_| PoolError::Poisoned)?
+            .push(conn);
         *inner.live.lock().map_err(|_| PoolError::Poisoned)? = 1;
         Ok(Self { inner })
     }
@@ -181,12 +185,7 @@ impl PoolInner {
 
         loop {
             // 1. 有空闲连接就直接借出
-            if let Some(conn) = self
-                .idle
-                .lock()
-                .map_err(|_| PoolError::Poisoned)?
-                .pop()
-            {
+            if let Some(conn) = self.idle.lock().map_err(|_| PoolError::Poisoned)?.pop() {
                 return Ok(PooledConn {
                     pool: self,
                     conn: Some(conn),

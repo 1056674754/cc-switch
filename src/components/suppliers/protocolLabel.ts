@@ -10,6 +10,7 @@ const PROTOCOL_LABELS: Record<string, string> = {
   openai_responses: "OpenAI Responses",
   gemini_native: "Gemini",
   kimi_managed: "Kimi",
+  alibaba: "Alibaba",
 };
 
 export function protocolLabel(protocol: string): string {

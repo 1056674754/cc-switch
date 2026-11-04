@@ -21,8 +21,7 @@ export type { ProviderSwitchEvent } from "./providers";
 export type {
   AdoptedSupplierProvider,
   Supplier,
-  SupplierEndpoint,
-  SupplierEndpointBinding,
+  SupplierBindingDetail,
 } from "./suppliers";
 export type { Prompt } from "./prompts";
 export type { Profile, ProfilePayload, ProfilesResponse } from "./profiles";

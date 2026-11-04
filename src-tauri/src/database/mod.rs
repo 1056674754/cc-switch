@@ -60,9 +60,9 @@ pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError
         .map_err(|e| AppError::Config(format!("JSON serialization failed: {e}")))
 }
 
-pub(crate) use pool::ConnectionPool;
 /// provider → 网关级上游绑定（熔断键 + host），供代理层使用
 pub(crate) use dao::providers::UpstreamBinding;
+pub(crate) use pool::ConnectionPool;
 
 /// 安全地获取一条数据库连接，避免 unwrap panic
 macro_rules! lock_conn {
@@ -99,7 +99,9 @@ fn configure_connection(conn: &Connection) {
     if let Err(e) = conn.pragma_update(None, "synchronous", "NORMAL") {
         log::warn!("设置 synchronous 失败: {e}");
     }
-    if let Err(e) = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| row.get::<_, String>(0)) {
+    if let Err(e) = conn.query_row("PRAGMA journal_mode=WAL;", [], |row| {
+        row.get::<_, String>(0)
+    }) {
         log::warn!("设置 journal_mode 失败: {e}");
     }
     register_db_change_hook(conn);

@@ -204,7 +204,10 @@ mod overload_mapping_tests {
         assert_eq!(response.status(), 429);
         // 客户端认这两个头：等 5 秒再重试，并强制按可重试处理
         assert_eq!(
-            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
             Some("10")
         );
         assert_eq!(
@@ -232,7 +235,10 @@ mod overload_mapping_tests {
         let response = upstream.into_response();
         assert_eq!(response.status(), 429);
         assert_eq!(
-            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
             Some("10")
         );
         assert_eq!(
@@ -268,7 +274,10 @@ mod overload_mapping_tests {
         let response = error.into_response();
         assert_eq!(response.status(), 503);
         assert_eq!(
-            response.headers().get("retry-after").and_then(|v| v.to_str().ok()),
+            response
+                .headers()
+                .get("retry-after")
+                .and_then(|v| v.to_str().ok()),
             Some("10")
         );
         assert_eq!(

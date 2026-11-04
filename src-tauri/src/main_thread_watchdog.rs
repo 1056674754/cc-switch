@@ -97,7 +97,9 @@ fn run(app: tauri::AppHandle) {
 }
 
 fn hang_dir() -> std::path::PathBuf {
-    crate::config::get_app_config_dir().join("logs").join("hang")
+    crate::config::get_app_config_dir()
+        .join("logs")
+        .join("hang")
 }
 
 /// 给自己这个进程抓一份调用栈。`sample` 会短暂挂起进程，因此放到子进程里跑，

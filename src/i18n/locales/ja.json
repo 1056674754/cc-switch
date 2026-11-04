@@ -4318,17 +4318,14 @@
     "viewUsage": "このアプリの使用量を見る"
   },
   "suppliers": {
-    "description": "ここで上流のアドレスとキーを一度設定すると、使うすべてのエージェントで共有されます。エンドポイントのアドレスを変えると、接続しているアプリがまとめて書き換わります。",
+    "description": "プロバイダー = 1 つの上流アドレス + 1 つの上流プロトコル。ここでアドレスやキーを一度変更すると、接続しているすべてのエージェントに反映されます。",
     "helpTitle": "プロバイダー",
-    "helpBody": "プロバイダーはゲートウェイ単位の上流です。1 つのプロバイダーにプロトコルの異なる複数のエンドポイントを持て、それぞれにアドレスと認証情報があります。エンドポイントのアドレスを変えると、そこに接続しているすべてのアプリがまとめて書き換わります。",
+    "helpBody": "プロバイダーはゲートウェイ単位の上流です。1 つのプロバイダーは 1 つの上流 API（サービスルート + 上流プロトコル）に対応し、複数のエージェントで共有できます。上流とクライアントのプロトコルが異なる場合はプロキシで変換されます。アドレスやキーを一度変更すれば、接続しているすべてのアプリに反映されます。",
     "loadFailed": "プロバイダーを読み込めませんでした",
     "loadFailedHint": "しばらくしてからもう一度お試しください。改善しない場合は、ローカルデータベースが読めるか確認してください。",
     "empty": "まだプロバイダーがありません。いずれかのアプリのプロバイダーページで追加すると、ここに上流ごとにまとまって表示されます。",
     "noHost": "マネージドログイン",
     "noBaseUrl": "アドレスなし（マネージドログイン）",
-    "noEndpoints": "このプロバイダーにはまだエンドポイントがありません",
-    "endpointCount_other": "{{count}} エンドポイント",
-    "appCount_other": "{{count}} アプリ",
     "credentialCount_other": "{{count}} 認証情報",
     "credentialKinds": "認証情報の種類",
     "credentialKind": {
@@ -4340,7 +4337,7 @@
     "usedBy": "使用中",
     "unused": "使用しているアプリはまだありません",
     "editUrl": "アドレスを編集",
-    "baseUrlLabel": "エンドポイントのアドレス",
+    "baseUrlLabel": "上流のアドレス",
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "アドレスを入力してください",
     "updateSuccess": "アドレスを更新しました。接続しているアプリすべてに反映されます",
@@ -4375,7 +4372,12 @@
     "createAppsRequired": "アプリを 1 つ以上選択してください",
     "createSubmit": "作成",
     "createSuccess": "プロバイダー {{name}} を追加しました",
-    "createFailed": "プロバイダーを追加できませんでした。もう一度お試しください。"
+    "createFailed": "プロバイダーを追加できませんでした。もう一度お試しください。",
+    "upstreamProtocol": "上流プロトコル",
+    "protocolConversion": "{{downstream}} → {{upstream}}",
+    "protocolConversionHint": "クライアントと上流のプロトコルが異なるため、リクエストはプロキシで変換されます。",
+    "adoptDisabledHint": "直接接続モードの Claude は Anthropic 上流のみ対応です。",
+    "modelMapAction": "モデルマッピング"
   },
   "bindings": {
     "description": "各エージェントはここでプロバイダーを選びます。アドレスとキーはプロバイダー側で設定します。",
@@ -4388,8 +4390,8 @@
     "currentSuppliers": "現在のプロバイダー",
     "appEmpty": "このアプリはまだプロバイダーを選んでいません",
     "pickSupplierFor": "{{app}} で使うプロバイダーを選ぶ",
-    "pickPlaceholder": "プロバイダーのエンドポイントを選択…",
-    "noCandidates": "選択できるエンドポイントがありません（Anthropic プロトコルで、このアプリが未使用のものが必要です）。",
+    "pickPlaceholder": "プロバイダーを選択…",
+    "noCandidates": "選択できるプロバイダーがありません（Anthropic プロトコルでゲートウェイアドレスがあり、このアプリが未使用のものが必要です）。",
     "adopting": "取り込み中…",
     "manualOnly": "このアプリは手動設定が必要です（ワンクリック採用は未対応）",
     "modelMap": "モデルマッピング",
@@ -4397,7 +4399,7 @@
     "modelMapEdit": "マッピングを編集",
     "modelMapFor": "{{app}} のモデルマッピング",
     "modelMapPlaceholder": "モデル名",
-    "modelMapHint": "空欄のスロットは対応するモデル設定を削除します。保存はこのアプリだけに反映され、同じエンドポイントの他のアプリには影響しません。",
+    "modelMapHint": "空欄のスロットは対応するモデル設定を削除します。保存はこのアプリだけに反映され、同じプロバイダーの他のアプリには影響しません。",
     "modelMapSaved": "モデルマッピングを保存しました",
     "modelMapFailed": "モデルマッピングの保存に失敗しました",
     "modelSlot": {
@@ -4409,7 +4411,7 @@
       "default": "デフォルト"
     },
     "duplicateBadge": "重複 ×{{count}}",
-    "duplicateHint": "同じアプリ内に {{count}} 件の設定が同じゲートウェイを指しています"
+    "duplicateHint": "同じアプリ内に {{count}} 件の設定が同じプロバイダーを指しています"
   },
   "mode": {
     "tabsLabel": "接続モード",

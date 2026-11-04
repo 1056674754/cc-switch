@@ -1,7 +1,4 @@
-import type {
-  SupplierEndpoint,
-  SupplierEndpointBinding,
-} from "@/lib/api/suppliers";
+import type { SupplierBindingDetail } from "@/lib/api/suppliers";
 
 /**
  * 模型映射的六个固定槽位。
@@ -115,18 +112,19 @@ export function parseConsumer(
 }
 
 /**
- * 找某个 app 在这个端点上的接入明细。
+ * 找某个 app 在这家供应商上的接入明细。
  *
- * 同一个 app 在同一个端点上正常只有一条；给了 providerId 就先精确匹配，
+ * 同一个 app 在同一家供应商上正常只有一条；给了 providerId 就先精确匹配，
  * 对不上时退回第一条同 app 的明细（例如库刚对账、绑定还没刷新）。
  */
 export function findBinding(
-  endpoint: SupplierEndpoint,
+  bindings: SupplierBindingDetail[] | null | undefined,
   appType: string,
   providerId?: string,
-): SupplierEndpointBinding | undefined {
-  const bindings = endpoint.bindings ?? [];
-  const byApp = bindings.filter((binding) => binding.appType === appType);
+): SupplierBindingDetail | undefined {
+  const byApp = (bindings ?? []).filter(
+    (binding) => binding.appType === appType,
+  );
   if (providerId) {
     const exact = byApp.find((binding) => binding.providerId === providerId);
     if (exact) return exact;

@@ -269,7 +269,6 @@ impl ProviderRouter {
         }
     }
 
-
     /// 选择可用的供应商（支持故障转移）
     ///
     /// 返回按优先级排序的可用供应商列表：
@@ -459,7 +458,9 @@ impl ProviderRouter {
                 (false, None) => false,
             };
             if should_touch {
-                let host_breaker = self.get_or_create_circuit_breaker(&host_key, app_type).await;
+                let host_breaker = self
+                    .get_or_create_circuit_breaker(&host_key, app_type)
+                    .await;
                 if success {
                     host_breaker.record_success(false).await;
                 } else {
@@ -568,7 +569,11 @@ impl ProviderRouter {
     ///
     /// `app_type` 必须由调用方显式传入：网关级键 `up:{upstream_id}:{protocol}` 不再
     /// 以 app_type 开头，无法从 key 反推（旧实现靠 `split(':')`，换键后会静默取错配置）。
-    async fn get_or_create_circuit_breaker(&self, key: &str, app_type: &str) -> Arc<CircuitBreaker> {
+    async fn get_or_create_circuit_breaker(
+        &self,
+        key: &str,
+        app_type: &str,
+    ) -> Arc<CircuitBreaker> {
         // 先尝试读锁获取
         {
             let breakers = self.circuit_breakers.read().await;
@@ -896,7 +901,10 @@ mod tests {
             )
             .map_err(|e| AppError::Database(e.to_string()))?
         };
-        assert!(stored.contains("kimi-k2"), "provider 配置应已改写: {stored}");
+        assert!(
+            stored.contains("kimi-k2"),
+            "provider 配置应已改写: {stored}"
+        );
         assert!(!stored.contains("from-provider"), "旧映射应被覆盖");
         Ok(())
     }
@@ -1038,9 +1046,14 @@ mod tests {
         router.circuit_mode = CircuitKeyMode::On;
 
         let a = router.circuit_key_for("claude", "kimi-coding").await;
-        let b = router.circuit_key_for("claude-desktop", "kimi-coding").await;
+        let b = router
+            .circuit_key_for("claude-desktop", "kimi-coding")
+            .await;
 
-        assert!(a.starts_with("up:up-api.kimi.com:anthropic:"), "实际键: {a}");
+        assert!(
+            a.starts_with("up:up-api.kimi.com:anthropic:"),
+            "实际键: {a}"
+        );
         assert_ne!(
             a, b,
             "同一上游但 key 不同：一把 key 配额耗尽不得把另一把也熔断"
@@ -1167,8 +1180,8 @@ mod tests {
     /// 但同一端点换一把 key 必须保留——那是凭证级故障转移的意义。
     #[tokio::test]
     #[serial]
-    async fn failover_queue_skips_duplicate_routes_but_keeps_distinct_keys(
-    ) -> Result<(), AppError> {
+    async fn failover_queue_skips_duplicate_routes_but_keeps_distinct_keys() -> Result<(), AppError>
+    {
         let _home = TempHome::new();
         let db = Arc::new(Database::memory().unwrap());
 

@@ -1081,8 +1081,8 @@ impl Database {
             let endpoint_drifted = stored_binding.map(|(endpoint, _)| endpoint.as_str())
                 != Some(lift.endpoint_id.as_str());
             let stored_secret_entry = stored_secret.get(&row.id);
-            let secret_missing = lift.secret.is_some()
-                && !stored_secret_entry.map(|(has, _)| *has).unwrap_or(false);
+            let secret_missing =
+                lift.secret.is_some() && !stored_secret_entry.map(|(has, _)| *has).unwrap_or(false);
             let kind_drifted = stored_secret_entry
                 .map(|(_, kind)| kind.as_str() != lift.secret_kind)
                 .unwrap_or(false);
@@ -1115,10 +1115,7 @@ impl Database {
         Database::cleanup_orphan_upstreams(&tx)?;
         tx.commit().map_err(|e| AppError::Database(e.to_string()))?;
 
-        log::debug!(
-            "[{app_type}] 上游绑定对账：补/换 {} 条",
-            drifted.len()
-        );
+        log::debug!("[{app_type}] 上游绑定对账：补/换 {} 条", drifted.len());
         Ok(())
     }
 
@@ -1521,21 +1518,27 @@ mod reconcile_binding_tests {
 
     fn count(db: &Database, table: &str) -> Result<i64, AppError> {
         let conn = lock_conn!(db.conn);
-        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0))
-            .map_err(|e| AppError::Database(e.to_string()))
+        conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .map_err(|e| AppError::Database(e.to_string()))
     }
 
     fn anthropic(name: &str, url: &str) -> String {
-        format!(
-            "{{\"env\":{{\"ANTHROPIC_BASE_URL\":\"{url}\"}},\"n\":\"{name}\"}}"
-        )
+        format!("{{\"env\":{{\"ANTHROPIC_BASE_URL\":\"{url}\"}},\"n\":\"{name}\"}}")
     }
 
     /// 改一次网关地址，所有使用它的 app 都必须跟着变，且旧端点被清理。
     #[test]
     fn rewriting_endpoint_url_moves_all_consumers() -> Result<(), AppError> {
         let db = Database::memory()?;
-        insert_provider(&db, "claude", "a", "CTYun", &anthropic("CTYun", "https://ai.ctaigw.cn/v1"))?;
+        insert_provider(
+            &db,
+            "claude",
+            "a",
+            "CTYun",
+            &anthropic("CTYun", "https://ai.ctaigw.cn/v1"),
+        )?;
         insert_provider(
             &db,
             "claude-desktop",
@@ -1614,8 +1617,7 @@ mod reconcile_binding_tests {
         };
 
         let mut conn = lock_conn!(db.conn);
-        let outcome =
-            Database::rewrite_endpoint_secret(&mut conn, &endpoint_id, "sk-brand-new")?;
+        let outcome = Database::rewrite_endpoint_secret(&mut conn, &endpoint_id, "sk-brand-new")?;
         assert_eq!(outcome.changed, 2, "两个 app 的密钥都要换");
         for app in &outcome.apps {
             Database::reconcile_provider_bindings(&mut conn, app)?;
@@ -1623,7 +1625,10 @@ mod reconcile_binding_tests {
         drop(conn);
 
         let claude = db.get_provider_upstream_keys("claude")?;
-        assert_eq!(claude["a"].base_url, "https://ai.ctaigw.cn/v1", "地址不该被改动");
+        assert_eq!(
+            claude["a"].base_url, "https://ai.ctaigw.cn/v1",
+            "地址不该被改动"
+        );
         assert_ne!(
             claude["a"].circuit_key, old_key,
             "换密钥后熔断键必须变化，否则会沿用旧 key 的失败状态"
@@ -1638,7 +1643,10 @@ mod reconcile_binding_tests {
             )
             .map_err(|e| AppError::Database(e.to_string()))?
         };
-        assert!(stored.contains("sk-brand-new"), "claude-desktop 也应换到新密钥");
+        assert!(
+            stored.contains("sk-brand-new"),
+            "claude-desktop 也应换到新密钥"
+        );
         assert!(!stored.contains("sk-secret"), "旧密钥不能残留");
         Ok(())
     }
@@ -1777,8 +1785,20 @@ mod reconcile_binding_tests {
     #[test]
     fn reconcile_is_idempotent_and_merges_same_host() -> Result<(), AppError> {
         let db = Database::memory()?;
-        insert_provider(&db, "claude", "p1", "CTYun", &anthropic("CTYun", "https://ai.ctaigw.cn/v1"))?;
-        insert_provider(&db, "claude", "p2", "Alias", &anthropic("Alias", "https://ai.ctaigw.cn/v1"))?;
+        insert_provider(
+            &db,
+            "claude",
+            "p1",
+            "CTYun",
+            &anthropic("CTYun", "https://ai.ctaigw.cn/v1"),
+        )?;
+        insert_provider(
+            &db,
+            "claude",
+            "p2",
+            "Alias",
+            &anthropic("Alias", "https://ai.ctaigw.cn/v1"),
+        )?;
         insert_provider(
             &db,
             "claude-desktop",
@@ -1803,9 +1823,17 @@ mod reconcile_binding_tests {
 
         // 换到另一个 app 读：只多一条绑定，上游与端点仍然只有一个
         db.get_provider_upstream_keys("claude-desktop")?;
-        assert_eq!(count(&db, "provider_bindings")?, 3, "第三个 app 的那行也要补上");
+        assert_eq!(
+            count(&db, "provider_bindings")?,
+            3,
+            "第三个 app 的那行也要补上"
+        );
         assert_eq!(count(&db, "upstream_endpoints")?, endpoints);
-        assert_eq!(count(&db, "upstreams")?, upstreams, "同一网关只应有一个上游");
+        assert_eq!(
+            count(&db, "upstreams")?,
+            upstreams,
+            "同一网关只应有一个上游"
+        );
         Ok(())
     }
 
@@ -1820,7 +1848,10 @@ mod reconcile_binding_tests {
             &anthropic("Old", "https://old.example.com/v1"),
         )?;
         let before = db.get_provider_upstream_keys("claude")?;
-        assert_eq!(before.get("p1").map(|b| b.host.as_str()), Some("old.example.com"));
+        assert_eq!(
+            before.get("p1").map(|b| b.host.as_str()),
+            Some("old.example.com")
+        );
 
         {
             let conn = lock_conn!(db.conn);

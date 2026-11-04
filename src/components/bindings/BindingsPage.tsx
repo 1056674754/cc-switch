@@ -6,7 +6,7 @@ import type { AppId } from "@/lib/api";
 import {
   suppliersApi,
   type Supplier,
-  type SupplierEndpoint,
+  type SupplierBindingDetail,
 } from "@/lib/api/suppliers";
 import { suppliersKeys } from "@/lib/query/suppliers";
 import { APP_IDS, getAppLabel } from "@/config/appConfig";
@@ -32,34 +32,29 @@ import {
   findBinding,
   type ModelMapDraft,
   type ModelMapSlot,
-  parseConsumer,
   summarizeModelMap,
   supportsModelMap,
   toModelMapDraft,
   toModelMapPayload,
 } from "./modelMap";
 
-/** 一个供应商端点，连同它属于哪家供应商（列表里要显示供应商名）。 */
-interface EndpointRef {
+/** 一条在用接入：哪家供应商、这个 app 的哪条 provider，以及它自己的模型映射。 */
+interface InUseRef {
   supplier: Supplier;
-  endpoint: SupplierEndpoint;
-}
-
-/** 在用的端点：还带上这个 app 挂在这个端点上的 providerId（模型映射按它写）。 */
-interface InUseRef extends EndpointRef {
+  binding: SupplierBindingDetail;
   providerId: string;
 }
 
-/** 一个 app 的接入情况：已经在用哪些端点、还能选用哪些。 */
+/** 一个 app 的接入情况：已经在用哪些供应商、还能选用哪些。 */
 interface AppBinding {
   app: AppId;
   inUse: InUseRef[];
-  candidates: EndpointRef[];
+  candidates: Supplier[];
 }
 
 /** 正在编辑的模型映射：定位到某 app 的某条接入，草稿是六个槽位。 */
 interface ModelMapEditing {
-  endpointId: string;
+  supplierId: string;
   appType: AppId;
   providerId: string;
   draft: ModelMapDraft;
@@ -68,40 +63,34 @@ interface ModelMapEditing {
 /**
  * 从供应商总览反查每个 app 的接入情况。
  *
- * - 有哪些 app：从各端点的 `apps` 汇总，顺序沿用 APP_IDS（不硬编码全量应用列表）；
- * - 在用什么：`consumers` 里 `"<app>:<providerId>"` 的项，一条接入一个条目
- *   （同一个端点被同一个 app 的两条配置挂上时，各自有独立的模型映射）；
- * - 能选什么：anthropic 协议、且这个 app 还没在用的端点。
+ * - 有哪些 app：从各供应商的 `apps` 汇总，顺序沿用 APP_IDS（不硬编码全量应用列表）；
+ * - 在用什么：`bindings` 里 appType 等于这个 app 的明细，一条接入一个条目
+ *   （同一家供应商被同一个 app 的两条配置挂上时，各自有独立的模型映射）；
+ * - 能选什么：anthropic 协议、有网关地址、且这个 app 还没在用的供应商。
  */
 export function buildBindings(suppliers: Supplier[]): AppBinding[] {
   const apps = APP_IDS.filter((app) =>
-    suppliers.some((supplier) =>
-      supplier.endpoints.some((endpoint) => endpoint.apps.includes(app)),
-    ),
+    suppliers.some((supplier) => supplier.apps.includes(app)),
   );
 
   return apps.map((app) => {
     const inUse: InUseRef[] = [];
-    const candidates: EndpointRef[] = [];
+    const candidates: Supplier[] = [];
 
     for (const supplier of suppliers) {
-      for (const endpoint of supplier.endpoints) {
-        const providerIds = endpoint.consumers
-          .map(parseConsumer)
-          .filter(
-            (parsed): parsed is { appType: string; providerId: string } =>
-              parsed !== null,
-          )
-          .filter((parsed) => parsed.appType === app)
-          .map((parsed) => parsed.providerId);
+      const bindings = supplier.bindings.filter(
+        (binding) => binding.appType === app,
+      );
 
-        if (providerIds.length > 0) {
-          for (const providerId of providerIds) {
-            inUse.push({ supplier, endpoint, providerId });
-          }
-        } else if (endpoint.protocol === "anthropic") {
-          candidates.push({ supplier, endpoint });
+      if (bindings.length > 0) {
+        for (const binding of bindings) {
+          inUse.push({ supplier, binding, providerId: binding.providerId });
         }
+      } else if (
+        supplier.upstreamProtocol === "anthropic" &&
+        supplier.baseUrl.trim() !== ""
+      ) {
+        candidates.push(supplier);
       }
     }
 
@@ -136,15 +125,11 @@ export function BindingsPage() {
 
   const bindings = useMemo(() => buildBindings(data ?? []), [data]);
 
-  const openModelMap = (
-    app: AppId,
-    endpoint: SupplierEndpoint,
-    providerId: string,
-  ) => {
+  const openModelMap = (app: AppId, supplier: Supplier, providerId: string) => {
     // 预填当前映射：后端可能只返回配过的槽位，缺的槽位补空串
-    const current = findBinding(endpoint, app, providerId)?.modelMap;
+    const current = findBinding(supplier.bindings, app, providerId)?.modelMap;
     setEditingMap({
-      endpointId: endpoint.id,
+      supplierId: supplier.id,
       appType: app,
       providerId,
       draft: toModelMapDraft(current),
@@ -191,13 +176,13 @@ export function BindingsPage() {
     }
   };
 
-  const adoptFor = async (app: AppId, endpointId: string) => {
+  const adoptFor = async (app: AppId, supplierId: string) => {
     if (adoptingApp) return;
 
     setAdoptingApp(app);
     try {
-      const adopted = await suppliersApi.adopt(app, endpointId);
-      // agent 侧多了一条配置、网关侧这个端点多了使用者：两边都要重新读
+      const adopted = await suppliersApi.adopt(app, supplierId);
+      // agent 侧多了一条配置、网关侧这家供应商多了使用者：两边都要重新读
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["providers"] }),
         queryClient.invalidateQueries({ queryKey: ["suppliers"] }),
@@ -272,12 +257,14 @@ export function BindingsPage() {
         {bindings.map(({ app, inUse, candidates }) => {
           const isBusy = adoptingApp === app;
           const label = getAppLabel(app);
-          // 同一个 app 里可能有两条旧配置指向同一个网关（历史遗留），
+          // 同一个 app 里可能有两条旧配置指向同一家供应商（历史遗留），
           // 逐条展示是对的，但要让用户看出这是"重复接入"而不是渲染出错
           const duplicates = new Map<string, number>();
           for (const item of inUse) {
-            const key = `${item.supplier.id}:${item.endpoint.id}`;
-            duplicates.set(key, (duplicates.get(key) ?? 0) + 1);
+            duplicates.set(
+              item.supplier.id,
+              (duplicates.get(item.supplier.id) ?? 0) + 1,
+            );
           }
 
           return (
@@ -302,14 +289,12 @@ export function BindingsPage() {
                   </div>
                 ) : (
                   <ul className="m-0 list-none space-y-1.5 p-0">
-                    {inUse.map(({ supplier, endpoint, providerId }) => {
-                      const summary = summarizeModelMap(
-                        findBinding(endpoint, app, providerId)?.modelMap,
-                      );
-                      // 同一个端点可能被同一个 app 的多条配置挂上，providerId 要进 key
-                      const rowKey = `${supplier.id}:${endpoint.id}:${providerId}`;
+                    {inUse.map(({ supplier, binding, providerId }) => {
+                      const summary = summarizeModelMap(binding.modelMap);
+                      // 同一家供应商可能被同一个 app 的多条配置挂上，providerId 要进 key
+                      const rowKey = `${supplier.id}:${providerId}`;
                       const isEditingMap =
-                        editingMap?.endpointId === endpoint.id &&
+                        editingMap?.supplierId === supplier.id &&
                         editingMap.appType === app &&
                         editingMap.providerId === providerId;
 
@@ -326,25 +311,24 @@ export function BindingsPage() {
                               variant="outline"
                               className="h-[18px] shrink-0 rounded-full px-1.5 text-badge font-medium text-fg-2"
                             >
-                              {protocolLabel(endpoint.protocol)}
+                              {protocolLabel(supplier.upstreamProtocol)}
                             </Badge>
                             <code
                               className="min-w-0 font-mono text-caption text-fg-3 [overflow-wrap:anywhere]"
-                              title={endpoint.baseUrl || undefined}
+                              title={supplier.baseUrl || undefined}
                             >
-                              {endpoint.baseUrl || t("suppliers.noBaseUrl")}
+                              {supplier.baseUrl || t("suppliers.noBaseUrl")}
                             </code>
-                            {(duplicates.get(`${supplier.id}:${endpoint.id}`) ??
-                              1) > 1 ? (
+                            {(duplicates.get(supplier.id) ?? 1) > 1 ? (
                               <Badge
                                 variant="outline"
-                                title={t("bindings.duplicateHint")}
+                                title={t("bindings.duplicateHint", {
+                                  count: duplicates.get(supplier.id),
+                                })}
                                 className="h-[18px] shrink-0 rounded-full border-warning/40 px-1.5 text-badge font-medium text-warning"
                               >
                                 {t("bindings.duplicateBadge", {
-                                  count: duplicates.get(
-                                    `${supplier.id}:${endpoint.id}`,
-                                  ),
+                                  count: duplicates.get(supplier.id),
                                 })}
                               </Badge>
                             ) : null}
@@ -370,7 +354,7 @@ export function BindingsPage() {
                                 size="compact"
                                 className="h-6 px-1.5 text-caption"
                                 onClick={() =>
-                                  openModelMap(app, endpoint, providerId)
+                                  openModelMap(app, supplier, providerId)
                                 }
                               >
                                 <Pencil
@@ -418,8 +402,8 @@ export function BindingsPage() {
                       // 采用进行中把各卡片的下拉都禁掉：并发采用会被上面的守卫丢掉，
                       // 能点却没反应更让人困惑
                       disabled={adoptingApp !== null}
-                      onValueChange={(endpointId) =>
-                        void adoptFor(app, endpointId)
+                      onValueChange={(supplierId) =>
+                        void adoptFor(app, supplierId)
                       }
                     >
                       <SelectTrigger
@@ -433,17 +417,14 @@ export function BindingsPage() {
                         />
                       </SelectTrigger>
                       <SelectContent>
-                        {candidates.map(({ supplier, endpoint }) => (
-                          <SelectItem
-                            key={`${supplier.id}:${endpoint.id}`}
-                            value={endpoint.id}
-                          >
+                        {candidates.map((supplier) => (
+                          <SelectItem key={supplier.id} value={supplier.id}>
                             <span className="flex min-w-0 items-baseline gap-2">
                               <span className="min-w-0 truncate">
                                 {supplier.name}
                               </span>
                               <span className="min-w-0 truncate font-mono text-caption text-fg-3">
-                                {endpoint.baseUrl || t("suppliers.noBaseUrl")}
+                                {supplier.baseUrl || t("suppliers.noBaseUrl")}
                               </span>
                             </span>
                           </SelectItem>

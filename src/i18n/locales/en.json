@@ -4318,19 +4318,14 @@
     "viewUsage": "View usage for this app"
   },
   "suppliers": {
-    "description": "Set an upstream address and key once here; every agent that uses it shares it. Editing an endpoint's address rewrites every app connected to that endpoint.",
+    "description": "One supplier = one upstream address + one upstream protocol. Change the address or key once here and every connected agent follows.",
     "helpTitle": "Suppliers",
-    "helpBody": "A supplier is a gateway-level upstream: one supplier can have several endpoints with different protocols, each with its own address and credentials. Changing an endpoint's address rewrites every app connected to that endpoint.",
+    "helpBody": "A supplier is a gateway-level upstream: each one maps to a single upstream API (service root + upstream protocol) and can be shared by several agents. When the upstream protocol differs from the client protocol, requests are converted by the proxy. Change the address or key once and every connected app follows.",
     "loadFailed": "Couldn't load suppliers",
     "loadFailedHint": "Try again in a moment. If it keeps failing, check that the local database is readable.",
     "empty": "No suppliers yet. Add a provider on any app's Providers page and it shows up here, grouped by upstream.",
     "noHost": "Managed sign-in",
     "noBaseUrl": "No address (managed sign-in)",
-    "noEndpoints": "This supplier has no endpoints yet",
-    "endpointCount_one": "{{count}} endpoint",
-    "endpointCount_other": "{{count}} endpoints",
-    "appCount_one": "{{count}} app",
-    "appCount_other": "{{count}} apps",
     "credentialCount_one": "{{count}} credential",
     "credentialCount_other": "{{count}} credentials",
     "credentialKinds": "Credentials",
@@ -4343,7 +4338,7 @@
     "usedBy": "Used by",
     "unused": "Not used by any app yet",
     "editUrl": "Edit address",
-    "baseUrlLabel": "Endpoint address",
+    "baseUrlLabel": "Upstream address",
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "Enter an address first",
     "updateSuccess": "Address updated for every connected app",
@@ -4378,7 +4373,12 @@
     "createAppsRequired": "Select at least one app",
     "createSubmit": "Create",
     "createSuccess": "Added supplier {{name}}",
-    "createFailed": "Couldn't add this supplier; please try again."
+    "createFailed": "Couldn't add this supplier; please try again.",
+    "upstreamProtocol": "Upstream protocol",
+    "protocolConversion": "{{downstream}} → {{upstream}}",
+    "protocolConversionHint": "The client protocol differs from the upstream protocol, so requests are converted by the proxy.",
+    "adoptDisabledHint": "In direct mode, Claude only accepts an Anthropic upstream.",
+    "modelMapAction": "Model mapping"
   },
   "bindings": {
     "description": "Each agent picks its supplier here. Addresses and keys are configured once on the supplier side.",
@@ -4391,8 +4391,8 @@
     "currentSuppliers": "Current suppliers",
     "appEmpty": "This app hasn't picked a supplier yet",
     "pickSupplierFor": "Pick a supplier for {{app}}",
-    "pickPlaceholder": "Choose a supplier endpoint…",
-    "noCandidates": "No endpoints to choose from: you need an Anthropic-protocol supplier that this app isn't using yet.",
+    "pickPlaceholder": "Choose a supplier…",
+    "noCandidates": "No suppliers to choose from: you need an Anthropic-protocol supplier with a gateway address that this app isn't using yet.",
     "adopting": "Binding…",
     "manualOnly": "This app needs manual setup; one-click adopting isn't supported yet",
     "modelMap": "Model mapping",
@@ -4400,7 +4400,7 @@
     "modelMapEdit": "Edit mapping",
     "modelMapFor": "Model mapping for {{app}}",
     "modelMapPlaceholder": "Model name",
-    "modelMapHint": "Leave a slot empty to clear that model field. Saving only affects this app, not other apps on the same endpoint.",
+    "modelMapHint": "Leave a slot empty to clear that model field. Saving only affects this app, not other apps on the same supplier.",
     "modelMapSaved": "Model mapping saved",
     "modelMapFailed": "Couldn't save the model mapping",
     "modelSlot": {
@@ -4412,7 +4412,7 @@
       "default": "Default"
     },
     "duplicateBadge": "Duplicate ×{{count}}",
-    "duplicateHint": "{{count}} configs in this app point to the same gateway; extras can be merged on the app page"
+    "duplicateHint": "{{count}} configs in this app point to the same supplier; extras can be merged on the app page"
   },
   "mode": {
     "tabsLabel": "Connection mode",

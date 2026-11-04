@@ -1,8 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type {
-  SupplierEndpoint,
-  SupplierEndpointBinding,
-} from "@/lib/api/suppliers";
+import type { SupplierBindingDetail } from "@/lib/api/suppliers";
 import {
   emptyModelMapDraft,
   findBinding,
@@ -14,16 +11,12 @@ import {
   toModelMapPayload,
 } from "@/components/bindings/modelMap";
 
-const endpoint = (
-  overrides: Partial<SupplierEndpoint> = {},
-): SupplierEndpoint => ({
-  id: "ep-1",
-  protocol: "anthropic",
-  baseUrl: "https://api.acme.dev",
-  apps: ["claude"],
-  consumers: ["claude:p1"],
-  credentialCount: 1,
-  bindings: [],
+const binding = (
+  overrides: Partial<SupplierBindingDetail> &
+    Pick<SupplierBindingDetail, "appType" | "providerId">,
+): SupplierBindingDetail => ({
+  modelMap: {},
+  downstreamProtocol: "anthropic",
   ...overrides,
 });
 
@@ -101,26 +94,33 @@ describe("modelMap", () => {
   });
 
   it("finds the binding by app and provider, falling back to the app", () => {
-    const bindings: SupplierEndpointBinding[] = [
-      { appType: "claude", providerId: "p1", modelMap: { sonnet: "a" } },
-      { appType: "claude", providerId: "p2", modelMap: { sonnet: "b" } },
-      { appType: "codex", providerId: "p3", modelMap: {} },
+    const bindings: SupplierBindingDetail[] = [
+      binding({
+        appType: "claude",
+        providerId: "p1",
+        modelMap: { sonnet: "a" },
+      }),
+      binding({
+        appType: "claude",
+        providerId: "p2",
+        modelMap: { sonnet: "b" },
+      }),
+      binding({
+        appType: "codex",
+        providerId: "p3",
+        downstreamProtocol: "openai_responses",
+      }),
     ];
 
-    expect(
-      findBinding(endpoint({ bindings }), "claude", "p2")?.modelMap,
-    ).toEqual({ sonnet: "b" });
+    expect(findBinding(bindings, "claude", "p2")?.modelMap).toEqual({
+      sonnet: "b",
+    });
     // providerId 对不上（例如绑定刚对账完还没刷新）时退回同 app 的第一条
-    expect(
-      findBinding(endpoint({ bindings }), "claude", "gone")?.providerId,
-    ).toBe("p1");
-    expect(findBinding(endpoint({ bindings }), "gemini")).toBeUndefined();
-    expect(findBinding(endpoint(), "claude")).toBeUndefined();
+    expect(findBinding(bindings, "claude", "gone")?.providerId).toBe("p1");
+    expect(findBinding(bindings, "gemini")).toBeUndefined();
+    expect(findBinding([], "claude")).toBeUndefined();
     // 老版本后端没有 bindings 字段时也不能炸
-    const legacy = { ...endpoint(), bindings: undefined };
-    expect(
-      findBinding(legacy as unknown as SupplierEndpoint, "claude"),
-    ).toBeUndefined();
+    expect(findBinding(undefined, "claude")).toBeUndefined();
   });
 
   it("only claude-family apps can write model fields", () => {

@@ -4319,17 +4319,14 @@
     "viewUsage": "查看此應用的用量"
   },
   "suppliers": {
-    "description": "在這裡設定一次上游位址與金鑰，所有使用它的 agent 共用。修改端點位址時，接入這個端點的應用會一起被改寫。",
+    "description": "一家供應商 = 一個上游位址 + 一種上游協定。在這裡修改一次位址或金鑰，接入它的所有 agent 一起生效。",
     "helpTitle": "供應商",
-    "helpBody": "供應商是閘道級的上游：一家供應商底下可以有多個協定不同的端點，每個端點帶著自己的位址和憑證。修改一個端點的位址，所有接入這個端點的應用會一起被改寫。",
+    "helpBody": "供應商是閘道級的上游：每家對應一個確切的上游 API（服務根 + 上游協定），可以同時接入多個 agent。上游協定與用戶端協定不同時，請求會經過代理轉換；位址和金鑰修改一次，所有接入的應用一起生效。",
     "loadFailed": "讀取供應商失敗",
     "loadFailedHint": "請稍後再試；如果一直失敗，請確認本機資料庫是否能正常讀取。",
     "empty": "還沒有供應商。在任一應用的供應商頁新增一家之後，這裡會依上游彙總顯示。",
     "noHost": "託管登入",
     "noBaseUrl": "無位址（託管登入）",
-    "noEndpoints": "這家供應商還沒有端點",
-    "endpointCount_other": "{{count}} 個端點",
-    "appCount_other": "{{count}} 個應用",
     "credentialCount_other": "{{count}} 個憑證",
     "credentialKinds": "憑證型態",
     "credentialKind": {
@@ -4341,7 +4338,7 @@
     "usedBy": "被使用",
     "unused": "還沒有應用使用",
     "editUrl": "編輯位址",
-    "baseUrlLabel": "端點位址",
+    "baseUrlLabel": "上游位址",
     "baseUrlPlaceholder": "https://api.example.com",
     "baseUrlRequired": "請先填寫位址",
     "updateSuccess": "位址已更新，接入的應用一起生效",
@@ -4376,7 +4373,12 @@
     "createAppsRequired": "至少勾選一個應用",
     "createSubmit": "建立",
     "createSuccess": "已新增供應商 {{name}}",
-    "createFailed": "新增供應商失敗，請重試"
+    "createFailed": "新增供應商失敗，請重試",
+    "upstreamProtocol": "上游協定",
+    "protocolConversion": "{{downstream}} → {{upstream}}",
+    "protocolConversionHint": "用戶端協定與上游協定不同，請求會經過代理轉換",
+    "adoptDisabledHint": "直連模式的 claude 只吃 anthropic 上游",
+    "modelMapAction": "模型映射"
   },
   "bindings": {
     "description": "各 agent 從這裡選用供應商；位址和金鑰都在供應商那邊設定。",
@@ -4389,8 +4391,8 @@
     "currentSuppliers": "目前供應商",
     "appEmpty": "這個應用還沒有選用供應商",
     "pickSupplierFor": "為 {{app}} 選用供應商",
-    "pickPlaceholder": "選擇供應商端點…",
-    "noCandidates": "沒有可選的端點：需要 anthropic 協議的供應商，且這個應用還沒在用。",
+    "pickPlaceholder": "選擇供應商…",
+    "noCandidates": "沒有可選的供應商：需要 anthropic 協定、有閘道位址，且這個應用還沒在用。",
     "adopting": "正在接入…",
     "manualOnly": "該應用需要手動設定，暫不支援一鍵選用",
     "modelMap": "模型映射",
@@ -4398,7 +4400,7 @@
     "modelMapEdit": "編輯映射",
     "modelMapFor": "{{app}} 的模型映射",
     "modelMapPlaceholder": "模型名稱",
-    "modelMapHint": "欄位留空表示清掉對應的模型設定；儲存只影響這個應用，不動同一端點上其他應用。",
+    "modelMapHint": "欄位留空表示清掉對應的模型設定；儲存只影響這個應用，不動同一供應商上其他應用。",
     "modelMapSaved": "模型映射已儲存",
     "modelMapFailed": "模型映射儲存失敗",
     "modelSlot": {
@@ -4410,7 +4412,7 @@
       "default": "預設"
     },
     "duplicateBadge": "重複接入 ×{{count}}",
-    "duplicateHint": "同一個應用裡有 {{count}} 條設定指向這個網關"
+    "duplicateHint": "同一個應用裡有 {{count}} 條設定指向這家供應商"
   },
   "mode": {
     "tabsLabel": "連線模式",

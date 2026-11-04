@@ -3,12 +3,13 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { SupplierPage } from "@/components/suppliers/SupplierPage";
-import type { Supplier } from "@/lib/api/suppliers";
+import type { Supplier, SupplierBindingDetail } from "@/lib/api/suppliers";
 
 const mocks = vi.hoisted(() => ({
   overview: vi.fn(),
   updateBaseUrl: vi.fn(),
   updateSecret: vi.fn(),
+  updateBindingModelMap: vi.fn(),
   adopt: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
@@ -17,12 +18,17 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@/lib/api/suppliers", () => ({
   suppliersApi: {
     overview: () => mocks.overview(),
-    updateBaseUrl: (endpointId: string, baseUrl: string) =>
-      mocks.updateBaseUrl(endpointId, baseUrl),
-    updateSecret: (endpointId: string, secret: string) =>
-      mocks.updateSecret(endpointId, secret),
-    adopt: (appType: string, endpointId: string) =>
-      mocks.adopt(appType, endpointId),
+    updateBaseUrl: (supplierId: string, baseUrl: string) =>
+      mocks.updateBaseUrl(supplierId, baseUrl),
+    updateSecret: (supplierId: string, secret: string) =>
+      mocks.updateSecret(supplierId, secret),
+    updateBindingModelMap: (
+      appType: string,
+      providerId: string,
+      modelMap: Record<string, string>,
+    ) => mocks.updateBindingModelMap(appType, providerId, modelMap),
+    adopt: (appType: string, supplierId: string) =>
+      mocks.adopt(appType, supplierId),
   },
 }));
 
@@ -49,35 +55,37 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+const binding = (
+  overrides: Partial<SupplierBindingDetail> &
+    Pick<SupplierBindingDetail, "appType" | "providerId">,
+): SupplierBindingDetail => ({
+  modelMap: {},
+  downstreamProtocol: "anthropic",
+  ...overrides,
+});
+
 const supplier = (overrides: Partial<Supplier> = {}): Supplier => ({
   id: "sup-1",
   name: "Acme Gateway",
   host: "api.acme.dev",
-  appCount: 2,
-  credentialKinds: ["literal", "managed"],
-  endpoints: [
-    {
-      id: "ep-1",
-      protocol: "anthropic",
-      baseUrl: "https://api.acme.dev",
-      apps: ["claude", "codex"],
-      consumers: ["claude:p1", "codex:p2"],
-      credentialCount: 2,
-      bindings: [
-        { appType: "claude", providerId: "p1", modelMap: {} },
-        { appType: "codex", providerId: "p2", modelMap: {} },
-      ],
-    },
-    {
-      id: "ep-2",
-      protocol: "gemini_native",
-      baseUrl: "",
-      apps: [],
-      consumers: [],
-      credentialCount: 0,
-      bindings: [],
-    },
+  baseUrl: "https://api.acme.dev/v1",
+  upstreamProtocol: "anthropic",
+  apps: ["claude", "codex"],
+  consumers: ["claude:p1", "codex:p2"],
+  bindings: [
+    binding({
+      appType: "claude",
+      providerId: "p1",
+      modelMap: { haiku: "kimi-k2-small", sonnet: "kimi-k2" },
+    }),
+    binding({
+      appType: "codex",
+      providerId: "p2",
+      downstreamProtocol: "openai_responses",
+    }),
   ],
+  credentialCount: 2,
+  credentialKinds: ["literal", "managed"],
   ...overrides,
 });
 
@@ -94,12 +102,20 @@ const renderPage = () => {
   return { client, invalidateQueries };
 };
 
-const supplierHeader = (name: string) =>
-  screen.getByText(name).closest("button") as HTMLButtonElement;
+const adoptButton = (index = 0) =>
+  screen.getAllByRole("button", { name: "suppliers.adoptTo" })[index];
 
-const openSupplier = async (name: string) => {
+const openAdoptMenu = async (index = 0) => {
   const user = userEvent.setup();
-  await user.click(supplierHeader(name));
+  await user.click(adoptButton(index));
+  return user;
+};
+
+const openModelMapMenu = async () => {
+  const user = userEvent.setup();
+  await user.click(
+    screen.getByRole("button", { name: "suppliers.modelMapAction" }),
+  );
   return user;
 };
 
@@ -108,81 +124,76 @@ describe("SupplierPage", () => {
     mocks.overview.mockResolvedValue([supplier()]);
     mocks.updateBaseUrl.mockReset();
     mocks.updateSecret.mockReset();
+    mocks.updateBindingModelMap.mockReset();
     mocks.adopt.mockReset();
     mocks.success.mockReset();
     mocks.error.mockReset();
   });
 
-  it("lists suppliers with endpoint, app and credential counts", async () => {
+  it("renders one flat row per supplier with address, protocol, apps and credentials", async () => {
     renderPage();
 
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    expect(screen.getByText("api.acme.dev")).toBeInTheDocument();
-    expect(screen.getByText(/suppliers\.endpointCount:2/)).toBeInTheDocument();
-    expect(screen.getByText(/suppliers\.appCount:2/)).toBeInTheDocument();
+    // 一家供应商只有一个地址，不再有「端点」这一层
+    expect(screen.getByText("https://api.acme.dev/v1")).toBeInTheDocument();
     expect(
-      screen.getByText(/suppliers\.credentialCount:2/),
+      screen.queryByText(/suppliers\.endpointCount/),
+    ).not.toBeInTheDocument();
+    // 上游协议徽标
+    expect(screen.getByText("Anthropic")).toBeInTheDocument();
+    // 被哪些 app 使用
+    expect(screen.getByText("Claude")).toBeInTheDocument();
+    expect(screen.getByText("Codex")).toBeInTheDocument();
+    // 凭据数与凭据形态
+    expect(screen.getByText("suppliers.credentialCount:2")).toBeInTheDocument();
+    expect(
+      screen.getByText("suppliers.credentialKind.literal"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("suppliers.credentialKind.managed"),
     ).toBeInTheDocument();
   });
 
-  it("expands a supplier into endpoints with protocol, address and apps", async () => {
+  it("shows the row actions: edit address, change key, adopt and model mapping", async () => {
     renderPage();
-    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    await screen.findByText("Acme Gateway");
 
-    await openSupplier("Acme Gateway");
-
-    expect(screen.getByText("Anthropic")).toBeInTheDocument();
-    expect(screen.getByText("https://api.acme.dev")).toBeInTheDocument();
-    expect(screen.getByText("Claude")).toBeInTheDocument();
-    expect(screen.getByText("Codex")).toBeInTheDocument();
-    // 托管登录的端点没有地址，被谁使用也要说清楚
-    expect(screen.getByText("Gemini")).toBeInTheDocument();
-    expect(screen.getByText("suppliers.noBaseUrl")).toBeInTheDocument();
-    expect(screen.getByText("suppliers.unused")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "suppliers.editUrl" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
+    ).toBeInTheDocument();
+    expect(adoptButton()).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "suppliers.modelMapAction" }),
+    ).toBeInTheDocument();
   });
 
-  it("saves an edited endpoint address and replaces the list with the response", async () => {
-    const updated = [
-      supplier({
-        endpoints: [
-          {
-            id: "ep-1",
-            protocol: "anthropic",
-            baseUrl: "https://next.acme.dev",
-            apps: ["claude", "codex"],
-            consumers: ["claude:p1", "codex:p2"],
-            credentialCount: 2,
-            bindings: [
-              { appType: "claude", providerId: "p1", modelMap: {} },
-              { appType: "codex", providerId: "p2", modelMap: {} },
-            ],
-          },
-        ],
-      }),
-    ];
+  it("saves an edited supplier address and replaces the list with the response", async () => {
+    const updated = [supplier({ baseUrl: "https://next.acme.dev/v1" })];
     mocks.updateBaseUrl.mockResolvedValue(updated);
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.editUrl" })[0],
-    );
+    await user.click(screen.getByRole("button", { name: "suppliers.editUrl" }));
     const input = screen.getByLabelText("suppliers.baseUrlLabel");
+    expect(input).toHaveValue("https://api.acme.dev/v1");
     await user.clear(input);
-    await user.type(input, "  https://next.acme.dev  ");
+    await user.type(input, "  https://next.acme.dev/v1  ");
     await user.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
       expect(mocks.updateBaseUrl).toHaveBeenCalledWith(
-        "ep-1",
-        "https://next.acme.dev",
+        "sup-1",
+        "https://next.acme.dev/v1",
       ),
     );
     expect(mocks.success).toHaveBeenCalledWith("suppliers.updateSuccess");
     expect(
-      await screen.findByText("https://next.acme.dev"),
+      await screen.findByText("https://next.acme.dev/v1"),
     ).toBeInTheDocument();
     expect(
       screen.queryByLabelText("suppliers.baseUrlLabel"),
@@ -196,14 +207,12 @@ describe("SupplierPage", () => {
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.editUrl" })[0],
-    );
+    await user.click(screen.getByRole("button", { name: "suppliers.editUrl" }));
     const input = screen.getByLabelText("suppliers.baseUrlLabel");
     await user.clear(input);
-    await user.type(input, "https://next.acme.dev");
+    await user.type(input, "https://next.acme.dev/v1");
     await user.click(screen.getByRole("button", { name: "common.save" }));
 
     await waitFor(() =>
@@ -240,20 +249,16 @@ describe("SupplierPage", () => {
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
   });
 
-  it("offers the two adopt targets and adopts an endpoint without asking for a key", async () => {
+  it("offers the two adopt targets and adopts a supplier without asking for a key", async () => {
     mocks.adopt.mockResolvedValue({
       appType: "claude-desktop",
-      providerId: "sup-ep-1",
+      providerId: "sup-adopted",
       providerName: "Acme Gateway",
     });
 
     const { invalidateQueries } = renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
-
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.adoptTo" })[0],
-    );
+    const user = await openAdoptMenu();
 
     // 菜单里只有后端支持一键采用的两个 app
     expect(
@@ -264,7 +269,7 @@ describe("SupplierPage", () => {
     );
 
     await waitFor(() =>
-      expect(mocks.adopt).toHaveBeenCalledWith("claude-desktop", "ep-1"),
+      expect(mocks.adopt).toHaveBeenCalledWith("claude-desktop", "sup-1"),
     );
     // 用户一个 key 都没填：成功提示说清楚加进了哪个 app、哪家供应商
     expect(mocks.success).toHaveBeenCalledWith(
@@ -283,30 +288,22 @@ describe("SupplierPage", () => {
 
   it("toasts the backend reason when adoption is rejected", async () => {
     mocks.adopt.mockRejectedValue(
-      "这个端点是 gemini_native 协议，claude 只吃 anthropic 协议，无法直接采用",
+      "这家供应商的密钥只存了环境变量名，库里没有明文，无法一键采用",
     );
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
-
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.adoptTo" })[0],
-    );
+    const user = await openAdoptMenu();
     await user.click(await screen.findByRole("menuitem", { name: "Claude" }));
 
     await waitFor(() =>
       expect(mocks.error).toHaveBeenCalledWith(
-        "这个端点是 gemini_native 协议，claude 只吃 anthropic 协议，无法直接采用",
+        "这家供应商的密钥只存了环境变量名，库里没有明文，无法一键采用",
       ),
     );
     expect(mocks.success).not.toHaveBeenCalled();
     // 失败后按钮要恢复可用，不能卡在加载态
-    await waitFor(() =>
-      expect(
-        screen.getAllByRole("button", { name: "suppliers.adoptTo" })[0],
-      ).not.toBeDisabled(),
-    );
+    await waitFor(() => expect(adoptButton()).not.toBeDisabled());
   });
 
   it("disables the adopt button while a request is in flight", async () => {
@@ -323,42 +320,289 @@ describe("SupplierPage", () => {
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
-
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.adoptTo" })[0],
-    );
+    const user = await openAdoptMenu();
     await user.click(await screen.findByRole("menuitem", { name: "Claude" }));
 
-    const trigger = screen.getAllByRole("button", {
-      name: "suppliers.adoptTo",
-    })[0];
+    const trigger = adoptButton();
     await waitFor(() => expect(trigger).toBeDisabled());
     expect(trigger).toHaveAttribute("aria-busy", "true");
 
     await act(async () => {
       resolveAdopt({
         appType: "claude",
-        providerId: "sup-ep-1",
+        providerId: "sup-adopted",
         providerName: "Acme Gateway",
       });
     });
 
     await waitFor(() => expect(mocks.success).toHaveBeenCalled());
+    await waitFor(() => expect(adoptButton()).not.toBeDisabled());
+  });
+
+  it("disables adopt for non-Anthropic upstreams and says why in a title", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier({
+        id: "sup-2",
+        name: "OpenAI Gate",
+        upstreamProtocol: "openai_chat",
+        baseUrl: "https://openai.example.com/v1",
+      }),
+      supplier({
+        id: "sup-3",
+        name: "Managed Claude",
+        host: "",
+        baseUrl: "",
+        upstreamProtocol: "anthropic",
+        apps: ["claude"],
+        consumers: ["claude:official"],
+        bindings: [binding({ appType: "claude", providerId: "official" })],
+        credentialCount: 1,
+        credentialKinds: ["managed"],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("OpenAI Gate")).toBeInTheDocument();
+    // 托管登录账号默认折叠，展开后才看得到
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.showManaged:1" }),
+    );
+    expect(screen.getByText("Managed Claude")).toBeInTheDocument();
+
+    const [openAiTrigger, managedTrigger] = screen.getAllByRole("button", {
+      name: "suppliers.adoptTo",
+    });
+    expect(openAiTrigger).toBeDisabled();
+    expect(managedTrigger).toBeDisabled();
+    // 直连模式没有代理转换，claude 只吃 anthropic 上游
+    expect(openAiTrigger.closest("span[title]")).toHaveAttribute(
+      "title",
+      "suppliers.adoptDisabledHint",
+    );
+    expect(managedTrigger.closest("span[title]")).toHaveAttribute(
+      "title",
+      "suppliers.adoptDisabledHint",
+    );
+  });
+
+  it("collapses managed sign-in accounts by default and hides their write actions", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier(),
+      supplier({
+        id: "sup-managed",
+        name: "Claude Official",
+        host: "",
+        baseUrl: "",
+        upstreamProtocol: "anthropic",
+        apps: ["claude"],
+        consumers: ["claude:official"],
+        bindings: [binding({ appType: "claude", providerId: "official" })],
+        credentialCount: 1,
+        credentialKinds: ["managed"],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    // 托管登录账号默认折叠，不把真正的网关淹掉
+    expect(screen.queryByText("Claude Official")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "suppliers.showManaged:1" }),
+    ).toBeInTheDocument();
+
+    const user = userEvent.setup();
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.showManaged:1" }),
+    );
+
+    expect(screen.getByText("Claude Official")).toBeInTheDocument();
+    // 托管账号没有网关地址：不给「编辑地址」「换密钥」
+    expect(
+      screen.getAllByRole("button", { name: "suppliers.editUrl" }),
+    ).toHaveLength(1);
+    expect(
+      screen.getAllByRole("button", { name: "suppliers.changeSecret" }),
+    ).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "suppliers.hideManaged" }),
+    ).toBeInTheDocument();
+  });
+
+  it("flags duplicate bindings of the same app on one supplier", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier({
+        apps: ["claude"],
+        consumers: ["claude:p1", "claude:p1-old"],
+        bindings: [
+          binding({ appType: "claude", providerId: "p1" }),
+          binding({ appType: "claude", providerId: "p1-old" }),
+        ],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+
+    expect(screen.getByText("bindings.duplicateBadge:2")).toBeInTheDocument();
+    expect(screen.getByTitle("bindings.duplicateHint:2")).toBeInTheDocument();
+  });
+
+  it("hints that a binding is converted when downstream and upstream protocols differ", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier({
+        upstreamProtocol: "openai_chat",
+        baseUrl: "https://ai.ctaigw.cn/v1",
+        apps: ["claude"],
+        consumers: ["claude:p1"],
+        bindings: [
+          binding({
+            appType: "claude",
+            providerId: "p1",
+            downstreamProtocol: "anthropic",
+          }),
+        ],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+
+    // 下游 Anthropic → 上游 OpenAI Chat：说明请求走了代理转换
+    expect(
+      screen.getByText("suppliers.protocolConversion:Anthropic|OpenAI Chat"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByTitle("suppliers.protocolConversionHint"),
+    ).toBeInTheDocument();
+  });
+
+  it("does not show a conversion hint when both protocols match", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier({
+        apps: ["claude"],
+        consumers: ["claude:p1"],
+        bindings: [binding({ appType: "claude", providerId: "p1" })],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+
+    expect(
+      screen.queryByText(/suppliers\.protocolConversion/),
+    ).not.toBeInTheDocument();
+  });
+
+  it("only offers the model mapping action to Claude-family bindings", async () => {
+    mocks.overview.mockResolvedValue([
+      supplier({
+        apps: ["codex"],
+        consumers: ["codex:p2"],
+        bindings: [
+          binding({
+            appType: "codex",
+            providerId: "p2",
+            downstreamProtocol: "openai_responses",
+          }),
+        ],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+
+    expect(
+      screen.queryByRole("button", { name: "suppliers.modelMapAction" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("prefills and saves the model mapping of a Claude binding", async () => {
+    mocks.updateBindingModelMap.mockResolvedValue([
+      supplier({
+        bindings: [
+          binding({
+            appType: "claude",
+            providerId: "p1",
+            modelMap: { haiku: "kimi-k2-small", sonnet: "kimi-k3" },
+          }),
+          binding({
+            appType: "codex",
+            providerId: "p2",
+            downstreamProtocol: "openai_responses",
+          }),
+        ],
+      }),
+    ]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = await openModelMapMenu();
+
+    await user.click(await screen.findByRole("menuitem", { name: /Claude/ }));
+
+    // 六个槽位固定都在，已配的槽位按后端返回预填
+    expect(screen.getByLabelText("bindings.modelSlot.haiku")).toHaveValue(
+      "kimi-k2-small",
+    );
+    expect(screen.getByLabelText("bindings.modelSlot.sonnet")).toHaveValue(
+      "kimi-k2",
+    );
+
+    await user.clear(screen.getByLabelText("bindings.modelSlot.sonnet"));
+    await user.type(
+      screen.getByLabelText("bindings.modelSlot.sonnet"),
+      "kimi-k3",
+    );
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.updateBindingModelMap).toHaveBeenCalledWith("claude", "p1", {
+        haiku: "kimi-k2-small",
+        sonnet: "kimi-k3",
+      }),
+    );
+    expect(mocks.success).toHaveBeenCalledWith("bindings.modelMapSaved");
+    // 编辑器收起
     await waitFor(() =>
       expect(
-        screen.getAllByRole("button", { name: "suppliers.adoptTo" })[0],
-      ).not.toBeDisabled(),
+        screen.queryByLabelText("bindings.modelSlot.sonnet"),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it("keeps the mapping editor open when saving is rejected", async () => {
+    mocks.updateBindingModelMap.mockRejectedValue(
+      "claude 的这条配置里没有可写的模型字段（只有 claude 系支持模型映射）",
+    );
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = await openModelMapMenu();
+    await user.click(await screen.findByRole("menuitem", { name: /Claude/ }));
+    await user.type(
+      screen.getByLabelText("bindings.modelSlot.opus"),
+      "kimi-k2-thinking",
+    );
+    await user.click(screen.getByRole("button", { name: "common.save" }));
+
+    await waitFor(() =>
+      expect(mocks.error).toHaveBeenCalledWith(
+        "claude 的这条配置里没有可写的模型字段（只有 claude 系支持模型映射）",
+      ),
+    );
+    expect(screen.getByLabelText("bindings.modelSlot.opus")).toHaveValue(
+      "kimi-k2-thinking",
     );
   });
 
   it("never echoes a stored key: the inline secret editor starts empty and masked", async () => {
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
 
     const input = screen.getByLabelText("suppliers.secretLabel");
@@ -375,17 +619,17 @@ describe("SupplierPage", () => {
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     const input = screen.getByLabelText("suppliers.secretLabel");
     await user.type(input, "  sk-new-key  ");
     await user.keyboard("{Enter}");
 
     await waitFor(() =>
-      expect(mocks.updateSecret).toHaveBeenCalledWith("ep-1", "sk-new-key"),
+      expect(mocks.updateSecret).toHaveBeenCalledWith("sup-1", "sk-new-key"),
     );
     expect(mocks.success).toHaveBeenCalledWith("suppliers.secretUpdated");
     // 成功后用返回的总览替换缓存，编辑器收起
@@ -400,10 +644,10 @@ describe("SupplierPage", () => {
   it("refuses a blank key and keeps the editor open", async () => {
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     await user.type(screen.getByLabelText("suppliers.secretLabel"), "   ");
     await user.keyboard("{Enter}");
@@ -420,10 +664,10 @@ describe("SupplierPage", () => {
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     await user.type(screen.getByLabelText("suppliers.secretLabel"), "sk-new");
     await user.keyboard("{Enter}");
@@ -448,10 +692,10 @@ describe("SupplierPage", () => {
   it("cancels the secret editor on Escape without sending anything", async () => {
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     await user.type(screen.getByLabelText("suppliers.secretLabel"), "sk-new");
     await user.keyboard("{Escape}");
@@ -462,17 +706,17 @@ describe("SupplierPage", () => {
     expect(mocks.updateSecret).not.toHaveBeenCalled();
     // 收起后「换密钥」按钮回来
     expect(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     ).toBeInTheDocument();
   });
 
   it("can reveal the new key while typing and hide it again", async () => {
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     const input = screen.getByLabelText("suppliers.secretLabel");
     await user.type(input, "sk-live");
@@ -500,10 +744,10 @@ describe("SupplierPage", () => {
 
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
     await user.type(screen.getByLabelText("suppliers.secretLabel"), "sk-new");
     await user.click(screen.getByRole("button", { name: "common.save" }));
@@ -531,15 +775,13 @@ describe("SupplierPage", () => {
   it("switches a row from the address editor to the key editor", async () => {
     renderPage();
     expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
-    const user = await openSupplier("Acme Gateway");
+    const user = userEvent.setup();
 
-    await user.click(
-      screen.getAllByRole("button", { name: "suppliers.editUrl" })[0],
-    );
+    await user.click(screen.getByRole("button", { name: "suppliers.editUrl" }));
     expect(screen.getByLabelText("suppliers.baseUrlLabel")).toBeInTheDocument();
 
     await user.click(
-      screen.getAllByRole("button", { name: "suppliers.changeSecret" })[0],
+      screen.getByRole("button", { name: "suppliers.changeSecret" }),
     );
 
     // 一行只开一个编辑器：地址编辑器让位给密钥编辑器
