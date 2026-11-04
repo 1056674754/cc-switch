@@ -240,7 +240,43 @@ fn merge(
     }
 }
 
-/// 从库里派生整份目录。读之前先对账绑定（从未走过代理的 app 在库里没有绑定）。
+/// 目录里给 UI 用的一条：模型引用 = `<供应商名>/<模型 id>`，供应商重名时加序号。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CatalogViewEntry {
+    /// 模型引用，`<供应商名>/<模型 id>`。
+    pub reference: String,
+    pub upstream_id: String,
+    pub upstream_name: String,
+    pub model_id: String,
+    pub display_name: Option<String>,
+    pub one_m: bool,
+    pub window: Option<u64>,
+    pub endpoint_ids: Vec<String>,
+    pub sources: Vec<String>,
+}
+
+/// 给每个上游分配一个不重复的显示名：重名加 `（2）`、`（3）`。
+fn unique_upstream_names(
+    upstreams: &[(String, String)],
+) -> std::collections::HashMap<String, String> {
+    use std::collections::HashMap;
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    let mut names = HashMap::new();
+    for (id, name) in upstreams {
+        let seen = counts.entry(name.as_str()).or_insert(0);
+        *seen += 1;
+        let unique = if *seen == 1 {
+            name.clone()
+        } else {
+            format!("{name}（{seen}）")
+        };
+        names.insert(id.clone(), unique);
+    }
+    names
+}
+
+/// 从库里派生整份目录（带模型引用）。读之前先对账绑定（从未走过代理的 app 在库里没有绑定）。
 pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
     // 1. 先对账：绑定由路由器的读路径派生，没走过代理的 app 需要补。
     let (apps, bindings, endpoint_upstream): (
@@ -305,6 +341,50 @@ pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
     }
 
     Ok(entries.into_values().collect())
+}
+
+/// 目录 + 每条的上游显示名与模型引用。上游名来自 `upstreams.name`，重名按出现顺序加序号。
+pub fn catalog_view(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
+    let entries = derive_entries(db)?;
+    let mut upstream_names: Vec<(String, String)> = {
+        let connected = crate::database::lock_conn!(db.conn);
+        let mut stmt =
+            connected.prepare("SELECT id, COALESCE(NULLIF(name, ''), host) FROM upstreams")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>()?
+    };
+    upstream_names.sort_by(|a, b| a.0.cmp(&b.0));
+    let names = unique_upstream_names(&upstream_names);
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let upstream_name = names
+                .get(&entry.upstream_id)
+                .cloned()
+                .unwrap_or_else(|| entry.upstream_id.clone());
+            CatalogViewEntry {
+                reference: format!("{upstream_name}/{}", entry.model_id),
+                upstream_id: entry.upstream_id,
+                upstream_name,
+                model_id: entry.model_id,
+                display_name: entry.display_name,
+                one_m: entry.one_m,
+                window: entry.window,
+                endpoint_ids: entry.endpoint_ids,
+                sources: entry.sources,
+            }
+        })
+        .collect())
+}
+
+/// 按模型引用查一条；查不到返回 `None`（调用方必须报错，不回落）。
+pub fn resolve_reference<'a>(
+    entries: &'a [CatalogViewEntry],
+    reference: &str,
+) -> Option<&'a CatalogViewEntry> {
+    entries.iter().find(|entry| entry.reference == reference)
 }
 
 #[cfg(test)]
@@ -457,6 +537,39 @@ mod tests {
         assert_eq!(values[0].endpoint_ids, vec!["ep-1", "ep-2"]);
     }
 
+    #[test]
+    fn duplicate_upstream_names_get_a_suffix() {
+        let names = unique_upstream_names(&[
+            ("up-1".into(), "CTYun".into()),
+            ("up-2".into(), "Kimi".into()),
+            ("up-3".into(), "CTYun".into()),
+        ]);
+        assert_eq!(names["up-1"], "CTYun");
+        assert_eq!(names["up-2"], "Kimi");
+        assert_eq!(names["up-3"], "CTYun（2）");
+    }
+
+    #[test]
+    fn references_round_trip() {
+        let entries = vec![CatalogViewEntry {
+            reference: "CTYun/deepseek-v4.1-flash-1017".into(),
+            upstream_id: "up-1".into(),
+            upstream_name: "CTYun".into(),
+            model_id: "deepseek-v4.1-flash-1017".into(),
+            display_name: None,
+            one_m: true,
+            window: Some(200_000),
+            endpoint_ids: vec!["ep-1".into()],
+            sources: vec!["claude:CTYun".into()],
+        }];
+        assert_eq!(
+            resolve_reference(&entries, "CTYun/deepseek-v4.1-flash-1017")
+                .map(|entry| entry.upstream_id.as_str()),
+            Some("up-1")
+        );
+        assert!(resolve_reference(&entries, "CTYun/not-there").is_none());
+    }
+
     /// 真实库副本验证：
     /// `CCS_VERIFY_DB=/path/to/copy.db cargo test --lib gateway_catalog -- --ignored --nocapture`
     #[test]
@@ -490,6 +603,17 @@ mod tests {
                 entry.sources
             );
         }
+        let view = catalog_view(&db).expect("view");
+        let mut references = std::collections::HashSet::new();
+        for entry in &view {
+            assert!(
+                references.insert(entry.reference.clone()),
+                "duplicate reference: {}",
+                entry.reference
+            );
+        }
+        println!("references: {} unique", references.len());
+        assert_eq!(view.len(), entries.len());
         assert!(!entries.is_empty());
     }
 }
