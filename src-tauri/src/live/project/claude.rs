@@ -329,7 +329,6 @@ impl ModelConfigSlots<'_> {
 /// 接管时按每 app 模型配置写代理契约：地址、占位凭据、默认模型与四档。
 ///
 /// 配置为空时返回 `None`，调用方回落到原来的路由/Stack 写法。
-#[allow(dead_code)] // 接入 mode::controller 在 P3 下一轮，先保证映射本身可测
 pub fn proxy_projection_from_model_config(
     route: &ClaudeProjection,
     proxy_url: &str,

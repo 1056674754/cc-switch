@@ -4024,6 +4024,21 @@ command = "fs-server"
             doc["model_provider"].as_str(),
             Some(crate::live::project::codex::ROUTE_ID)
         );
+        let catalog: Value = serde_json::from_str(
+            &fs::read_to_string(crate::codex_config::get_codex_model_catalog_path())
+                .expect("read model catalog"),
+        )
+        .expect("parse model catalog");
+        let slugs: Vec<&str> = catalog["models"]
+            .as_array()
+            .expect("catalog models")
+            .iter()
+            .filter_map(|entry| entry["slug"].as_str())
+            .collect();
+        assert!(
+            slugs.contains(&"B/gpt-b"),
+            "目录里要发布模型引用: {slugs:?}"
+        );
 
         exit(&state, &AppType::Codex).await.expect("exit");
         let doc = codex_doc();

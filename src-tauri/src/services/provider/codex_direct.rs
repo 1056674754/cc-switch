@@ -722,13 +722,24 @@ pub(crate) fn plan(
             effort.as_deref(),
         ));
     }
-    let catalog = match (stack_catalog, provider, &projection) {
-        (Some(catalog), _, _) => {
+    // 每 app 模型配置点名的引用，优先于路由那家自己的目录（条目从各自的行生成）。
+    let reference = match (&model_override, provider, &projection) {
+        (Some(_), Some(provider), Some(projection)) if stack_catalog.is_none() => {
+            reference_catalog(db, provider, projection).unwrap_or_else(|error| {
+                log::warn!("生成模型引用目录失败: {error}");
+                None
+            })
+        }
+        _ => None,
+    };
+    let catalog = match (reference, stack_catalog, provider, &projection) {
+        (Some(catalog), _, _, _) => Some(catalog),
+        (None, Some(catalog), _, _) => {
             // 窗口类全局键会覆盖目录里的每一行，改由各家写进自己的行。
             exclusive.retain(|(key, _)| !STACK_SUNK_WINDOW_KEYS.contains(&key.as_str()));
             Some(catalog)
         }
-        (None, Some(provider), Some(projection)) => {
+        (None, None, Some(provider), Some(projection)) => {
             plan_codex_model_catalog(
                 &provider.settings_config,
                 &projection.catalog_input_text(),
@@ -926,6 +937,119 @@ fn catalog_entry_efforts(entry: &Value) -> impl Iterator<Item = &str> {
 
 /// 发布了 Stack 模型时的合并目录（路由那家的行在前，Stack 里的在后）；没有要发布的 Stack 模型，
 /// 或者这次发布不了时为 `None`，目录照原来的规则算。
+/// 每 app 模型配置点名的模型 → 目录里的引用条目（slug = `<供应商名>/<模型 id>`）。
+///
+/// 条目从那条供应商自己的行生成，和 Stack 一样带它的工具 profile；路由那家自己的模型
+/// （明文 slug）保留在前面，没点名模型时照旧。
+fn reference_catalog(
+    db: &Database,
+    route: &Provider,
+    projection: &CodexProjection,
+) -> Result<Option<serde_json::Value>, AppError> {
+    let Some(config) = db.get_app_model_config(AppType::Codex.as_str())? else {
+        return Ok(None);
+    };
+    let mut references = Vec::new();
+    if let Some(default) = config.default {
+        references.push(default);
+    }
+    for reference in config.allowed {
+        if !references.contains(&reference) {
+            references.push(reference);
+        }
+    }
+    if references.is_empty() {
+        return Ok(None);
+    }
+    if row_catalog_pointer(&projection.top).is_some() {
+        log::warn!(
+            "Codex 路由供应商 {} 使用自己的模型目录文件，模型配置不发布为目录引用",
+            route.id
+        );
+        return Ok(None);
+    }
+    let providers = db.get_all_providers(AppType::Codex.as_str())?;
+    let route_text = projection.catalog_input_text();
+    let mut catalog = match plan_codex_model_catalog(
+        &route.settings_config,
+        &route_text,
+        crate::proxy::providers::resolve_codex_catalog_tool_profile(route),
+    )?
+    .catalog
+    {
+        Some(catalog) => catalog,
+        // 行里没发布模型列表时也照样发引用：Codex 只按 slug 找模型。
+        None => serde_json::json!({ "models": [] }),
+    };
+    let mut entries = catalog
+        .get("models")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let known: std::collections::HashSet<String> = entries
+        .iter()
+        .filter_map(|entry| entry.get("slug").and_then(serde_json::Value::as_str))
+        .map(str::to_string)
+        .collect();
+    let mut added = 0usize;
+    let providers: Vec<&Provider> = providers.values().collect();
+    for reference in references {
+        if known.contains(&reference) {
+            continue;
+        }
+        let Some((supplier, model)) = reference.split_once('/') else {
+            log::warn!("模型引用 {reference} 不是 <供应商名>/<模型 id> 的形状，不发布");
+            continue;
+        };
+        let Some(provider) = providers.iter().find(|provider| provider.name == supplier) else {
+            log::warn!("模型引用 {reference} 的供应商 {supplier} 不存在，不发布");
+            continue;
+        };
+        let Ok(member_projection) = project(provider) else {
+            log::warn!("供应商 {supplier} 的配置不完整，模型 {reference} 不发布");
+            continue;
+        };
+        let text = member_projection.catalog_input_text();
+        let row = CodexCatalogRow {
+            settings: &provider.settings_config,
+            config_text: &text,
+            profile: crate::proxy::providers::resolve_codex_catalog_tool_profile(provider),
+        };
+        let Ok(rows) = codex_stack_third_party_rows(&row) else {
+            continue;
+        };
+        let Some(mut entry) = rows
+            .into_iter()
+            .find(|entry| entry.get("slug").and_then(serde_json::Value::as_str) == Some(model))
+        else {
+            log::warn!("供应商 {supplier} 没有发布模型 {model}，引用 {reference} 不写进目录");
+            continue;
+        };
+        let display = entry
+            .get("display_name")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or(model)
+            .to_string();
+        if let Some(object) = entry.as_object_mut() {
+            object.insert(
+                "slug".to_string(),
+                serde_json::Value::String(reference.clone()),
+            );
+            object.insert(
+                "display_name".to_string(),
+                serde_json::Value::String(format!("{supplier} / {display}")),
+            );
+        }
+        entries.push(entry);
+        added += 1;
+    }
+    if added == 0 {
+        return Ok(None);
+    }
+    catalog["models"] = serde_json::Value::Array(entries);
+    Ok(Some(catalog))
+}
+
 fn stack_catalog(
     route: &Provider,
     projection: &CodexProjection,
