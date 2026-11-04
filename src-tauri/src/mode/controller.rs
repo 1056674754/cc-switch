@@ -257,6 +257,59 @@ impl OwnedModelConfigSlots {
     }
 }
 
+/// Claude Desktop 的模型配置要发布给 Desktop 的模型：默认 + 允许列表里的引用，去重保序。
+/// 没配返回 `None`（沿用原来的发布：只有路由那家的模型 + Stack 名单）。
+fn desktop_model_config_publications(state: &AppState) -> Option<Vec<stack::DesktopStackModel>> {
+    let config = state
+        .db
+        .get_app_model_config(AppType::ClaudeDesktop.as_str())
+        .ok()
+        .flatten();
+    let config = config?;
+    let mut references: Vec<String> = Vec::new();
+    if let Some(default) = config.default.as_deref() {
+        references.push(default.to_string());
+    }
+    for reference in &config.allowed {
+        if !references.contains(reference) {
+            references.push(reference.clone());
+        }
+    }
+    if references.is_empty() {
+        return None;
+    }
+    let catalog = crate::services::gateway_catalog::catalog_view_cached(&state.db).ok()?;
+    let published = references
+        .into_iter()
+        .map(|reference| {
+            match crate::services::gateway_catalog::resolve_reference(&catalog, &reference) {
+                Some(entry) => {
+                    let display = entry
+                        .display_name
+                        .clone()
+                        .unwrap_or_else(|| entry.model_id.clone());
+                    stack::DesktopStackModel {
+                        id: reference,
+                        upstream: entry.model_id.clone(),
+                        // Desktop 的选择器里显示「供应商 / 模型」，和聚合模式一致。
+                        label: format!("{} / {display}", entry.upstream_name),
+                        provider_name: entry.upstream_name.clone(),
+                        supports_1m: entry.one_m,
+                    }
+                }
+                None => stack::DesktopStackModel {
+                    label: reference.clone(),
+                    id: reference.clone(),
+                    upstream: reference,
+                    provider_name: String::new(),
+                    supports_1m: false,
+                },
+            }
+        })
+        .collect();
+    Some(published)
+}
+
 /// 读 Claude 的模型配置并映射成客户端槽位；没配或全空返回 `None`（沿用原写法）。
 fn claude_model_config_slots(state: &AppState) -> Option<OwnedModelConfigSlots> {
     let config = state
@@ -577,13 +630,18 @@ async fn write_proxy(
         }
         AppType::ClaudeDesktop => {
             let members = published_members(state, app, &stack, route)?;
-            let profile = claude_desktop_config::route_profile(
-                &state.db,
-                route,
-                &proxy_url,
-                &stack::desktop_published(&members),
-            )
-            .map_err(err)?;
+            let from_stack = stack::desktop_published(&members);
+            // 没有 Stack 名单、但有每 app 模型配置时，发布配置里点名的模型引用。
+            // 有发布 Stack 模型时按名单来；否则看每 app 模型配置（没有就沿用原写法）。
+            let configured = if from_stack.is_empty() {
+                desktop_model_config_publications(state)
+            } else {
+                None
+            };
+            let published = configured.as_deref().unwrap_or(&from_stack);
+            let profile =
+                claude_desktop_config::route_profile(&state.db, route, &proxy_url, published)
+                    .map_err(err)?;
             let contract = contract::claude_desktop(&profile);
             let unchanged = !force && live_now.has_contract(&contract.key);
             target.contract = Some(contract);
@@ -6509,6 +6567,56 @@ model_provider = "c"
             Some("map"),
             "the route is kept for next time"
         );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_desktop_publishes_model_references_from_app_model_config() {
+        let home = Home::new();
+        let _dirs = DesktopDirs::under(&home);
+        seed_settings(USER_SETTINGS);
+        let desktop = AppType::ClaudeDesktop;
+        let card = desktop_card("map", true);
+        let state = state_with(desktop.clone(), &[card.clone()], &card.id).await;
+        state
+            .db
+            .set_app_model_config(
+                desktop.as_str(),
+                &crate::services::gateway_config::AppModelConfig {
+                    default: Some("MAP/kimi-k3".to_string()),
+                    slots: Default::default(),
+                    allowed: vec!["MAP/kimi-k3".to_string(), "Gone/removed-model".to_string()],
+                    routing: None,
+                },
+            )
+            .expect("save desktop model config");
+
+        enter_with_route(&state, &desktop, false, Some(&card.id))
+            .await
+            .expect("enter desktop routing");
+        let models = desktop_profile()["inferenceModels"]
+            .as_array()
+            .expect("inference models")
+            .iter()
+            .map(|item| match item {
+                Value::String(name) => name.clone(),
+                other => other
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            models.contains(&"MAP/kimi-k3".to_string()),
+            "配置里的引用要发布给 Desktop: {models:?}"
+        );
+        assert!(
+            models.contains(&"Gone/removed-model".to_string()),
+            "目录外的引用照样发布，请求时网关报错: {models:?}"
+        );
+
+        exit(&state, &desktop).await.expect("exit desktop");
     }
 
     #[tokio::test]
