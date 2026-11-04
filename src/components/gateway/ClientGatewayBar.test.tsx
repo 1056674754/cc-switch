@@ -17,6 +17,9 @@ vi.mock("@/lib/api/gateway", () => ({
     getOpencodeGatewayStatus: () => status(),
     adoptOpencodeToGateway: () => adopt(),
     releaseOpencodeFromGateway: () => release(),
+    getHermesGatewayStatus: async () => false,
+    adoptHermesToGateway: vi.fn(),
+    releaseHermesFromGateway: vi.fn(),
   },
 }));
 
@@ -38,7 +41,7 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
-import { OpencodeGatewayBar } from "./OpencodeGatewayBar";
+import { ClientGatewayBar } from "./ClientGatewayBar";
 
 function renderBar() {
   const client = new QueryClient({
@@ -46,7 +49,7 @@ function renderBar() {
   });
   return render(
     <QueryClientProvider client={client}>
-      <OpencodeGatewayBar />
+      <ClientGatewayBar app="opencode" />
     </QueryClientProvider>,
   );
 }
@@ -56,7 +59,7 @@ beforeEach(() => {
   vi.clearAllMocks();
 });
 
-describe("OpencodeGatewayBar", () => {
+describe("ClientGatewayBar", () => {
   it("adopts the gateway and flips the status", async () => {
     const user = userEvent.setup();
     renderBar();

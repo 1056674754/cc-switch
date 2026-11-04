@@ -64,6 +64,21 @@ export const gatewayApi = {
     return invoke("get_opencode_gateway_status");
   },
 
+  /** P4-A：Hermes 现在是否已经指向网关。 */
+  async getHermesGatewayStatus(): Promise<boolean> {
+    return invoke("get_hermes_gateway_status");
+  },
+
+  /** P4-A：把 Hermes 指到网关（写一条 cc-switch custom provider + 默认模型）。 */
+  async adoptHermesToGateway(): Promise<void> {
+    return invoke("adopt_hermes_to_gateway");
+  },
+
+  /** P4-A：释放 Hermes（删掉 cc-switch custom provider）。 */
+  async releaseHermesFromGateway(): Promise<void> {
+    return invoke("release_hermes_from_gateway");
+  },
+
   /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
   async adoptOpencodeToGateway(): Promise<void> {
     return invoke("adopt_opencode_to_gateway");
