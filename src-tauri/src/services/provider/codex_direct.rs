@@ -116,6 +116,9 @@ pub(crate) enum Target<'a> {
         route: &'a Provider,
         base_url: &'a str,
         stack: &'a [Member],
+        /// 每 app 模型配置的默认模型（模型引用）：写进 `config.toml` 的 `model`。
+        /// `None` 时沿用行里自带的值。
+        model: Option<&'a str>,
     },
 }
 
@@ -587,13 +590,20 @@ pub(crate) fn plan(
     let provider = target_provider(target);
     let projection = provider.map(project).transpose()?;
 
-    let (top, mut nested, mut exclusive) = match (&projection, provider) {
+    let (mut top, mut nested, mut exclusive) = match (&projection, provider) {
         (Some(projection), Some(provider)) => (
             projection.top.clone(),
             projection.nested.clone(),
             exclusive_of(provider, projection),
         ),
         _ => (Vec::new(), Vec::new(), Vec::new()),
+    };
+
+    let model_override = match target {
+        Target::Proxy {
+            model: Some(model), ..
+        } => Some(*model),
+        _ => None,
     };
 
     let official = provider.is_some_and(is_official);
@@ -736,6 +746,13 @@ pub(crate) fn plan(
         .provider()
         .filter(|provider| is_official(provider) && managed_account(provider).is_none())
         .map(row_auth);
+
+    if let Some(model) = model_override {
+        match top.iter_mut().find(|(key, _)| key == "model") {
+            Some(entry) => entry.1 = TomlValue::from(model),
+            None => top.push(("model".to_string(), TomlValue::from(model))),
+        }
+    }
 
     let config = CodexConfigPatch {
         top,

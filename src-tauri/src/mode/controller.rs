@@ -586,10 +586,18 @@ async fn write_proxy(
         AppType::Codex => {
             let owner = live_now.codex_owner();
             let members = published_members(state, app, &stack, route)?;
+            // 每 app 模型配置的默认模型（引用）写进 config.toml 的 `model`。
+            let codex_model = state
+                .db
+                .get_app_model_config(AppType::Codex.as_str())
+                .ok()
+                .flatten()
+                .and_then(|config| config.default);
             let spec = codex_direct::Target::Proxy {
                 route,
                 base_url: &codex_base_url,
                 stack: &members,
+                model: codex_model.as_deref(),
             };
             let mut prepared =
                 codex_direct::prepare(&state.codex_oauth_manager, &owner, &spec).map_err(err)?;
@@ -1765,6 +1773,7 @@ fn codex_official_login_now(
         route: &route,
         base_url: &base_url,
         stack: &members,
+        model: None,
     };
     let prepared = codex_direct::prepare(&state.codex_oauth_manager, &owner, &spec).map_err(err)?;
     codex_direct::predicted_official_login(&state.db, &owner, &spec, &prepared)
@@ -3982,6 +3991,43 @@ command = "fs-server"
         .into_iter()
         .filter(|part| text.contains(part))
         .collect()
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn codex_enter_writes_the_model_reference_from_app_model_config() {
+        let _home = Home::new();
+        set_preservation(true);
+        seed_codex(CODEX_USER_LIVE, None);
+        let state = state_with(AppType::Codex, &codex_a_b(), "a").await;
+        state
+            .db
+            .set_app_model_config(
+                "codex",
+                &crate::services::gateway_config::AppModelConfig {
+                    default: Some("B/gpt-b".to_string()),
+                    slots: Default::default(),
+                    allowed: Vec::new(),
+                    routing: None,
+                },
+            )
+            .expect("save codex model config");
+
+        enter(&state, &AppType::Codex, false).await.expect("enter");
+        let doc = codex_doc();
+        assert_eq!(
+            doc["model"].as_str(),
+            Some("B/gpt-b"),
+            "config.toml 的 model 要写成模型引用"
+        );
+        assert_eq!(
+            doc["model_provider"].as_str(),
+            Some(crate::live::project::codex::ROUTE_ID)
+        );
+
+        exit(&state, &AppType::Codex).await.expect("exit");
+        let doc = codex_doc();
+        assert_eq!(doc["model"].as_str(), Some("gpt-a"), "退出恢复用户原配置");
     }
 
     #[tokio::test]
