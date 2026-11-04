@@ -99,9 +99,16 @@ pub fn apply(base_url: &str, plan: &OpencodeGatewayPlan) -> Result<(), AppError>
     opencode_config::set_default_model(&format!("{PROVIDER_ID}/{}", plan.default_model))
 }
 
-/// 释放：删掉 `cc-switch` provider（顶层 `model` 保持原样，由用户重新选择）。
+/// 释放：删掉 `cc-switch` provider；顶层 `model` 如果还指向网关就一起删掉，
+/// 由 OpenCode 自己回退（不动用户原来的选择）。
 pub fn release() -> Result<(), AppError> {
-    opencode_config::remove_provider(PROVIDER_ID)
+    if opencode_config::get_default_model()?
+        .as_deref()
+        .is_some_and(|model| model.starts_with(&format!("{PROVIDER_ID}/")))
+    {
+        opencode_config::clear_default_model()?;
+    }
+    opencode_config::remove_provider(PROVIDER_ID).map(|_| ())
 }
 
 #[cfg(test)]
@@ -251,6 +258,7 @@ mod tests {
         release().unwrap();
         let value = crate::opencode_config::read_opencode_config().unwrap();
         assert!(value["provider"]["cc-switch"].is_null());
+        assert!(value.get("model").is_none(), "释放后不该再指向网关");
         assert_eq!(value["provider"]["user"]["npm"], json!("@ai-sdk/openai"));
     }
 

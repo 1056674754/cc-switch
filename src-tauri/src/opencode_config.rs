@@ -593,6 +593,16 @@ pub fn get_default_model() -> Result<Option<String>, AppError> {
         .map(str::to_string))
 }
 
+/// 删掉顶层 `model`（释放网关时用：不再指向 cc-switch，交给 OpenCode 自己回退）。
+pub fn clear_default_model() -> Result<(), AppError> {
+    edit_config(get_opencode_config_path, |config| {
+        if let Some(object) = config.as_object_mut() {
+            object.remove("model");
+        }
+    })
+    .map(|_| ())
+}
+
 /// Only rewrites the top-level `model`; `small_model` and everything else stay as is.
 pub fn set_default_model(model: &str) -> Result<(), AppError> {
     let model = model.trim();
