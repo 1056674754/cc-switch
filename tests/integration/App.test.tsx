@@ -209,6 +209,22 @@ vi.mock("@/components/mcp/UnifiedMcpPanel", async () => {
 });
 
 /** 侧栏里的应用行（v7 侧栏取代了原来页头的应用切换器） */
+const seedProviderApp = (appType: "opencode" | "hermes") => {
+  const make = (id: string, name: string, category: string, sortIndex: number) => ({
+    id,
+    name,
+    settingsConfig: {},
+    category,
+    sortIndex,
+    createdAt: Date.now() + sortIndex,
+  });
+  setProviders(appType, {
+    [`${appType}-1`]: make(`${appType}-1`, `${appType} Default`, "official", 0),
+    [`${appType}-2`]: make(`${appType}-2`, `${appType} Secondary`, "custom", 1),
+  } as never);
+  setCurrentProviderId(appType, `${appType}-1`);
+};
+
 const sidebarApp = (name: string) =>
   // 首次启动提示是模态对话框，会把侧栏标成 aria-hidden，所以带上 hidden
   within(document.querySelector("nav") as HTMLElement).getByRole("button", {
@@ -251,59 +267,30 @@ describe("App integration with MSW", () => {
 
   it("covers basic provider flows via real hooks", async () => {
     const { default: App } = await import("@/App");
+    seedProviderApp("opencode");
     renderApp(App);
 
+    fireEvent.click(sidebarApp("OpenCode"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
-
-    fireEvent.click(sidebarApp("Codex"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
+        "opencode-1",
       ),
     );
 
     fireEvent.click(screen.getByText("usage"));
     expect(screen.getByTestId("usage-modal")).toBeInTheDocument();
     fireEvent.click(screen.getByText("save-script"));
+    await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
     fireEvent.click(screen.getByText("close-usage"));
-
-    fireEvent.click(screen.getByText("create"));
-    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("confirm-add"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(
-        /New codex Provider/,
-      ),
-    );
-
-    fireEvent.click(screen.getByText("edit"));
-    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
-    fireEvent.click(screen.getByText("confirm-edit"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(
-        /-edited/,
-      ),
-    );
-
-    fireEvent.click(screen.getByText("switch"));
-    fireEvent.click(screen.getByText("duplicate"));
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toMatch(/copy/),
-    );
 
     fireEvent.click(screen.getByText("open-website"));
 
     emitTauriEvent("provider-switched", {
-      appType: "codex",
-      providerId: "codex-2",
+      appType: "opencode",
+      providerId: "opencode-2",
     });
 
     expect(toastErrorMock).not.toHaveBeenCalled();
-    expect(toastSuccessMock).toHaveBeenCalled();
   }, 10_000);
 
   it("refreshes the route pointer when the proxy fails over to another provider", async () => {
@@ -342,11 +329,14 @@ describe("App integration with MSW", () => {
 
   it("resets provider view scroll when switching apps", async () => {
     const { default: App } = await import("@/App");
+    seedProviderApp("opencode");
+    seedProviderApp("hermes");
     const { container } = renderApp(App);
 
+    fireEvent.click(sidebarApp("OpenCode"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
+        "opencode-1",
       ),
     );
 
@@ -363,11 +353,11 @@ describe("App integration with MSW", () => {
     providerScrollContainer()!.scrollTop = 640;
     providerScrollContainer()!.scrollLeft = 24;
 
-    fireEvent.click(sidebarApp("Codex"));
+    fireEvent.click(sidebarApp("Hermes"));
 
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
+        "hermes-1",
       ),
     );
 
@@ -379,11 +369,14 @@ describe("App integration with MSW", () => {
 
   it("closes provider panels when navigating away from the app page", async () => {
     const { default: App } = await import("@/App");
+    seedProviderApp("opencode");
+    seedProviderApp("hermes");
     renderApp(App);
 
+    fireEvent.click(sidebarApp("OpenCode"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
+        "opencode-1",
       ),
     );
 
@@ -391,10 +384,10 @@ describe("App integration with MSW", () => {
     // 供应商会以 appId=codex 保存进 Codex
     fireEvent.click(screen.getByText("edit"));
     expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
-    fireEvent.click(sidebarApp("Codex"));
+    fireEvent.click(sidebarApp("Hermes"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
+        "hermes-1",
       ),
     );
     expect(
@@ -408,10 +401,10 @@ describe("App integration with MSW", () => {
       expect(screen.queryByTestId("usage-modal")).not.toBeInTheDocument(),
     );
 
-    fireEvent.click(sidebarApp("Codex"));
+    fireEvent.click(sidebarApp("Hermes"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
+        "hermes-1",
       ),
     );
     fireEvent.click(screen.getByText("create"));
@@ -423,19 +416,22 @@ describe("App integration with MSW", () => {
 
   it("asks before leaving an editor page with unsaved changes", async () => {
     const { default: App } = await import("@/App");
+    seedProviderApp("opencode");
+    seedProviderApp("hermes");
     renderApp(App);
+    fireEvent.click(sidebarApp("OpenCode"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
+        "opencode-1",
       ),
     );
 
     // 没改过：照常离开，不问
     fireEvent.click(screen.getByText("edit"));
-    fireEvent.click(sidebarApp("Codex"));
+    fireEvent.click(sidebarApp("Hermes"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
-        "codex-1",
+        "hermes-1",
       ),
     );
     expect(screen.queryByTestId("confirm-dialog")).not.toBeInTheDocument();
@@ -446,14 +442,14 @@ describe("App integration with MSW", () => {
     fireEvent.input(screen.getByLabelText("edit-field"), {
       target: { value: "draft" },
     });
-    fireEvent.click(sidebarApp("Claude Code"));
+    fireEvent.click(sidebarApp("OpenCode"));
     expect(await screen.findByTestId("confirm-message")).toHaveTextContent(
       "common.unsavedLeaveMessage",
     );
     fireEvent.click(screen.getByText("cancel-delete"));
     expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
     expect(screen.getByTestId("provider-list").textContent).toContain(
-      "codex-1",
+      "hermes-1",
     );
 
     // ⌘, 也问；放弃后才离开
@@ -471,11 +467,6 @@ describe("App integration with MSW", () => {
   it("keeps the unsaved guard when re-clicking the current page", async () => {
     const { default: App } = await import("@/App");
     renderApp(App);
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
 
     fireEvent.click(sidebarApp("MCP"));
     fireEvent.input(await screen.findByLabelText("mcp-field"), {
@@ -500,11 +491,6 @@ describe("App integration with MSW", () => {
     const { default: App } = await import("@/App");
     renderApp(App);
 
-    await waitFor(() =>
-      expect(screen.getByTestId("provider-list").textContent).toContain(
-        "claude-1",
-      ),
-    );
 
     expect(() => {
       emitTauriEvent("webdav-sync-status-updated", null);

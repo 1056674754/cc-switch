@@ -1,5 +1,4 @@
 import {
-  useCallback,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -100,9 +99,8 @@ import {
 } from "@/components/apps/useToolManagement";
 import { UsagePage } from "@/components/usage/UsagePage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
-import { SwitchModePanel } from "@/components/providers/mode/SwitchModePanel";
-import { proxyApi } from "@/lib/api/proxy";
-import type { AppMode, StartupAttachFailure } from "@/types/proxy";
+import { AppConfigPage } from "@/components/gateway/AppConfigPage";
+import type { AppMode } from "@/types/proxy";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
 import PromptPanel from "@/components/prompts/PromptPanel";
@@ -183,28 +181,10 @@ function App() {
   const [isAddOpen, setIsAddOpen] = useState(false);
   // 供应商搜索面板：页头按钮和 ⌘F 都能打开；换应用或离开供应商页就收起
   const [providerSearchOpen, setProviderSearchOpen] = useState(false);
-  const [connectionStatusSlot, setConnectionStatusSlot] =
-    useState<HTMLDivElement | null>(null);
   useEffect(() => {
     setProviderSearchOpen(false);
   }, [activeApp, currentView]);
-  // 供应商页顶部正在看的那格（直连 / 路由 / 聚合），由 SwitchModePanel 报上来。打开新增、
-  // 编辑时记下当时那格，表单按它选布局：在聚合那格打开就是聚合的简化表单。
-  const [providerModeView, setProviderModeView] = useState<{
-    app: AppId;
-    view: AppMode;
-  } | null>(null);
   const [formModeView, setFormModeView] = useState<AppMode>();
-  const handleProviderModeViewChange = useCallback(
-    (app: AppId, view: AppMode) => setProviderModeView({ app, view }),
-    [],
-  );
-  // 托盘里点了直连下需要路由的那家：打开应用页后弹「需要路由」对话框
-  const [trayNeedsRoute, setTrayNeedsRoute] = useState<{
-    app: AppId;
-    providerId: string;
-    nonce: number;
-  } | null>(null);
   const [mcpManagementBusy, setMcpManagementBusy] = useState(false);
   const [skillsNavigationBusy, setSkillsNavigationBusy] = useState(false);
   const [promptNavigationBusy, setPromptNavigationBusy] = useState(false);
@@ -261,19 +241,6 @@ function App() {
     void checkToolUpdatesInBackground();
   }, [checkToolUpdatesOnStartup]);
 
-  // 启动时没能接上路由 / 聚合、已退回直连的应用：在对应的应用页提示一次并给「重试」
-  const [startupFailures, setStartupFailures] = useState<
-    StartupAttachFailure[]
-  >([]);
-  useEffect(() => {
-    proxyApi
-      .takeStartupAttachFailures()
-      .then((failures) => {
-        if (failures?.length) setStartupFailures(failures);
-      })
-      .catch(() => undefined);
-  }, []);
-
   // 应用专属页（工作区、记忆…）只属于它的应用；换了应用就回到供应商页
   useEffect(() => {
     if (isAppPage(currentView) && !appPageBelongsTo(currentView, activeApp)) {
@@ -316,9 +283,8 @@ function App() {
 
   const { isRunning: isProxyRunning, takeoverStatus } = useProxyStatus();
   const modeAppId = isModeAppId(activeApp) ? activeApp : null;
-  // 换了应用、新面板还没报上来时为 undefined：表单按应用实际生效的模式
-  const currentModeView =
-    providerModeView?.app === activeApp ? providerModeView.view : undefined;
+  // 模式（直连 / 路由 / 聚合）已取消：新增供应商表单不再按它选布局。
+  const currentModeView: AppMode | undefined = undefined;
   const openAddProvider = (modeView: AppMode | undefined) => {
     setFormModeView(modeView);
     setIsAddOpen(true);
@@ -903,15 +869,7 @@ function App() {
       }
       if (!navigation.app) return;
       selectApp(navigation.app);
-      // 托盘先换应用：新应用那格还没报上来，按它实际生效的模式
       if (navigation.intent === "add") openAddProvider(undefined);
-      if (navigation.intent === "needsRoute" && navigation.providerId) {
-        setTrayNeedsRoute({
-          app: navigation.app,
-          providerId: navigation.providerId,
-          nonce: Date.now(),
-        });
-      }
     };
     if (managementBusyRef.current || !confirmLeave(navigate)) navigate();
   });
@@ -1374,14 +1332,6 @@ function App() {
       icon={<AppGlyph app={activeApp} size={20} badgeClassName="bg-app" />}
       title={APP_DISPLAY_NAME[activeApp]}
       truncateTitle={currentView === "providers" && Boolean(modeAppId)}
-      titleExtra={
-        currentView === "providers" && modeAppId ? (
-          <div
-            ref={setConnectionStatusSlot}
-            className="ms-2 flex min-w-0 max-w-[280px] items-center"
-          />
-        ) : undefined
-      }
       subtitle={
         activeApp === "openclaw" ||
         activeApp === "hermes" ||
@@ -1503,33 +1453,14 @@ function App() {
   };
 
   const renderProviderList = () => {
+    // 模式（直连 / 路由 / 聚合）已取消：应用页就是一张「编辑配置」表单，
+    // 默认模型 + 槽位 + 允许列表；供应商在「供应商」页统一管理。
     if (modeAppId) {
-      const startupFailure = startupFailures.find(
-        (failure) => failure.appType === modeAppId,
-      );
       return (
-        <SwitchModePanel
+        <AppConfigPage
           key={modeAppId}
-          app={modeAppId}
-          statusSlot={connectionStatusSlot}
-          providers={providers}
-          currentProviderId={currentProviderId}
-          isLoading={isLoading}
-          scrollRef={providerScrollContainerRef}
-          onSwitch={switchProvider}
-          onOpenRoutingSettings={() => openSettings("routing")}
-          needsRouteRequest={
-            trayNeedsRoute?.app === modeAppId ? trayNeedsRoute : undefined
-          }
-          onNeedsRouteHandled={() => setTrayNeedsRoute(null)}
-          onViewChange={handleProviderModeViewChange}
-          startupFailure={startupFailure}
-          onDismissStartupFailure={() =>
-            setStartupFailures((list) =>
-              list.filter((failure) => failure.appType !== modeAppId),
-            )
-          }
-          {...listCallbacks}
+          appType={modeAppId}
+          appLabel={APP_DISPLAY_NAME[modeAppId]}
         />
       );
     }
