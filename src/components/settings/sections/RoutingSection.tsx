@@ -28,7 +28,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPanel";
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { APP_DISPLAY_NAME, AppGlyph } from "@/components/shell/AppGlyph";
-import { MODE_TONE } from "@/components/providers/mode/ModeTabs";
 import {
   SettingsBlock,
   SettingsCard,
@@ -37,6 +36,13 @@ import {
 } from "@/components/settings/SettingsLayout";
 import type { AppMode } from "@/types/proxy";
 import { cn } from "@/lib/utils";
+
+/** 直连 / 路由 / 聚合三档的模式色（只留圆点）：模式 UI 删除后不再有 ModeTabs。 */
+const MODE_DOT: Record<AppMode, string> = {
+  direct: "bg-direct",
+  route: "bg-route",
+  stack: "bg-stack",
+};
 
 interface RoutingSectionProps {
   /** 「前往」打开这个应用的供应商页 */
@@ -400,7 +406,7 @@ export function RoutingSection({ onOpenApp }: RoutingSectionProps) {
                 key={app}
                 app={app}
                 modeLabel={t(`mode.names.${mode}`)}
-                dotClass={MODE_TONE[mode].dot}
+                dotClass={MODE_DOT[mode]}
                 detail={
                   mode === "stack"
                     ? t("routingSettings.stackDetail", { name: routeName })
