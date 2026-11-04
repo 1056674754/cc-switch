@@ -10,6 +10,7 @@ import {
   KeyRound,
   Loader2,
   Pencil,
+  Plus,
   RefreshCw,
 } from "lucide-react";
 import {
@@ -34,6 +35,7 @@ import {
 import { HelpTip } from "@/components/ui/help-tip";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
+import { CreateSupplierDialog } from "./CreateSupplierDialog";
 import { protocolLabel } from "./protocolLabel";
 
 /**
@@ -91,6 +93,8 @@ export function SupplierPage() {
   const [adoptingEndpointId, setAdoptingEndpointId] = useState<string | null>(
     null,
   );
+  // 「新增供应商」对话框：网关侧一次配好地址 + 密钥，勾选要直接接入的 agent
+  const [createOpen, setCreateOpen] = useState(false);
 
   const suppliers = data ?? [];
 
@@ -683,21 +687,33 @@ export function SupplierPage() {
           </HelpTip>
         }
         actions={
-          <Button
-            type="button"
-            variant="quiet"
-            size="regular"
-            disabled={isFetching}
-            aria-busy={isFetching}
-            onClick={() => void refetch()}
-          >
-            <RefreshCw
-              aria-hidden="true"
-              className={cn("h-4 w-4", isFetching && "animate-spin")}
-              strokeWidth={2}
-            />
-            {t("common.refresh")}
-          </Button>
+          <>
+            <Button
+              type="button"
+              variant="quiet"
+              size="regular"
+              disabled={isFetching}
+              aria-busy={isFetching}
+              onClick={() => void refetch()}
+            >
+              <RefreshCw
+                aria-hidden="true"
+                className={cn("h-4 w-4", isFetching && "animate-spin")}
+                strokeWidth={2}
+              />
+              {t("common.refresh")}
+            </Button>
+            {/* 主按钮放最后（页头的约定）：一次建好供应商并接进勾选的 agent */}
+            <Button
+              type="button"
+              variant="solid"
+              size="regular"
+              onClick={() => setCreateOpen(true)}
+            >
+              <Plus aria-hidden="true" className="h-4 w-4" strokeWidth={2} />
+              {t("suppliers.createAction")}
+            </Button>
+          </>
         }
       />
 
@@ -712,6 +728,12 @@ export function SupplierPage() {
           {renderBody()}
         </div>
       </div>
+
+      {/* 新建成功后对话框自己把返回的总览写进缓存，这里只负责开关 */}
+      <CreateSupplierDialog
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+      />
     </>
   );
 }

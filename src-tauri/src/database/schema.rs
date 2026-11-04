@@ -2443,6 +2443,11 @@ impl Database {
     }
 
     /// 稳定的短哈希，用于生成确定性 id（同一输入永远得到同一 id，迁移可安全重跑）。
+    /// 稳定短哈希（同一输入永远得到同一 id），供网关侧新建供应商生成确定性 id。
+    pub(crate) fn p1_stable_hash(input: &str) -> String {
+        Self::p1_fnv1a_hex(input)
+    }
+
     fn p1_fnv1a_hex(input: &str) -> String {
         let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
         for byte in input.as_bytes() {

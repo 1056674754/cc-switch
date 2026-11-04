@@ -58,6 +58,19 @@ export interface AdoptedSupplierProvider {
 }
 
 export const suppliersApi = {
+  // 在网关侧一次配齐：建一家供应商，并直接接进选中的 app。
+  // apps 目前只支持 claude / claude-desktop；名称 / 密钥为空、地址不是完整的 http(s)、
+  // 一个 app 都没选时后端 reject 一段中文原因（调用方原样 toast）。
+  // 同一家（同名 + 同地址 + 同 app）重复提交是幂等的，不会堆出重复的行。
+  async create(
+    name: string,
+    baseUrl: string,
+    apiKey: string,
+    apps: string[],
+  ): Promise<Supplier[]> {
+    return invoke("create_supplier", { name, baseUrl, apiKey, apps });
+  },
+
   // 供应商总览：网关级视角的只读聚合
   async overview(): Promise<Supplier[]> {
     return invoke("get_suppliers_overview");

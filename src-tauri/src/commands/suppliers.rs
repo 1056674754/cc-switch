@@ -407,6 +407,100 @@ pub async fn update_supplier_secret(
 /// 改某个接入的模型映射（`app + provider` 粒度）。
 ///
 /// 同一个网关，不同 app 可以映射成不同模型——这正是「映射归接入」的含义。
+/// 在网关侧新建一家供应商，并直接接进选中的 app。
+///
+/// 这是"一次配齐"的入口：以前只能先在某个 app 里建一条 provider，再「采用」到别的
+/// app；现在反过来——先在网关填名字/地址/密钥，勾选要吃这条路由的 agent。
+/// 每个 app 落一条**确定性 id**（同一名字+地址+app 永远同一条），重复提交不会出重复行。
+#[tauri::command]
+pub async fn create_supplier(
+    state: tauri::State<'_, AppState>,
+    name: String,
+    base_url: String,
+    api_key: String,
+    apps: Vec<String>,
+) -> Result<Vec<Supplier>, String> {
+    create_into(&state.db, &name, &base_url, &api_key, &apps)
+}
+
+const CREATABLE_APPS: [&str; 2] = ["claude", "claude-desktop"];
+
+fn create_into(
+    db: &crate::database::Database,
+    name: &str,
+    base_url: &str,
+    api_key: &str,
+    apps: &[String],
+) -> Result<Vec<Supplier>, String> {
+    let name = name.trim();
+    let api_key = api_key.trim();
+    if name.is_empty() {
+        return Err("供应商名称不能为空".to_string());
+    }
+    if api_key.is_empty() {
+        return Err("密钥不能为空".to_string());
+    }
+    let (_, base_url) = crate::database::Database::p1_normalize_url(base_url)
+        .ok_or_else(|| "base_url 格式无效（需要完整的 http(s) 地址）".to_string())?;
+
+    // 先去重再校验：界面可能从多个入口勾同一个 app
+    let mut targets: Vec<String> = Vec::new();
+    for app in apps {
+        let app = app.trim().to_string();
+        if app.is_empty() || targets.contains(&app) {
+            continue;
+        }
+        targets.push(app);
+    }
+    if targets.is_empty() {
+        return Err("至少要接入一个应用".to_string());
+    }
+    if let Some(bad) = targets
+        .iter()
+        .find(|app| !CREATABLE_APPS.contains(&app.as_str()))
+    {
+        return Err(format!(
+            "{bad} 暂不支持从网关新建：它的配置需要按供应商维护模型列表/认证，请在应用页手动添加。"
+        ));
+    }
+
+    // 全部校验通过后才落库，避免"建了一半"这种半成品状态
+    for app in &targets {
+        let digest =
+            crate::database::Database::p1_stable_hash(&format!("{name}|{base_url}|{app}"));
+        let provider = crate::provider::Provider::with_id(
+            format!("sup-{digest}"),
+            name.to_string(),
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": base_url,
+                    "ANTHROPIC_AUTH_TOKEN": api_key,
+                }
+            }),
+            None,
+        );
+        db.save_provider(app, &provider)
+            .map_err(|error| error.to_string())?;
+    }
+
+    let mut conn = lock_conn!(db.conn);
+    let apps_in_db: Vec<String> = {
+        let mut stmt = conn
+            .prepare("SELECT DISTINCT app_type FROM providers")
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+    };
+    for app in apps_in_db {
+        let _ = crate::database::Database::reconcile_provider_bindings(&mut conn, &app);
+    }
+    drop(conn);
+    collect(db).map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 pub async fn update_binding_model_map(
     state: tauri::State<'_, AppState>,
@@ -572,6 +666,187 @@ mod tests {
         assert_ne!(endpoint.protocol, "anthropic");
         let error = adopt_into(&db, "claude", &endpoint.id).expect_err("应拒绝");
         assert!(error.contains("协议"), "错误应说明协议不匹配: {error}");
+    }
+
+    /// 手动跑（不在 CI 里）：拿真实数据库的副本验证 create_supplier 的整条链路。
+    /// `CCS_VERIFY_DB=/path/to/copy.db cargo test --lib manual_create_against_real_db_copy -- --ignored --nocapture`
+    #[test]
+    #[ignore = "手动：用真实库副本验证，需 CCS_VERIFY_DB"]
+    fn manual_create_against_real_db_copy() -> Result<(), AppError> {
+        let Ok(path) = std::env::var("CCS_VERIFY_DB") else {
+            return Ok(());
+        };
+        let db = Database::open_for_test(std::path::Path::new(&path))?;
+
+        let before = collect(&db).expect("读总览");
+        println!("建之前：{} 家供应商", before.len());
+
+        let apps = vec!["claude".to_string(), "claude-desktop".to_string()];
+        let suppliers = create_into(
+            &db,
+            "Verify Gateway",
+            "https://verify.example.com/v1/",
+            "sk-verify-real",
+            &apps,
+        )
+        .map_err(AppError::Database)?;
+        println!("建之后：{} 家供应商", suppliers.len());
+
+        let supplier = suppliers
+            .iter()
+            .find(|supplier| supplier.name == "Verify Gateway")
+            .expect("新供应商应在总览里");
+        println!(
+            "命中：name={} host={} apps={} endpoints={}",
+            supplier.name,
+            supplier.host,
+            supplier.app_count,
+            supplier.endpoints.len()
+        );
+        for endpoint in &supplier.endpoints {
+            println!(
+                "  端点 {} [{}] base_url={} apps={:?} creds={}",
+                endpoint.id, endpoint.protocol, endpoint.base_url, endpoint.apps, endpoint.credential_count
+            );
+        }
+        assert_eq!(supplier.host, "verify.example.com");
+        assert_eq!(supplier.app_count, 2);
+        assert_eq!(supplier.endpoints.len(), 1);
+        assert_eq!(supplier.endpoints[0].base_url, "https://verify.example.com/v1");
+
+        // 每个 app 真的落了一条能读出地址/密钥的配置
+        for app in ["claude", "claude-desktop"] {
+            let config: String = {
+                let conn = lock_conn!(db.conn);
+                conn.query_row(
+                    "SELECT settings_config FROM providers WHERE app_type = ?1 AND name = 'Verify Gateway'",
+                    rusqlite::params![app],
+                    |row| row.get(0),
+                )
+                .expect("配置应存在")
+            };
+            let config: serde_json::Value = serde_json::from_str(&config).expect("json");
+            println!("{app}: {}", config);
+            assert_eq!(
+                config["env"]["ANTHROPIC_BASE_URL"],
+                "https://verify.example.com/v1"
+            );
+            assert_eq!(config["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-verify-real");
+        }
+
+        // 重复提交同一家：不该多出一行
+        let again = create_into(
+            &db,
+            "Verify Gateway",
+            "https://verify.example.com/v1",
+            "sk-verify-real-2",
+            &apps,
+        )
+        .map_err(AppError::Database)?;
+        let dup = again.iter().filter(|s| s.name == "Verify Gateway").count();
+        println!("重复提交后同名声明的供应商数：{dup}");
+        assert_eq!(dup, 1, "重复提交不该堆行");
+        Ok(())
+    }
+
+    /// 网关侧新建：一次填名字/地址/密钥，勾几个 app 就接几个。
+    #[test]
+    fn create_supplier_wires_every_selected_app() -> Result<(), AppError> {
+        let db = Database::memory().expect("内存库");
+
+        let suppliers = create_into(
+            &db,
+            "  CTYun  ",
+            "https://ai.ctaigw.cn/v1/",
+            "sk-test-123",
+            &["claude".to_string(), "claude-desktop".to_string()],
+        )
+        .expect("新建成功");
+
+        let supplier = suppliers
+            .iter()
+            .find(|supplier| supplier.name == "CTYun")
+            .expect("新供应商应在总览里");
+        assert_eq!(supplier.host, "ai.ctaigw.cn");
+        assert_eq!(supplier.app_count, 2, "两个 app 都该接上");
+        assert_eq!(supplier.endpoints.len(), 1, "同一地址只应有一个端点");
+        let endpoint = &supplier.endpoints[0];
+        assert_eq!(endpoint.base_url, "https://ai.ctaigw.cn/v1", "尾部斜杠应被规范化");
+        assert_eq!(endpoint.protocol, "anthropic");
+        assert_eq!(endpoint.apps.len(), 2);
+
+        // 每个 app 都真的落了一条能读出地址和密钥的配置
+        for app in ["claude", "claude-desktop"] {
+            let (config,): (String,) = {
+                let conn = lock_conn!(db.conn);
+                conn.query_row(
+                    "SELECT settings_config FROM providers WHERE app_type = ?1",
+                    rusqlite::params![app],
+                    |row| Ok((row.get(0)?,)),
+                )
+                .expect("配置应存在")
+            };
+            let config: serde_json::Value = serde_json::from_str(&config).expect("json");
+            assert_eq!(config["env"]["ANTHROPIC_BASE_URL"], "https://ai.ctaigw.cn/v1");
+            assert_eq!(config["env"]["ANTHROPIC_AUTH_TOKEN"], "sk-test-123");
+        }
+        Ok(())
+    }
+
+    /// 重复提交同一家供应商不该堆出第二行（确定性 id 的意义）。
+    #[test]
+    fn create_supplier_is_idempotent() -> Result<(), AppError> {
+        let db = Database::memory().expect("内存库");
+        let apps = vec!["claude".to_string()];
+        create_into(&db, "Acme", "https://acme.dev/v1", "sk-1", &apps).expect("第一次");
+        let suppliers = create_into(&db, "Acme", "https://acme.dev/v1", "sk-2", &apps)
+            .expect("第二次");
+
+        assert_eq!(suppliers.len(), 1, "同一家只应有一条供应商");
+        assert_eq!(suppliers[0].app_count, 1);
+        // 第二次提交的密钥应覆盖第一条
+        let config: String = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row(
+                "SELECT settings_config FROM providers WHERE app_type = 'claude'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("配置")
+        };
+        assert!(config.contains("sk-2"), "后提交的密钥应生效");
+        Ok(())
+    }
+
+    /// 校验失败时一条都不该落库——不能留下"建了一半"的供应商。
+    #[test]
+    fn create_supplier_rejects_without_partial_writes() -> Result<(), AppError> {
+        let db = Database::memory().expect("内存库");
+
+        let error = create_into(
+            &db,
+            "Acme",
+            "https://acme.dev/v1",
+            "sk-1",
+            &["claude".to_string(), "codex".to_string()],
+        )
+        .expect_err("codex 不支持从网关新建");
+        assert!(error.contains("codex"), "错误应点名是哪个 app: {error}");
+
+        let count: i64 = {
+            let conn = lock_conn!(db.conn);
+            conn.query_row("SELECT COUNT(*) FROM providers", [], |row| row.get(0))
+                .expect("计数")
+        };
+        assert_eq!(count, 0, "被拒时不该写入任何 provider");
+
+        // 空名字 / 空密钥 / 非法地址 / 空 app 列表也要拦住
+        let apps = vec!["claude".to_string()];
+        assert!(create_into(&db, "  ", "https://a.dev", "k", &apps).is_err());
+        assert!(create_into(&db, "A", "https://a.dev", "  ", &apps).is_err());
+        assert!(create_into(&db, "A", "not-a-url", "k", &apps).is_err());
+        assert!(create_into(&db, "A", "https://a.dev", "k", &[]).is_err());
+        Ok(())
     }
 
     /// 没有显式 URL 的托管 provider 自成上游，不能被误并入别的网关。
