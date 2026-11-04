@@ -12,7 +12,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::mode::stack::StackTarget;
-use crate::services::gateway_catalog::{catalog_view_cached, resolve_reference, CatalogViewEntry};
+use crate::services::gateway_catalog::{resolve_reference, CatalogViewEntry};
 
 /// 把 `<供应商名>/<模型 id>` 解析成转发目标。不是引用形状时返回 `None`。
 ///
@@ -257,7 +257,8 @@ mod tests {
         eprintln!("upstreams in real db: {upstreams}");
         assert!(upstreams > 0, "真实库应该有供应商");
 
-        let catalog = catalog_view_cached(&db).expect("derive catalog from real db");
+        let catalog = crate::services::gateway_catalog::catalog_view_cached(&db)
+            .expect("derive catalog from real db");
         eprintln!("catalog entries: {}", catalog.len());
         assert!(!catalog.is_empty(), "真实库的目录不该是空的");
 

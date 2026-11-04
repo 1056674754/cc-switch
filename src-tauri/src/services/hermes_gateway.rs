@@ -7,7 +7,7 @@
 use serde_json::{json, Map, Value};
 
 use crate::error::AppError;
-use crate::hermes_config::{self, HermesModelConfig};
+use crate::hermes_config;
 use crate::services::opencode_gateway::OpencodeGatewayPlan;
 
 /// 写进 Hermes 的 provider 名：模型显示为 `cc-switch/<模型 id>`。
@@ -17,7 +17,7 @@ pub const PROVIDER_NAME: &str = "cc-switch";
 pub fn provider_value(base_url: &str, plan: &OpencodeGatewayPlan) -> Value {
     let mut models = Map::new();
     // 先插默认模型：Hermes 的 set_provider 把 models 的第一个 key 当成 provider.model。
-    let mut insert = |models: &mut Map<String, Value>, id: &str, name: &str| {
+    let insert = |models: &mut Map<String, Value>, id: &str, name: &str| {
         models.insert(id.to_string(), json!({ "name": name }));
     };
     if let Some(name) = plan.models.get(&plan.default_model) {
@@ -53,6 +53,7 @@ pub fn release() -> Result<(), AppError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hermes_config::HermesModelConfig;
 
     fn plan(models: &[(&str, &str)], default: &str) -> OpencodeGatewayPlan {
         OpencodeGatewayPlan {
