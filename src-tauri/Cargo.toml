@@ -12,7 +12,8 @@ rust-version = "1.85.0"
 
 [lib]
 name = "cc_switch_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+# 仅桌面端：去掉移动端用的 staticlib/cdylib，避免同一份代码产出 3 份（.a 约 1G）。
+crate-type = ["rlib"]
 doctest = false
 
 [features]
@@ -125,6 +126,10 @@ objc2-app-kit = { version = "0.2", features = ["NSColor"] }
 objc2-06 = { package = "objc2", version = "0.6" }
 objc2-foundation-03 = { package = "objc2-foundation", version = "0.3", default-features = false, features = ["std", "NSArray", "NSGeometry", "NSString"] }
 objc2-app-kit-03 = { package = "objc2-app-kit", version = "0.3", default-features = false, features = ["std", "NSAppearance", "NSGlassEffectView", "NSGraphics", "NSResponder", "NSScreen", "NSView", "NSVisualEffectView", "NSWindow"] }
+
+[profile.dev]
+# 只保留行号表：panic backtrace 仍有文件名和行号，但 debug 产物体积大幅缩小。
+debug = "line-tables-only"
 
 # Optimize release binary size to help reduce AppImage footprint
 [profile.release]
