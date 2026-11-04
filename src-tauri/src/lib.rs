@@ -1585,6 +1585,7 @@ pub fn run() {
             commands::clear_model_override,
             commands::adopt_opencode_to_gateway,
             commands::release_opencode_from_gateway,
+            commands::get_opencode_gateway_status,
             commands::set_app_model_config,
             commands::migrate_gateway_from_stack,
             commands::get_suppliers_overview,

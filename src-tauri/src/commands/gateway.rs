@@ -42,6 +42,13 @@ pub async fn adopt_opencode_to_gateway(state: tauri::State<'_, AppState>) -> Res
     crate::services::opencode_gateway::apply(&origin, &plan).map_err(|error| error.to_string())
 }
 
+/// P4-A：OpenCode 当前是否已经指向网关（配置里有没有 `cc-switch` provider）。
+#[tauri::command(async)]
+pub fn get_opencode_gateway_status() -> Result<bool, String> {
+    let providers = crate::opencode_config::get_providers().map_err(|error| error.to_string())?;
+    Ok(providers.contains_key(crate::services::opencode_gateway::PROVIDER_ID))
+}
+
 /// P4-A：释放 OpenCode —— 删掉 `cc-switch` provider。
 #[tauri::command(async)]
 pub fn release_opencode_from_gateway() -> Result<(), String> {

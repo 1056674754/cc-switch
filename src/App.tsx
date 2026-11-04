@@ -100,6 +100,7 @@ import {
 import { UsagePage } from "@/components/usage/UsagePage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { AppConfigPage } from "@/components/gateway/AppConfigPage";
+import { OpencodeGatewayBar } from "@/components/gateway/OpencodeGatewayBar";
 import type { AppMode } from "@/types/proxy";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
@@ -1472,6 +1473,7 @@ function App() {
         className="min-h-0 flex-1 overflow-y-auto scroll-stable overflow-x-hidden px-6 pb-12 pt-4"
       >
         <div className="space-y-4">
+          {activeApp === "opencode" ? <OpencodeGatewayBar /> : null}
           <ProviderList
             {...listCallbacks}
             providers={providers}
