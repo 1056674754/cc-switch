@@ -12,6 +12,7 @@ import type { AppId } from "@/lib/api";
 
 export type AppPage =
   | "providers"
+  | "gatewayConfig"
   | "workspace"
   | "openclawConfig"
   | "hermesMemory";
@@ -49,6 +50,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
 
 const APP_PAGES: AppPage[] = [
   "providers",
+  "gatewayConfig",
   "workspace",
   "openclawConfig",
   "hermesMemory",
@@ -99,6 +101,9 @@ export function appPageBelongsTo(page: AppPage, app: AppId): boolean {
   switch (page) {
     case "providers":
       return true;
+    case "gatewayConfig":
+      // OpenClaw / Hermes 的「编辑配置」页签
+      return app === "openclaw" || app === "hermes";
     case "workspace":
     case "openclawConfig":
       return app === "openclaw";

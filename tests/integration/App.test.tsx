@@ -1108,6 +1108,7 @@ describe("App integration with MSW", () => {
     const pageTabs = within(openclawTabs).getAllByRole("tab", { hidden: true });
     expect(pageTabs.map((tab) => tab.textContent)).toEqual([
       "appPage.providers",
+      "编辑配置",
       "appPage.workspace",
       "appPage.openclawConfig",
     ]);
@@ -1116,7 +1117,7 @@ describe("App integration with MSW", () => {
       screen.queryByRole("group", { name: "OpenClaw", hidden: true }),
     ).not.toBeInTheDocument();
 
-    fireEvent.click(pageTabs[2]);
+    fireEvent.click(pageTabs[3]);
     const configTabs = await screen.findByRole("tablist", {
       name: "appPage.openclawConfig",
       hidden: true,
@@ -1141,11 +1142,12 @@ describe("App integration with MSW", () => {
     });
     expect(hermesPageTabs.map((tab) => tab.textContent)).toEqual([
       "appPage.providers",
+      "编辑配置",
       "appPage.memory",
     ]);
 
     // 记忆页：页头的 solid 主操作换成「保存」，两份记忆用二级页签
-    fireEvent.click(hermesPageTabs[1]);
+    fireEvent.click(hermesPageTabs[2]);
     const header = document.querySelector("header") as HTMLElement;
     const save = await within(header).findByRole("button", {
       name: "common.save",

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import {
+  appPageBelongsTo,
   isGlobalPage,
   parseView,
   readStoredView,
@@ -23,6 +24,15 @@ describe("navigation views", () => {
     storeView("bindings");
     expect(localStorage.getItem(VIEW_STORAGE_KEY)).toBe("bindings");
     expect(readStoredView()).toBe("bindings");
+  });
+
+  it("treats the gateway config page as an OpenClaw / Hermes page", () => {
+    expect(parseView("gatewayConfig")).toBe("gatewayConfig");
+    expect(appPageBelongsTo("gatewayConfig", "openclaw")).toBe(true);
+    expect(appPageBelongsTo("gatewayConfig", "hermes")).toBe(true);
+    // 别的应用没有这个页签；切过去要回到供应商页
+    expect(appPageBelongsTo("gatewayConfig", "claude")).toBe(false);
+    expect(appPageBelongsTo("gatewayConfig", "opencode")).toBe(false);
   });
 
   it("falls back to the providers page for an unknown stored view", () => {

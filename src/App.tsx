@@ -289,11 +289,21 @@ function App() {
   useEffect(() => {
     setClientPageView("config");
   }, [activeApp]);
-  // OpenClaw / Hermes 有自己的页面导航，不在这里改；其余四个累加式 app 用编辑配置页。
-  const CLIENT_APP_IDS: readonly string[] = ["opencode", "pi", "omp", "dsh"];
+  // 六个累加式 app 都能「走网关」；其中四个直接整页换成编辑配置，
+  // OpenClaw / Hermes 把编辑配置作为自己页签里的一项。
+  const CLIENT_APP_IDS: readonly string[] = [
+    "opencode",
+    "hermes",
+    "openclaw",
+    "pi",
+    "omp",
+    "dsh",
+  ];
   const clientApp: GatewayClientBarApp | null = CLIENT_APP_IDS.includes(activeApp)
     ? (activeApp as GatewayClientBarApp)
     : null;
+  const INLINE_CONFIG_APP_IDS: readonly string[] = ["opencode", "pi", "omp", "dsh"];
+  const inlineConfigApp = INLINE_CONFIG_APP_IDS.includes(activeApp);
   // 模式（直连 / 路由 / 聚合）已取消：新增供应商表单不再按它选布局。
   const currentModeView: AppMode | undefined = undefined;
   const openAddProvider = (modeView: AppMode | undefined) => {
@@ -1335,7 +1345,9 @@ function App() {
         ? t("appPage.openclawConfig")
         : currentView === "hermesMemory"
           ? t("appPage.memory")
-          : undefined;
+          : currentView === "gatewayConfig"
+            ? t("gateway.form.title", { defaultValue: "编辑配置" })
+            : undefined;
 
   const renderAppPageHeader = () => (
     <AppPageHeader
@@ -1418,6 +1430,7 @@ function App() {
             onValueChange={(view) => setCurrentView(view)}
             items={[
               { value: "providers", label: t("appPage.providers") },
+              { value: "gatewayConfig", label: t("gateway.form.title", { defaultValue: "编辑配置" }) },
               { value: "workspace", label: t("appPage.workspace") },
               { value: "openclawConfig", label: t("appPage.openclawConfig") },
             ]}
@@ -1435,6 +1448,7 @@ function App() {
             onValueChange={(view) => setCurrentView(view)}
             items={[
               { value: "providers", label: t("appPage.providers") },
+              { value: "gatewayConfig", label: t("gateway.form.title", { defaultValue: "编辑配置" }) },
               { value: "hermesMemory", label: t("appPage.memory") },
             ]}
           />
@@ -1477,7 +1491,7 @@ function App() {
     }
 
     // 累加式 app：默认打开「编辑配置」，供应商列表放在第二个页签里（原生格式的增删改还在）。
-    if (clientApp) {
+    if (clientApp && inlineConfigApp) {
       const pageApp = clientApp;
       return (
         <div className="flex min-h-0 flex-1 flex-col">
@@ -1584,6 +1598,14 @@ function App() {
   const renderAppPage = () => {
     const body = (() => {
       switch (currentView) {
+        case "gatewayConfig":
+          return (
+            <AppConfigPage
+              appType={activeApp}
+              appLabel={APP_DISPLAY_NAME[activeApp]}
+              clientApp={clientApp ?? undefined}
+            />
+          );
         case "workspace":
           return <WorkspaceFilesPanel />;
         case "openclawConfig":
