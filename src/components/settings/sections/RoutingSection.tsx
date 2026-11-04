@@ -29,6 +29,7 @@ import { AutoFailoverConfigPanel } from "@/components/proxy/AutoFailoverConfigPa
 import { RectifierConfigPanel } from "@/components/settings/RectifierConfigPanel";
 import { APP_DISPLAY_NAME, AppGlyph } from "@/components/shell/AppGlyph";
 import { MODE_TONE } from "@/components/providers/mode/ModeTabs";
+import { AppEditorPage } from "@/components/gateway/AppEditorPage";
 import {
   SettingsBlock,
   SettingsCard,
@@ -107,6 +108,9 @@ export function RoutingSection({ onOpenApp }: RoutingSectionProps) {
   const [clientHost, setClientHost] = useState("");
   const [clientHostError, setClientHostError] = useState<string | null>(null);
   const [confirmExitAll, setConfirmExitAll] = useState(false);
+  const [gatewayApp, setGatewayApp] = useState<ProxyAppId>(
+    PROXY_APP_IDS[0] ?? "claude",
+  );
   const [failoverApp, setFailoverApp] = useState<ProxyAppId>("claude");
 
   useEffect(() => {
@@ -383,6 +387,42 @@ export function RoutingSection({ onOpenApp }: RoutingSectionProps) {
             disabled={!config}
             onCheckedChange={(value) => void toggleLogging(value)}
           />
+        </SettingsCard>
+      </SettingsBlock>
+
+      <SettingsBlock
+        title={t("gateway.editor.settingsTitle", {
+          defaultValue: "模型配置（网关）",
+        })}
+        help={{
+          title: t("gateway.editor.settingsTitle", {
+            defaultValue: "模型配置（网关）",
+          }),
+          body: t("gateway.editor.settingsHelp", {
+            defaultValue:
+              "选哪个模型就走哪个供应商。这里改完会立刻写进已接管应用的客户端配置。",
+          }),
+        }}
+      >
+        <SettingsCard>
+          <div className="flex flex-col gap-4 p-4">
+            <SegmentedControl
+              size="sm"
+              aria-label={t("gateway.editor.settingsTitle", {
+                defaultValue: "模型配置（网关）",
+              })}
+              value={gatewayApp}
+              onValueChange={(value) => setGatewayApp(value as ProxyAppId)}
+              items={PROXY_APP_IDS.map((app) => ({
+                value: app,
+                label: APP_DISPLAY_NAME[app],
+              }))}
+            />
+            <AppEditorPage
+              appType={gatewayApp}
+              appLabel={APP_DISPLAY_NAME[gatewayApp]}
+            />
+          </div>
         </SettingsCard>
       </SettingsBlock>
 
