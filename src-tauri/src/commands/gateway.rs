@@ -5,6 +5,7 @@
 
 use crate::services::gateway_catalog::{self, CatalogViewEntry};
 use crate::services::gateway_config::{self, AppModelConfig};
+use crate::services::gateway_migration::{self, AppMigration};
 use crate::store::AppState;
 
 /// 整份目录：每条 = 模型引用（`<供应商名>/<模型 id>`）+ 展示信息 + 能承载它的端点 + 来源。
@@ -13,6 +14,14 @@ pub fn get_gateway_catalog(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<CatalogViewEntry>, String> {
     gateway_catalog::catalog_view(&state.db).map_err(|error| error.to_string())
+}
+
+/// 把旧的 Stack（聚合）配置一次性翻译成每 app 模型配置。幂等：已配过的 app 不覆盖。
+#[tauri::command(async)]
+pub fn migrate_gateway_from_stack(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<AppMigration>, String> {
+    gateway_migration::migrate_all(&state.db).map_err(|error| error.to_string())
 }
 
 /// 读某 app 的模型配置；没配过返回 `null`。

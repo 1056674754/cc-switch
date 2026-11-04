@@ -1581,6 +1581,7 @@ pub fn run() {
             commands::get_gateway_catalog,
             commands::get_app_model_config,
             commands::set_app_model_config,
+            commands::migrate_gateway_from_stack,
             commands::get_suppliers_overview,
             commands::update_supplier_base_url,
             commands::adopt_supplier,

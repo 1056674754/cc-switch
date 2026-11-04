@@ -42,15 +42,15 @@ pub struct CatalogEntry {
 
 /// 一个 provider 行贡献的模型（还没按端点去重）。
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct RawModel {
-    model: String,
-    display: Option<String>,
-    one_m: bool,
-    window: Option<u64>,
+pub(crate) struct RawModel {
+    pub(crate) model: String,
+    pub(crate) display: Option<String>,
+    pub(crate) one_m: bool,
+    pub(crate) window: Option<u64>,
 }
 
 /// 一个 provider 行贡献的模型清单。推导全部来自现有函数，这里只做 `[1M]` 归一。
-fn raw_models(app: &AppType, provider: &Provider) -> Vec<RawModel> {
+pub(crate) fn raw_models(app: &AppType, provider: &Provider) -> Vec<RawModel> {
     match app {
         AppType::Claude => crate::mode::stack::claude_models("catalog", provider)
             .into_iter()
