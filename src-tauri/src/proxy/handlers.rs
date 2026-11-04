@@ -1068,6 +1068,19 @@ pub async fn handle_chat_completions(
     serve_chat_completions(state, request, AppType::Codex, "Codex", "codex").await
 }
 
+/// 累加式 app：只发裸模型 id（provider 前缀被 CLI 吃掉），归属靠路径前缀。
+fn is_additive_app(app: &AppType) -> bool {
+    matches!(
+        app,
+        AppType::OpenCode
+            | AppType::OpenClaw
+            | AppType::Hermes
+            | AppType::Pi
+            | AppType::Omp
+            | AppType::Dsh
+    )
+}
+
 /// 累加式 app 的 chat completions 入口（P4 选定的「路径前缀归属」）。
 /// 请求形状和 Codex 一样，区别只在归属的 app（决定用哪套模型配置、日志算谁的）。
 /// 前缀到 app 的映射见 [`additive_app_from_path`]，新增一个 app 只加一行路由 + 一行映射。
@@ -1120,7 +1133,32 @@ async fn serve_chat_completions(
     let mut body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
     let stack = match resolve_stack_target(&state, &app, &mut body) {
-        Ok(stack) => stack,
+        Ok(Some(target)) => Some(target),
+        Ok(None) if is_additive_app(&app) => {
+            let model = body
+                .get("model")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string();
+            match crate::services::gateway_route::resolve_configured_model(&state.db, &app, &model)
+            {
+                Ok(Some(target)) => {
+                    body["model"] = Value::String(target.upstream_model.clone());
+                    Some(target)
+                }
+                Ok(None) => None,
+                Err(error) => {
+                    let message = error.to_string();
+                    log::warn!("[{}] {message}", app.as_str());
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(stack_miss_body(&app, &message)),
+                    )
+                        .into_response());
+                }
+            }
+        }
+        Ok(None) => None,
         Err(rejected) => return Ok(*rejected),
     };
 

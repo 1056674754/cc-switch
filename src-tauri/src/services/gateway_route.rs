@@ -12,6 +12,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::mode::stack::StackTarget;
+use crate::services::gateway_catalog::{resolve_reference, CatalogViewEntry};
 
 /// 把 `<供应商名>/<模型 id>` 解析成转发目标。不是引用形状时返回 `None`。
 ///
@@ -82,6 +83,81 @@ pub fn resolve_reference_target(
     }))
 }
 
+/// 累加式 app（OpenCode 等）的客户端会把 provider 前缀吃掉，只发裸模型 id。
+/// 在该 app 的网关模型配置里挑引用：同名模型唯一命中就选它；多家都发布时报歧义；
+/// 一个都没配命中而目录里确实有这个模型时报「不在允许列表」；否则回落到默认模型。
+pub fn pick_configured_reference(
+    config: &crate::services::gateway_config::AppModelConfig,
+    catalog: &[CatalogViewEntry],
+    model: &str,
+    app: &str,
+) -> Result<Option<String>, AppError> {
+    let bare = crate::proxy::model_mapper::strip_one_m_suffix_for_upstream(model.trim())
+        .trim()
+        .to_string();
+    let mut references: Vec<&str> = Vec::new();
+    for reference in std::iter::once(config.default.as_deref())
+        .flatten()
+        .chain(config.allowed.iter().map(String::as_str))
+        .chain(config.slots.values().map(String::as_str))
+    {
+        if !references.contains(&reference) {
+            references.push(reference);
+        }
+    }
+    let configured: Vec<&CatalogViewEntry> = references
+        .iter()
+        .filter_map(|reference| resolve_reference(catalog, reference))
+        .collect();
+    let hits: Vec<&&CatalogViewEntry> = configured
+        .iter()
+        .filter(|entry| entry.model_id == bare)
+        .collect();
+    match hits.len() {
+        1 => Ok(Some(hits[0].reference.clone())),
+        n if n > 1 => Err(AppError::Config(format!(
+            "模型 {model} 在多条引用里都存在，请用 <供应商>/<模型> 指定上游"
+        ))),
+        _ => {
+            let published = catalog.iter().any(|entry| {
+                entry.model_id == bare
+                    && entry
+                        .sources
+                        .iter()
+                        .any(|source| source.starts_with(&format!("{app}:")))
+            });
+            if published {
+                return Err(AppError::Config(format!(
+                    "模型 {model} 没有为此应用配置（不在默认模型 / 槽位 / 允许列表里）"
+                )));
+            }
+            Ok(configured
+                .iter()
+                .find(|entry| config.default.as_deref() == Some(entry.reference.as_str()))
+                .map(|entry| entry.reference.clone()))
+        }
+    }
+}
+
+/// 把裸模型 id 解析成 `<供应商>/<模型>` 再查上游（给累加式 app 的请求热路径用）。
+pub fn resolve_configured_model(
+    db: &Database,
+    app: &AppType,
+    model: &str,
+) -> Result<Option<StackTarget>, AppError> {
+    if model.trim().is_empty() {
+        return Ok(None);
+    }
+    let Some(config) = db.get_app_model_config(app.as_str())? else {
+        return Ok(None);
+    };
+    let catalog = crate::services::gateway_catalog::catalog_view_cached(db)?;
+    let Some(reference) = pick_configured_reference(&config, &catalog, model, app.as_str())? else {
+        return Ok(None);
+    };
+    resolve_reference_target(db, app, &reference)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -105,6 +181,88 @@ mod tests {
             json!({ "env": env }),
             None,
         )
+    }
+
+    fn catalog_entry(reference: &str, model_id: &str) -> CatalogViewEntry {
+        CatalogViewEntry {
+            reference: reference.to_string(),
+            upstream_id: "u1".to_string(),
+            upstream_name: reference.split_once('/').unwrap().0.to_string(),
+            model_id: model_id.to_string(),
+            display_name: Some(model_id.to_string()),
+            one_m: false,
+            window: None,
+            endpoint_ids: Vec::new(),
+            sources: vec!["opencode:p".to_string()],
+        }
+    }
+
+    fn app_config(
+        default: Option<&str>,
+        allowed: &[&str],
+        slots: &[(&str, &str)],
+    ) -> crate::services::gateway_config::AppModelConfig {
+        crate::services::gateway_config::AppModelConfig {
+            default: default.map(str::to_string),
+            slots: slots
+                .iter()
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .collect(),
+            allowed: allowed.iter().map(|value| value.to_string()).collect(),
+            routing: None,
+        }
+    }
+
+    #[test]
+    fn bare_model_picks_the_unique_configured_reference() {
+        let catalog = vec![
+            catalog_entry("CTYun/kimi-k3", "kimi-k3"),
+            catalog_entry("Kimi/gpt-5", "gpt-5"),
+        ];
+        let config = app_config(Some("Kimi/gpt-5"), &["CTYun/kimi-k3"], &[]);
+        let picked =
+            pick_configured_reference(&config, &catalog, "kimi-k3", "opencode").expect("pick");
+        assert_eq!(picked.as_deref(), Some("CTYun/kimi-k3"));
+
+        // 没配过的模型名回落到默认引用
+        let picked = pick_configured_reference(&config, &catalog, "unknown-model", "opencode")
+            .expect("fallback");
+        assert_eq!(picked.as_deref(), Some("Kimi/gpt-5"));
+    }
+
+    #[test]
+    fn bare_model_ambiguity_and_allowlist_errors_are_reported() {
+        let catalog = vec![
+            catalog_entry("CTYun/kimi-k3", "kimi-k3"),
+            catalog_entry("Kimi/kimi-k3", "kimi-k3"),
+            catalog_entry("Kimi/gpt-5", "gpt-5"),
+        ];
+        let config = app_config(None, &["CTYun/kimi-k3", "Kimi/kimi-k3"], &[]);
+        let error =
+            pick_configured_reference(&config, &catalog, "kimi-k3", "opencode").unwrap_err();
+        assert!(error.to_string().contains("指定上游"), "{error}");
+
+        // 目录里有、但应用没配 -> 报不在允许列表，不静默换模型
+        let catalog = vec![
+            catalog_entry("CTYun/kimi-k3", "kimi-k3"),
+            catalog_entry("Kimi/gpt-5", "gpt-5"),
+        ];
+        let config = app_config(Some("Kimi/gpt-5"), &[], &[]);
+        let error =
+            pick_configured_reference(&config, &catalog, "kimi-k3", "opencode").unwrap_err();
+        assert!(error.to_string().contains("没有为此应用配置"), "{error}");
+    }
+
+    #[test]
+    fn slot_models_are_configured_references_too() {
+        let catalog = vec![
+            catalog_entry("CTYun/opus-x", "opus-x"),
+            catalog_entry("Kimi/gpt-5", "gpt-5"),
+        ];
+        let config = app_config(Some("Kimi/gpt-5"), &[], &[("opus", "CTYun/opus-x")]);
+        let picked =
+            pick_configured_reference(&config, &catalog, "opus-x", "opencode").expect("pick");
+        assert_eq!(picked.as_deref(), Some("CTYun/opus-x"));
     }
 
     #[test]
