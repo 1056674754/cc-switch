@@ -4354,7 +4354,10 @@
     "secretPlaceholder": "貼上新密鑰，按 Enter 儲存",
     "secretRequired": "請先填寫新密鑰",
     "secretUpdated": "密鑰已更新，接入的應用一起換好了",
-    "secretFailed": "密鑰更新失敗"
+    "secretFailed": "密鑰更新失敗",
+    "hideManaged": "收起託管登入帳號",
+    "showManaged_one": "顯示 {{count}} 個託管登入帳號（沒有網關位址）",
+    "showManaged_other": "顯示 {{count}} 個託管登入帳號（沒有網關位址）"
   },
   "bindings": {
     "description": "各 agent 從這裡選用供應商；位址和金鑰都在供應商那邊設定。",
@@ -4386,7 +4389,9 @@
       "fable": "Fable",
       "subagent": "子代理",
       "default": "預設"
-    }
+    },
+    "duplicateBadge": "重複接入 ×{{count}}",
+    "duplicateHint": "同一個應用裡有 {{count}} 條設定指向這個網關"
   },
   "mode": {
     "tabsLabel": "連線模式",

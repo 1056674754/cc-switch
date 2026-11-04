@@ -4356,7 +4356,10 @@
     "secretPlaceholder": "Paste the new key, then press Enter",
     "secretRequired": "Enter the new key first",
     "secretUpdated": "Key updated for every connected app",
-    "secretFailed": "Couldn't update the key"
+    "secretFailed": "Couldn't update the key",
+    "hideManaged": "Hide managed accounts",
+    "showManaged_one": "Show {{count}} managed account (no gateway URL)",
+    "showManaged_other": "Show {{count}} managed accounts (no gateway URL)"
   },
   "bindings": {
     "description": "Each agent picks its supplier here. Addresses and keys are configured once on the supplier side.",
@@ -4388,7 +4391,9 @@
       "fable": "Fable",
       "subagent": "Subagent",
       "default": "Default"
-    }
+    },
+    "duplicateBadge": "Duplicate ×{{count}}",
+    "duplicateHint": "{{count}} configs in this app point to the same gateway; extras can be merged on the app page"
   },
   "mode": {
     "tabsLabel": "Connection mode",

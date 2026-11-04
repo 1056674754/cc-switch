@@ -4353,7 +4353,10 @@
     "secretPlaceholder": "粘贴新密钥，回车保存",
     "secretRequired": "请先填写新密钥",
     "secretUpdated": "密钥已更新，接入的应用一起换好了",
-    "secretFailed": "密钥更新失败"
+    "secretFailed": "密钥更新失败",
+    "hideManaged": "收起托管登录账号",
+    "showManaged_one": "显示 {{count}} 个托管登录账号（没有网关地址）",
+    "showManaged_other": "显示 {{count}} 个托管登录账号（没有网关地址）"
   },
   "bindings": {
     "description": "各 agent 从这里选用供应商；地址和密钥都在供应商那边配。",
@@ -4385,7 +4388,9 @@
       "fable": "Fable",
       "subagent": "子代理",
       "default": "默认"
-    }
+    },
+    "duplicateBadge": "重复接入 ×{{count}}",
+    "duplicateHint": "同一个应用里有 {{count}} 条配置指向这个网关，可以在应用页合并掉多余的"
   },
   "mode": {
     "tabsLabel": "连接模式",

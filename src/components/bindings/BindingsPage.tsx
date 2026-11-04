@@ -272,6 +272,13 @@ export function BindingsPage() {
         {bindings.map(({ app, inUse, candidates }) => {
           const isBusy = adoptingApp === app;
           const label = getAppLabel(app);
+          // 同一个 app 里可能有两条旧配置指向同一个网关（历史遗留），
+          // 逐条展示是对的，但要让用户看出这是"重复接入"而不是渲染出错
+          const duplicates = new Map<string, number>();
+          for (const item of inUse) {
+            const key = `${item.supplier.id}:${item.endpoint.id}`;
+            duplicates.set(key, (duplicates.get(key) ?? 0) + 1);
+          }
 
           return (
             <li
@@ -327,6 +334,20 @@ export function BindingsPage() {
                             >
                               {endpoint.baseUrl || t("suppliers.noBaseUrl")}
                             </code>
+                            {(duplicates.get(`${supplier.id}:${endpoint.id}`) ??
+                              1) > 1 ? (
+                              <Badge
+                                variant="outline"
+                                title={t("bindings.duplicateHint")}
+                                className="h-[18px] shrink-0 rounded-full border-warning/40 px-1.5 text-badge font-medium text-warning"
+                              >
+                                {t("bindings.duplicateBadge", {
+                                  count: duplicates.get(
+                                    `${supplier.id}:${endpoint.id}`,
+                                  ),
+                                })}
+                              </Badge>
+                            ) : null}
                           </div>
 
                           <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-caption">

@@ -4353,7 +4353,10 @@
     "secretPlaceholder": "新しいキーを貼り付け、Enter で保存",
     "secretRequired": "新しいキーを入力してください",
     "secretUpdated": "キーを更新しました。接続中のアプリすべてに反映されます",
-    "secretFailed": "キーの更新に失敗しました"
+    "secretFailed": "キーの更新に失敗しました",
+    "hideManaged": "マネージドアカウントを隠す",
+    "showManaged_one": "マネージドアカウント {{count}} 件を表示（URL なし）",
+    "showManaged_other": "マネージドアカウント {{count}} 件を表示（URL なし）"
   },
   "bindings": {
     "description": "各エージェントはここでプロバイダーを選びます。アドレスとキーはプロバイダー側で設定します。",
@@ -4385,7 +4388,9 @@
       "fable": "Fable",
       "subagent": "サブエージェント",
       "default": "デフォルト"
-    }
+    },
+    "duplicateBadge": "重複 ×{{count}}",
+    "duplicateHint": "同じアプリ内に {{count}} 件の設定が同じゲートウェイを指しています"
   },
   "mode": {
     "tabsLabel": "接続モード",
