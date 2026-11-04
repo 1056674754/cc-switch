@@ -35,6 +35,7 @@ import { HelpTip } from "@/components/ui/help-tip";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
 import { ModelMapEditor } from "@/components/bindings/ModelMapEditor";
+import { SupplierModelsPanel } from "@/components/suppliers/SupplierModelsPanel";
 import {
   supportsModelMap,
   toModelMapDraft,
@@ -765,6 +766,8 @@ export function SupplierPage() {
                     )}
                   </div>
                 </div>
+
+                <SupplierModelsPanel upstreamIds={supplier.upstreamIds ?? []} />
 
                 {isEditingMap && editingModelMap && (
                   <div className="border-t border-border px-4 py-3">
