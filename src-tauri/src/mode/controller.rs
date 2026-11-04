@@ -26,8 +26,8 @@ use crate::claude_desktop_config::{self, DesktopTarget};
 use crate::error::AppError;
 use crate::live::engine::DeviceStore;
 use crate::live::project::claude::{
-    direct_patch, proxy_projection, ClaudeProjection, ProxyAuth, StackRoleModel,
-    PROXY_TOKEN_PLACEHOLDER,
+    direct_patch, proxy_projection, proxy_projection_from_model_config, ClaudeProjection,
+    ModelConfigSlots, ProxyAuth, StackRoleModel, ONE_M_MARKER_FOR_CLIENT, PROXY_TOKEN_PLACEHOLDER,
 };
 use crate::live::project::gemini::GeminiProjection;
 use crate::live::project::grok::GrokProjection;
@@ -190,17 +190,29 @@ fn claude_contract(
     stack: &[StackModel],
     stack_default: Option<&StackModel>,
     others: &[&Provider],
+    model_config: Option<&ModelConfigSlots<'_>>,
 ) -> (ClaudeProjection, Contract) {
-    let mut projection = proxy_projection(
-        &ClaudeProjection::of(&route.settings_config),
-        &route.name,
-        proxy_url,
-        claude_proxy_auth(route),
-        stack_default.map(|model| StackRoleModel {
-            id: &model.id,
-            name: &model.name,
-        }),
-    );
+    let base = ClaudeProjection::of(&route.settings_config);
+    // 没有 Stack 名单、但有每 app 模型配置时，按引用写（P3 接管）；否则沿用原来的写法。
+    let from_model_config = stack
+        .is_empty()
+        .then_some(())
+        .and(model_config)
+        .and_then(|slots| {
+            proxy_projection_from_model_config(&base, proxy_url, claude_proxy_auth(route), slots)
+        });
+    let mut projection = from_model_config.unwrap_or_else(|| {
+        proxy_projection(
+            &base,
+            &route.name,
+            proxy_url,
+            claude_proxy_auth(route),
+            stack_default.map(|model| StackRoleModel {
+                id: &model.id,
+                name: &model.name,
+            }),
+        )
+    });
     with_stack_models(&mut projection, stack);
     if !stack.is_empty() {
         let others: Vec<_> = others
@@ -211,6 +223,74 @@ fn claude_contract(
     }
     let contract = contract::claude(&projection);
     (projection, contract)
+}
+
+/// 每 app 模型配置映射成客户端槽位值：引用 + 显示名，1M 模型带标记。
+struct OwnedModelConfigSlots {
+    default: Option<(String, Option<String>)>,
+    /// 顺序同 [`ModelConfigSlots::slots`]：haiku、sonnet、opus、fable。
+    slots: [Option<(String, Option<String>)>; 4],
+}
+
+fn borrow_slot<'a>(
+    item: &'a Option<(String, Option<String>)>,
+) -> Option<(&'a str, Option<&'a str>)> {
+    item.as_ref()
+        .map(|(reference, name)| (reference.as_str(), name.as_deref()))
+}
+
+impl OwnedModelConfigSlots {
+    fn borrowed(&self) -> ModelConfigSlots<'_> {
+        ModelConfigSlots {
+            default: borrow_slot(&self.default),
+            slots: [
+                borrow_slot(&self.slots[0]),
+                borrow_slot(&self.slots[1]),
+                borrow_slot(&self.slots[2]),
+                borrow_slot(&self.slots[3]),
+            ],
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.default.is_none() && self.slots.iter().all(Option::is_none)
+    }
+}
+
+/// 读 Claude 的模型配置并映射成客户端槽位；没配或全空返回 `None`（沿用原写法）。
+fn claude_model_config_slots(state: &AppState) -> Option<OwnedModelConfigSlots> {
+    let config = state
+        .db
+        .get_app_model_config(AppType::Claude.as_str())
+        .ok()
+        .flatten()?;
+    let catalog = crate::services::gateway_catalog::catalog_view_cached(&state.db).ok()?;
+    let lookup = |reference: &str| -> (String, Option<String>) {
+        match crate::services::gateway_catalog::resolve_reference(&catalog, reference) {
+            Some(entry) => {
+                let mut model = entry.reference.clone();
+                if entry.one_m {
+                    model.push_str(ONE_M_MARKER_FOR_CLIENT);
+                }
+                let name = entry
+                    .display_name
+                    .clone()
+                    .unwrap_or_else(|| entry.model_id.clone());
+                (model, Some(name))
+            }
+            // 目录里没有：照样写下去，客户端发出请求时网关会给出明确报错，不在这里吞掉。
+            None => (reference.to_string(), None),
+        }
+    };
+    let mut slots: [Option<(String, Option<String>)>; 4] = Default::default();
+    for (index, key) in ["haiku", "sonnet", "opus", "fable"].into_iter().enumerate() {
+        slots[index] = config.slots.get(key).map(|reference| lookup(reference));
+    }
+    let built = OwnedModelConfigSlots {
+        default: config.default.as_deref().map(lookup),
+        slots,
+    };
+    (!built.is_empty()).then_some(built)
 }
 
 const CLAUDE_MAX_CONTEXT_ENV: &str = "CLAUDE_CODE_MAX_CONTEXT_TOKENS";
@@ -407,12 +487,17 @@ async fn write_proxy(
                 .filter(|member| !member.route)
                 .map(|member| &member.provider)
                 .collect();
+            let model_config = claude_model_config_slots(state);
             let (projection, contract) = claude_contract(
                 route,
                 &proxy_url,
                 &published,
                 stack_default.as_ref(),
                 &others,
+                model_config
+                    .as_ref()
+                    .map(OwnedModelConfigSlots::borrowed)
+                    .as_ref(),
             );
             let unchanged = !force && live_now.has_contract(&contract.key);
             let mut patch = direct_patch(live_now.claude_exclusive_owner().as_ref(), &projection);
@@ -1984,6 +2069,7 @@ mod tests {
             &stack,
             default.as_ref(),
             others,
+            None,
         );
         assert_eq!(contract.exclusive, projection.exclusive);
         projection.exclusive
@@ -2071,7 +2157,7 @@ mod tests {
         );
         // 没有发布 Stack 模型（路由模式）时契约和原来一样，不看别家。
         let (projection, _) =
-            claude_contract(&route, "http://127.0.0.1:15721", &[], None, &[&other]);
+            claude_contract(&route, "http://127.0.0.1:15721", &[], None, &[&other], None);
         assert_env_str(&projection.exclusive, "ENABLE_TOOL_SEARCH", Some("true"));
         assert_env_str(
             &projection.exclusive,
@@ -2082,7 +2168,8 @@ mod tests {
 
     /// 以 `live` 为底写入 `provider` 的代理契约，和进入代理时的补丁相同。
     fn takeover(live: &Value, provider: &Provider) -> Value {
-        let (projection, _) = claude_contract(provider, "http://127.0.0.1:15721", &[], None, &[]);
+        let (projection, _) =
+            claude_contract(provider, "http://127.0.0.1:15721", &[], None, &[], None);
         let mut doc = live.clone();
         direct_patch(None, &projection)
             .apply_to(Path::new("settings.json"), &mut doc)
@@ -2773,6 +2860,67 @@ mod mode_tests {
         assert_eq!(left.mode, Some(Mode::Direct));
         assert_eq!(left.proxy_route.as_deref(), Some("a"), "the route is kept");
         assert!(!state.db.get_proxy_flags_sync("claude").0);
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_enters_with_model_references_from_app_model_config() {
+        let _home = Home::new();
+        seed_settings(USER_SETTINGS);
+        let state = state_with(
+            AppType::Claude,
+            &[claude("a", "https://a.example", json!({}))],
+            "a",
+        )
+        .await;
+        state
+            .db
+            .set_app_model_config(
+                "claude",
+                &crate::services::gateway_config::AppModelConfig {
+                    default: Some("A/claude-sonnet-4-6".to_string()),
+                    slots: [
+                        ("haiku".to_string(), "A/claude-sonnet-4-6".to_string()),
+                        ("opus".to_string(), "Gone/model".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                    allowed: Vec::new(),
+                    routing: None,
+                },
+            )
+            .expect("save model config");
+
+        enter(&state, &AppType::Claude, false).await.expect("enter");
+        let live = settings();
+        let env = |key: &str| live["env"].get(key).and_then(Value::as_str);
+
+        // 默认模型写的是引用，不是 claude-* 别名
+        assert_eq!(env("ANTHROPIC_MODEL"), Some("A/claude-sonnet-4-6"));
+        // 设了的槽位用自己的，没设的回落到默认
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_HAIKU_MODEL"),
+            Some("A/claude-sonnet-4-6")
+        );
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_SONNET_MODEL"),
+            Some("A/claude-sonnet-4-6")
+        );
+        // 目录里没有的引用照样写下去（请求时网关会报错，不在这里吞）
+        assert_eq!(env("ANTHROPIC_DEFAULT_OPUS_MODEL"), Some("Gone/model"));
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_FABLE_MODEL"),
+            Some("A/claude-sonnet-4-6")
+        );
+        // 显示名：目录里有的写 display_name / 模型 id
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"),
+            Some("claude-sonnet-4-6")
+        );
+        assert!(live["env"].get("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+
+        exit(&state, &AppType::Claude).await.expect("exit");
+        assert_back_to_user_settings();
         assert!(!state.proxy_service.is_running().await);
     }
 
