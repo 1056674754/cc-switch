@@ -17,6 +17,54 @@ pub fn get_gateway_catalog(
     gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())
 }
 
+/// 供应商卡片里的模型列表用：目录已应用过人工覆盖（隐藏的不出现、显示名已替换），
+/// 这里额外给「覆盖本身」，界面才能标出哪些是改过的、并提供还原。
+#[tauri::command(async)]
+pub fn get_model_overrides(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<gateway_config::ModelOverride>, String> {
+    state
+        .db
+        .list_model_overrides()
+        .map_err(|error| error.to_string())
+}
+
+/// 写一条人工覆盖：`display_name` 改名（空 = 用派生值），`hidden` = 从目录里隐藏。
+/// 隐藏后目录缓存立即失效，各 app 的模型选择器下次读取就看不到它。
+#[tauri::command(async)]
+pub fn set_model_override(
+    state: tauri::State<'_, AppState>,
+    upstream_id: String,
+    model_id: String,
+    display_name: Option<String>,
+    hidden: bool,
+) -> Result<(), String> {
+    state
+        .db
+        .set_model_override(
+            &upstream_id,
+            &model_id,
+            display_name
+                .as_deref()
+                .filter(|name| !name.trim().is_empty()),
+            hidden,
+        )
+        .map_err(|error| error.to_string())
+}
+
+/// 删掉一条人工覆盖，回到 provider 行派生的值。
+#[tauri::command(async)]
+pub fn clear_model_override(
+    state: tauri::State<'_, AppState>,
+    upstream_id: String,
+    model_id: String,
+) -> Result<(), String> {
+    state
+        .db
+        .clear_model_override(&upstream_id, &model_id)
+        .map_err(|error| error.to_string())
+}
+
 /// 把旧的 Stack（聚合）配置一次性翻译成每 app 模型配置。幂等：已配过的 app 不覆盖。
 #[tauri::command(async)]
 pub fn migrate_gateway_from_stack(

@@ -27,6 +27,14 @@ export interface AppModelConfig {
   routing?: unknown;
 }
 
+/** 目录里的一条人工覆盖：改名或隐藏（目录本身仍由 provider 行派生）。 */
+export interface ModelOverride {
+  upstreamId: string;
+  modelId: string;
+  displayName?: string | null;
+  hidden: boolean;
+}
+
 /** Stack 配置迁移结果。 */
 export interface AppMigration {
   app: string;

@@ -1,5 +1,10 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { AppMigration, AppModelConfig, GatewayCatalogEntry } from "@/types/gateway";
+import type {
+  AppMigration,
+  AppModelConfig,
+  GatewayCatalogEntry,
+  ModelOverride,
+} from "@/types/gateway";
 
 /** 网关模型目录与每 app 模型配置（P1）。 */
 export const gatewayApi = {
@@ -21,6 +26,37 @@ export const gatewayApi = {
   /** 把旧的 Stack（聚合）配置一次性翻译成每 app 模型配置，幂等。 */
   async migrateFromStack(): Promise<AppMigration[]> {
     return invoke("migrate_gateway_from_stack");
+  },
+
+  /** 供应商卡片用：所有人工覆盖（改名 / 隐藏）。 */
+  async getModelOverrides(): Promise<ModelOverride[]> {
+    return invoke("get_model_overrides");
+  },
+
+  /** 写一条人工覆盖；`displayName` 传空表示用派生值，`hidden` 表示从目录里隐藏。 */
+  async setModelOverride(input: {
+    upstreamId: string;
+    modelId: string;
+    displayName?: string | null;
+    hidden: boolean;
+  }): Promise<void> {
+    return invoke("set_model_override", {
+      upstreamId: input.upstreamId,
+      modelId: input.modelId,
+      displayName: input.displayName ?? null,
+      hidden: input.hidden,
+    });
+  },
+
+  /** 删掉一条人工覆盖，回到 provider 行派生的值。 */
+  async clearModelOverride(input: {
+    upstreamId: string;
+    modelId: string;
+  }): Promise<void> {
+    return invoke("clear_model_override", {
+      upstreamId: input.upstreamId,
+      modelId: input.modelId,
+    });
   },
 
   /** 接管：把该 app 的客户端指到网关（替代「进入路由模式」）。 */
