@@ -132,6 +132,49 @@ impl Database {
     }
 }
 
+/// 校验一份 per-app 模型配置。规则对齐 CCR 的 `AddProfileForm`：
+/// 引用必须能在目录里查到（严格，不回落）；允许列表非空时默认模型必填且必须在列表里。
+pub fn validate_app_model_config(
+    config: &AppModelConfig,
+    catalog: &[crate::services::gateway_catalog::CatalogViewEntry],
+) -> Result<(), AppError> {
+    let exists = |reference: &str| {
+        crate::services::gateway_catalog::resolve_reference(catalog, reference).is_some()
+    };
+    if let Some(default) = &config.default {
+        if !exists(default) {
+            return Err(AppError::Config(format!("默认模型不在目录里: {default}")));
+        }
+    }
+    for (slot, reference) in &config.slots {
+        if !exists(reference) {
+            return Err(AppError::Config(format!(
+                "槽位 {slot} 的模型不在目录里: {reference}"
+            )));
+        }
+    }
+    for reference in &config.allowed {
+        if !exists(reference) {
+            return Err(AppError::Config(format!(
+                "允许列表里的模型不在目录里: {reference}"
+            )));
+        }
+    }
+    if !config.allowed.is_empty() {
+        let Some(default) = &config.default else {
+            return Err(AppError::Config(
+                "允许列表非空时必须指定默认模型".to_string(),
+            ));
+        };
+        if !config.allowed.iter().any(|allowed| allowed == default) {
+            return Err(AppError::Config(format!(
+                "默认模型不在允许列表里: {default}"
+            )));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -156,6 +199,67 @@ mod tests {
         assert_eq!(read, config);
         // 其它 app 不受影响
         assert!(db.get_app_model_config("codex").expect("get").is_none());
+    }
+
+    fn catalog(
+        entries: &[(&str, &str)],
+    ) -> Vec<crate::services::gateway_catalog::CatalogViewEntry> {
+        entries
+            .iter()
+            .map(
+                |(upstream, model)| crate::services::gateway_catalog::CatalogViewEntry {
+                    reference: format!("{upstream}/{model}"),
+                    upstream_id: format!("up-{upstream}"),
+                    upstream_name: (*upstream).to_string(),
+                    model_id: (*model).to_string(),
+                    display_name: None,
+                    one_m: false,
+                    window: None,
+                    endpoint_ids: vec!["ep-1".into()],
+                    sources: vec![],
+                },
+            )
+            .collect()
+    }
+
+    #[test]
+    fn validation_rejects_unknown_references() {
+        let entries = catalog(&[("CTYun", "qwen3.8-max")]);
+        let mut config = AppModelConfig {
+            default: Some("CTYun/not-there".into()),
+            ..Default::default()
+        };
+        assert!(validate_app_model_config(&config, &entries).is_err());
+
+        config.default = Some("CTYun/qwen3.8-max".into());
+        assert!(validate_app_model_config(&config, &entries).is_ok());
+
+        config.slots = BTreeMap::from([("haiku".into(), "CTYun/nope".into())]);
+        assert!(validate_app_model_config(&config, &entries).is_err());
+    }
+
+    #[test]
+    fn validation_requires_default_when_allowed_is_set() {
+        let entries = catalog(&[("CTYun", "qwen3.8-max"), ("CTYun", "kimi-k3")]);
+        let without_default = AppModelConfig {
+            allowed: vec!["CTYun/qwen3.8-max".into()],
+            ..Default::default()
+        };
+        assert!(validate_app_model_config(&without_default, &entries).is_err());
+
+        let outside = AppModelConfig {
+            default: Some("CTYun/kimi-k3".into()),
+            allowed: vec!["CTYun/qwen3.8-max".into()],
+            ..Default::default()
+        };
+        assert!(validate_app_model_config(&outside, &entries).is_err());
+
+        let ok = AppModelConfig {
+            default: Some("CTYun/qwen3.8-max".into()),
+            allowed: vec!["CTYun/qwen3.8-max".into()],
+            ..Default::default()
+        };
+        assert!(validate_app_model_config(&ok, &entries).is_ok());
     }
 
     #[test]
