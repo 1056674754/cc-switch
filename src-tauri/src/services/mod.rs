@@ -13,6 +13,7 @@ pub mod exchange_rates;
 pub mod gateway_catalog;
 pub mod gateway_config;
 pub mod gateway_migration;
+pub mod gateway_route;
 pub mod kimi_oauth;
 pub mod mcp;
 pub mod mcp_connectivity;

@@ -188,7 +188,28 @@ fn resolve_stack_target(
         return Ok(None);
     };
     if matches!(stack::decode(app_type, model), Decoded::Plain) {
-        return Ok(None);
+        // 普通模型名里如果写着 `<供应商名>/<模型 id>`，就按模型选上游（P2）。
+        // 不是引用形状、或供应商名不认识的别名，交给默认路由；点名的模型查不到则报错。
+        return match crate::services::gateway_route::resolve_reference_target(
+            &state.db, app_type, model,
+        ) {
+            Ok(Some(target)) => {
+                body["model"] = Value::String(target.upstream_model.clone());
+                Ok(Some(target))
+            }
+            Ok(None) => Ok(None),
+            Err(error) => {
+                let message = error.to_string();
+                log::warn!("[{}] {message}", app_type.as_str());
+                Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(stack_miss_body(app_type, &message)),
+                    )
+                        .into_response(),
+                ))
+            }
+        };
     }
     let model = model.to_string();
     let resolved = stack::resolve(
