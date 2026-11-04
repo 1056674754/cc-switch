@@ -1068,13 +1068,35 @@ pub async fn handle_chat_completions(
     serve_chat_completions(state, request, AppType::Codex, "Codex", "codex").await
 }
 
-/// 累加式 app（OpenCode）的 chat completions 入口：P4 选定的「路径前缀归属」。
+/// 累加式 app 的 chat completions 入口（P4 选定的「路径前缀归属」）。
 /// 请求形状和 Codex 一样，区别只在归属的 app（决定用哪套模型配置、日志算谁的）。
-pub async fn handle_opencode_chat_completions(
+/// 前缀到 app 的映射见 [`additive_app_from_path`]，新增一个 app 只加一行路由 + 一行映射。
+pub async fn handle_additive_chat_completions(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
-    serve_chat_completions(state, request, AppType::OpenCode, "OpenCode", "opencode").await
+    let path = request.uri().path().to_string();
+    let Some((app, title, slug)) = additive_app_from_path(&path) else {
+        return Err(ProxyError::InvalidRequest(format!(
+            "未知的累加式 app 入口: {path}"
+        )));
+    };
+    serve_chat_completions(state, request, app, title, slug).await
+}
+
+/// 路径第一段 → (归属 app, 标题, slug)。只收累加式 app：它们只用 OpenAI Chat
+/// Completions 形状，网关不需要按 app 做请求改造。
+fn additive_app_from_path(path: &str) -> Option<(AppType, &'static str, &'static str)> {
+    let prefix = path.trim_start_matches('/').split('/').next().unwrap_or("");
+    Some(match prefix {
+        "opencode" => (AppType::OpenCode, "OpenCode", "opencode"),
+        "openclaw" => (AppType::OpenClaw, "OpenClaw", "openclaw"),
+        "hermes" => (AppType::Hermes, "Hermes", "hermes"),
+        "pi" => (AppType::Pi, "Pi", "pi"),
+        "omp" => (AppType::Omp, "OMP", "omp"),
+        "dsh" => (AppType::Dsh, "DeepSeek Harness", "dsh"),
+        _ => return None,
+    })
 }
 
 async fn serve_chat_completions(
@@ -4959,5 +4981,28 @@ mod stack_tests {
         .await
         .expect("models");
         assert_eq!(body, json!({ "data": [], "has_more": false }));
+    }
+}
+
+#[cfg(test)]
+mod additive_route_tests {
+    use super::*;
+
+    #[test]
+    fn path_prefix_maps_to_its_app() {
+        let cases = [
+            ("/opencode/v1/chat/completions", AppType::OpenCode),
+            ("/openclaw/chat/completions", AppType::OpenClaw),
+            ("/hermes/v1/chat/completions", AppType::Hermes),
+            ("/pi/v1/chat/completions", AppType::Pi),
+            ("/omp/v1/chat/completions", AppType::Omp),
+            ("/dsh/v1/chat/completions", AppType::Dsh),
+        ];
+        for (path, app) in cases {
+            let (mapped, _, slug) = additive_app_from_path(path).expect(path);
+            assert_eq!(mapped, app, "{path} -> {slug}");
+        }
+        assert!(additive_app_from_path("/codex/v1/chat/completions").is_none());
+        assert!(additive_app_from_path("/v1/chat/completions").is_none());
     }
 }
