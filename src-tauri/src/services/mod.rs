@@ -11,6 +11,7 @@ pub mod env_checker;
 pub mod env_manager;
 pub mod exchange_rates;
 pub mod gateway_catalog;
+pub mod gateway_config;
 pub mod kimi_oauth;
 pub mod mcp;
 pub mod mcp_connectivity;

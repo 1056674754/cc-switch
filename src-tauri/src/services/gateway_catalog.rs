@@ -114,7 +114,7 @@ fn config_models(app: &AppType, provider: &Provider) -> Vec<RawModel> {
         return Vec::new();
     };
     let mut found: Vec<RawModel> = Vec::new();
-    let mut push = |model: &str, meta: Option<&Value>, found: &mut Vec<RawModel>| {
+    let push = |model: &str, meta: Option<&Value>, found: &mut Vec<RawModel>| {
         let model = model.trim();
         if model.is_empty() {
             return;
@@ -357,19 +357,34 @@ pub fn catalog_view(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
     };
     upstream_names.sort_by(|a, b| a.0.cmp(&b.0));
     let names = unique_upstream_names(&upstream_names);
+    let overrides: std::collections::HashMap<(String, String), _> = db
+        .list_model_overrides()?
+        .into_iter()
+        .map(|over| ((over.upstream_id.clone(), over.model_id.clone()), over))
+        .collect();
     Ok(entries
         .into_iter()
+        .filter(|entry| {
+            !overrides
+                .get(&(entry.upstream_id.clone(), entry.model_id.clone()))
+                .map(|over| over.hidden)
+                .unwrap_or(false)
+        })
         .map(|entry| {
             let upstream_name = names
                 .get(&entry.upstream_id)
                 .cloned()
                 .unwrap_or_else(|| entry.upstream_id.clone());
+            let display_name = overrides
+                .get(&(entry.upstream_id.clone(), entry.model_id.clone()))
+                .and_then(|over| over.display_name.clone())
+                .or(entry.display_name);
             CatalogViewEntry {
                 reference: format!("{upstream_name}/{}", entry.model_id),
                 upstream_id: entry.upstream_id,
                 upstream_name,
                 model_id: entry.model_id,
-                display_name: entry.display_name,
+                display_name,
                 one_m: entry.one_m,
                 window: entry.window,
                 endpoint_ids: entry.endpoint_ids,
@@ -574,11 +589,16 @@ mod tests {
     /// `CCS_VERIFY_DB=/path/to/copy.db cargo test --lib gateway_catalog -- --ignored --nocapture`
     #[test]
     #[ignore = "手动：用真实库副本验证，需 CCS_VERIFY_DB"]
-    fn manual_derive_against_real_db_copy() {
+    fn manual_derive_against_real_db_copy() -> Result<(), crate::error::AppError> {
         let Ok(path) = std::env::var("CCS_VERIFY_DB") else {
-            return;
+            return Ok(());
         };
-        let db = Database::open_for_test(std::path::Path::new(&path)).expect("open");
+        let db = Database::open_and_migrate_for_test(std::path::Path::new(&path))?;
+        let version: i32 = {
+            let conn = crate::database::lock_conn!(db.conn);
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))?
+        };
+        assert_eq!(version, crate::database::SCHEMA_VERSION);
         let entries = derive_entries(&db).expect("derive");
         let upstreams: std::collections::BTreeSet<&str> =
             entries.iter().map(|e| e.upstream_id.as_str()).collect();
@@ -615,5 +635,6 @@ mod tests {
         println!("references: {} unique", references.len());
         assert_eq!(view.len(), entries.len());
         assert!(!entries.is_empty());
+        Ok(())
     }
 }

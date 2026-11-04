@@ -733,6 +733,10 @@ impl Database {
         // 与升级后的库形状一致；迁移里也会调用同一份 DDL（IF NOT EXISTS）。
         Self::create_upstream_tables(conn)?;
 
+        // 网关模型目录与每 app 模型配置（v27）。同 create_upstream_tables：
+        // 全新安装与升级共用同一份 DDL。
+        Self::create_gateway_tables(conn)?;
+
         Ok(())
     }
 
@@ -948,6 +952,11 @@ impl Database {
                         log::info!("迁移数据库从 v25 到 v26（绑定模型映射 + 凭证形态）");
                         Self::migrate_v25_to_v26(conn)?;
                         Self::set_user_version(conn, 26)?;
+                    }
+                    26 => {
+                        log::info!("迁移数据库从 v26 到 v27（网关模型覆盖 + 每 app 模型配置）");
+                        Self::migrate_v26_to_v27(conn)?;
+                        Self::set_user_version(conn, 27)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -2084,6 +2093,32 @@ impl Database {
     /// - `provider_bindings.model_map`：模型映射归接入（决策：按 app 各自一份）
     /// - `upstream_credentials.secret_kind`：凭证形态，凭证池必须先能区分
     ///   明文 / 环境变量引用 / 托管令牌，否则那 14 条在池子里是黑洞
+    /// 创建网关模型目录与每 app 模型配置两张表。
+    fn create_gateway_tables(conn: &Connection) -> Result<(), AppError> {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS gateway_model_overrides (
+                 id TEXT PRIMARY KEY,
+                 upstream_id TEXT NOT NULL,
+                 model_id TEXT NOT NULL,
+                 display_name TEXT,
+                 hidden INTEGER NOT NULL DEFAULT 0,
+                 created_at INTEGER NOT NULL,
+                 UNIQUE (upstream_id, model_id)
+             );
+             CREATE TABLE IF NOT EXISTS gateway_app_profiles (
+                 app_type TEXT PRIMARY KEY,
+                 payload TEXT NOT NULL,
+                 updated_at INTEGER NOT NULL
+             );",
+        )
+        .map_err(|e| AppError::Database(format!("创建网关目录表失败: {e}")))?;
+        Ok(())
+    }
+
+    fn migrate_v26_to_v27(conn: &Connection) -> Result<(), AppError> {
+        Self::create_gateway_tables(conn)
+    }
+
     fn migrate_v25_to_v26(conn: &Connection) -> Result<(), AppError> {
         Self::create_upstream_tables(conn)?;
         if Self::table_exists(conn, "provider_bindings")?
@@ -5245,6 +5280,30 @@ mod tests {
         // 没有 env 的配置写不了
         let mut opencode = serde_json::json!({"options": {"baseURL": "https://x"}});
         assert!(!Database::p1_set_model_map(&mut opencode, &map));
+    }
+
+    #[test]
+    fn migrate_v26_to_v27_creates_gateway_tables() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+
+        // 退回 v26 的形状：删掉 v27 的表，再把 user_version 降一档
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS gateway_app_profiles;
+             DROP TABLE IF EXISTS gateway_model_overrides;",
+        )?;
+        Database::set_user_version(&conn, 26)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        assert!(Database::table_exists(&conn, "gateway_app_profiles")?);
+        assert!(Database::table_exists(&conn, "gateway_model_overrides")?);
+
+        // 再跑一遍是幂等的
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        Ok(())
     }
 
     #[test]

@@ -52,7 +52,7 @@ use std::sync::Mutex;
 
 /// 当前 Schema 版本号
 /// 每次修改表结构时递增，并在 schema.rs 中添加相应的迁移逻辑
-pub(crate) const SCHEMA_VERSION: i32 = 26;
+pub(crate) const SCHEMA_VERSION: i32 = 27;
 
 /// 安全地序列化 JSON，避免 unwrap panic
 pub(crate) fn to_json_string<T: Serialize>(value: &T) -> Result<String, AppError> {
@@ -252,6 +252,16 @@ impl Database {
             conn,
             log_count_cache: Mutex::new(None),
         })
+    }
+
+    /// 打开一个已有的库并跑迁移（真实库副本的迁移验证用）。与 [`Self::init`] 的
+    /// create_tables → apply_schema_migrations 两条一致，但路径由调用方给。
+    #[cfg(test)]
+    pub(crate) fn open_and_migrate_for_test(path: &std::path::Path) -> Result<Self, AppError> {
+        let db = Self::open_for_test(path)?;
+        db.create_tables()?;
+        db.apply_schema_migrations()?;
+        Ok(db)
     }
 
     pub(crate) fn get_auto_vacuum_mode(conn: &Connection) -> Result<i32, AppError> {
