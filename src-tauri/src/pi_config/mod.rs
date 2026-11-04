@@ -459,6 +459,52 @@ fn empty_json_object() -> &'static Map<String, Value> {
     &EMPTY
 }
 
+/// 写 settings.json 的全局默认 provider/model（Pi 读取 `defaultProvider` / `defaultModel`）。
+/// 保留其它未知字段；JSON5 解析后按 JSON 写回（Pi 自己写的也是纯 JSON）。
+pub(crate) fn set_pi_native_defaults(provider: &str, model: &str) -> Result<(), AppError> {
+    let path = get_pi_settings_path()?;
+    let mut value = if path.exists() {
+        read_json5_value(&path, "Pi settings")?
+    } else {
+        Value::Object(serde_json::Map::new())
+    };
+    let object = value
+        .as_object_mut()
+        .ok_or_else(|| AppError::Config("Pi settings.json must be an object".to_string()))?;
+    object.insert(
+        "defaultProvider".to_string(),
+        Value::String(provider.to_string()),
+    );
+    object.insert("defaultModel".to_string(), Value::String(model.to_string()));
+    write_settings_document(&path, &value)
+}
+
+/// 释放时用：只有默认 provider 还是这家才清掉两个默认字段，不动用户后来的选择。
+pub(crate) fn clear_pi_native_defaults_if_provider(provider: &str) -> Result<(), AppError> {
+    let path = get_pi_settings_path()?;
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut value = read_json5_value(&path, "Pi settings")?;
+    let Some(object) = value.as_object_mut() else {
+        return Ok(());
+    };
+    if object.get("defaultProvider").and_then(Value::as_str) != Some(provider) {
+        return Ok(());
+    }
+    object.remove("defaultProvider");
+    object.remove("defaultModel");
+    write_settings_document(&path, &value)
+}
+
+fn write_settings_document(path: &Path, document: &Value) -> Result<(), AppError> {
+    let mut bytes =
+        serde_json::to_vec_pretty(document).map_err(|source| AppError::JsonSerialize { source })?;
+    bytes.push(b'\n');
+    ensure_private_models_parent(path)?;
+    atomic_write_private(path, &bytes)
+}
+
 fn write_models_document(
     path: &Path,
     document: &Value,

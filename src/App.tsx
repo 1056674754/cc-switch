@@ -1475,7 +1475,8 @@ function App() {
         <div className="space-y-4">
           {activeApp === "opencode" ||
           activeApp === "hermes" ||
-          activeApp === "openclaw" ? (
+          activeApp === "openclaw" ||
+          activeApp === "pi" ? (
             <ClientGatewayBar app={activeApp} />
           ) : null}
           <ProviderList

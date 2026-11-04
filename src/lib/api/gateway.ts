@@ -94,6 +94,21 @@ export const gatewayApi = {
     return invoke("release_openclaw_from_gateway");
   },
 
+  /** P4-A：Pi 现在是否已经指向网关。 */
+  async getPiGatewayStatus(): Promise<boolean> {
+    return invoke("get_pi_gateway_status");
+  },
+
+  /** P4-A：把 Pi 指到网关（写 models.json provider + settings.json 默认模型）。 */
+  async adoptPiToGateway(): Promise<void> {
+    return invoke("adopt_pi_to_gateway");
+  },
+
+  /** P4-A：释放 Pi（删 provider、清默认值）。 */
+  async releasePiFromGateway(): Promise<void> {
+    return invoke("release_pi_from_gateway");
+  },
+
   /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
   async adoptOpencodeToGateway(): Promise<void> {
     return invoke("adopt_opencode_to_gateway");
