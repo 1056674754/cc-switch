@@ -3,6 +3,7 @@
 //! 目录抬头两条命令：`get_gateway_catalog` 给 UI 选模型；`get/set_app_model_config`
 //! 读写每 app 的默认 + 槽位 + 允许列表。目录本身由 provider 行派生，这里不物化。
 
+use crate::app_config::AppType;
 use crate::services::gateway_catalog::{self, CatalogViewEntry};
 use crate::services::gateway_config::{self, AppModelConfig};
 use crate::services::gateway_migration::{self, AppMigration};
@@ -37,8 +38,9 @@ pub fn get_app_model_config(
 }
 
 /// 写某 app 的模型配置（整体覆盖）。引用必须先过目录校验：查不到就报错，不回落。
+/// 已经接管（代理已接上）的 app 立刻按新配置重写客户端文件；没接管或直连时是空操作。
 #[tauri::command(async)]
-pub fn set_app_model_config(
+pub async fn set_app_model_config(
     state: tauri::State<'_, AppState>,
     app_type: String,
     config: AppModelConfig,
@@ -50,5 +52,13 @@ pub fn set_app_model_config(
     state
         .db
         .set_app_model_config(&app_type, &config)
-        .map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    if let Ok(app) = app_type.parse::<AppType>() {
+        if crate::mode::controller::PROXY_APPS.contains(&app) {
+            crate::mode::controller::resync_route(state.inner(), &app)
+                .await
+                .map_err(|error| format!("配置已保存，但重写客户端失败: {error}"))?;
+        }
+    }
+    Ok(())
 }

@@ -2849,6 +2849,56 @@ mod mode_tests {
 
         exit(&state, &AppType::Claude).await.expect("exit");
         assert_back_to_user_settings();
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn resync_rewrites_the_client_when_the_model_config_changes() {
+        let _home = Home::new();
+        seed_settings(USER_SETTINGS);
+        let state = state_with(
+            AppType::Claude,
+            &[
+                claude("a", "https://a.example", json!({})),
+                claude(
+                    "b",
+                    "https://b.example",
+                    json!({
+                        "ANTHROPIC_MODEL": "claude-opus-4-6"
+                    }),
+                ),
+            ],
+            "a",
+        )
+        .await;
+        let config = |default: &str| crate::services::gateway_config::AppModelConfig {
+            default: Some(default.to_string()),
+            slots: Default::default(),
+            allowed: Vec::new(),
+            routing: None,
+        };
+        state
+            .db
+            .set_app_model_config("claude", &config("A/claude-sonnet-4-6"))
+            .expect("first config");
+        enter(&state, &AppType::Claude, false).await.expect("enter");
+        assert_eq!(settings()["env"]["ANTHROPIC_MODEL"], "A/claude-sonnet-4-6");
+
+        state
+            .db
+            .set_app_model_config("claude", &config("B/claude-opus-4-6"))
+            .expect("second config");
+        resync_route(&state, &AppType::Claude)
+            .await
+            .expect("resync");
+        assert_eq!(
+            settings()["env"]["ANTHROPIC_MODEL"],
+            "B/claude-opus-4-6",
+            "接上状态下改了模型配置，客户端文件要立刻跟着变"
+        );
+
+        exit(&state, &AppType::Claude).await.expect("exit");
+        assert_back_to_user_settings();
         // 第一次写入可能挪动关键字段的位置，之后的往返字节稳定。
         let settled = fs::read(settings_path()).unwrap();
         enter(&state, &AppType::Claude, false)
