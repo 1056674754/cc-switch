@@ -141,6 +141,11 @@ impl ConnectionPool {
         Ok(Self { inner })
     }
 
+    /// 这个池子背后的库文件；内存库返回 `None`（不能跨库共用缓存）。
+    pub(crate) fn path(&self) -> Option<&std::path::Path> {
+        self.inner.path.as_deref()
+    }
+
     /// 内存库：只有一条连接，永远不新建（`Connection::open_in_memory` 每次都会得到
     /// 一个各自独立的空库，多条连接会让约 100 个测试看到不同的数据）。
     pub(crate) fn memory(configure: fn(&Connection)) -> Result<Self, PoolError> {

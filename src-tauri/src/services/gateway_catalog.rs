@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -274,6 +276,51 @@ fn unique_upstream_names(
         names.insert(id.clone(), unique);
     }
     names
+}
+
+/// 目录缓存的版本号：写 provider / 上游绑定 / 每 app 配置 / 人工覆盖时由
+/// [`invalidate_catalog_cache`] 加一。**不能**用 `database::db_write_epoch` 失效——
+/// 请求日志和用量统计也在写库，会每秒失效一次。
+static CATALOG_CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
+
+/// 最近一次目录（按库文件路径键）。内存库（测试）不走缓存。
+static CATALOG_CACHE: Mutex<Option<(String, u64, Vec<CatalogViewEntry>)>> = Mutex::new(None);
+
+/// 目录依赖的数据变了：让缓存失效。写入点见 `save_provider` / `delete_provider` /
+/// `reconcile_provider_bindings` / `gateway_config` 的写方法。
+pub fn invalidate_catalog_cache() {
+    CATALOG_CACHE_EPOCH.fetch_add(1, Ordering::Relaxed);
+}
+
+/// 带缓存的目录：文件库走缓存，内存库（测试）每次重算。
+///
+/// 计算完再读版本号存进缓存：派生过程会顺带对账绑定，对账期间的写入也算进这一次，
+/// 不会一存就过期。
+pub fn catalog_view_cached(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
+    let Some(path) = db.file_path() else {
+        return catalog_view(db);
+    };
+    let key = path.to_string_lossy().to_string();
+    let cached = {
+        let guard = CATALOG_CACHE
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        guard
+            .as_ref()
+            .filter(|(cached_key, _, _)| cached_key == &key)
+            .map(|(_, epoch, entries)| (*epoch, entries.clone()))
+    };
+    if let Some((epoch, entries)) = cached {
+        if epoch == CATALOG_CACHE_EPOCH.load(Ordering::Relaxed) {
+            return Ok(entries);
+        }
+    }
+    let entries = catalog_view(db)?;
+    let epoch = CATALOG_CACHE_EPOCH.load(Ordering::Relaxed);
+    *CATALOG_CACHE
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner()) = Some((key, epoch, entries.clone()));
+    Ok(entries)
 }
 
 /// 从库里派生整份目录（带模型引用）。读之前先对账绑定（从未走过代理的 app 在库里没有绑定）。
@@ -585,6 +632,42 @@ mod tests {
         assert!(resolve_reference(&entries, "CTYun/not-there").is_none());
     }
 
+    #[test]
+    fn file_backed_catalog_cache_serves_until_a_write_invalidates_it() {
+        let path = std::env::temp_dir().join(format!(
+            "ccs-catalog-cache-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        {
+            let db = Database::open_and_migrate_for_test(&path).expect("open");
+            let provider = provider(
+                "CTYun",
+                json!({"env": {"ANTHROPIC_BASE_URL": "https://cache-test.example/v1", "ANTHROPIC_MODEL": "m1"}}),
+                None,
+            );
+            db.save_provider("claude", &provider).expect("save");
+
+            let first = catalog_view_cached(&db).expect("first");
+            assert_eq!(first.len(), 1, "第一条 provider 应该只有一个模型");
+            // 再读一次走缓存：结果一致
+            assert_eq!(catalog_view_cached(&db).expect("second"), first);
+
+            // 写一家新的：缓存必须失效
+            let mut provider2 = provider.clone();
+            provider2.id = "p-2".into();
+            provider2.name = "Kimi".into();
+            provider2.settings_config = json!({"env": {"ANTHROPIC_BASE_URL": "https://kimi-cache.example", "ANTHROPIC_MODEL": "kimi-k3"}});
+            db.save_provider("claude", &provider2).expect("save2");
+            let after = catalog_view_cached(&db).expect("after");
+            assert_eq!(after.len(), 2, "写 provider 后缓存要失效");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// 真实库副本验证：
     /// `CCS_VERIFY_DB=/path/to/copy.db cargo test --lib gateway_catalog -- --ignored --nocapture`
     #[test]
@@ -605,7 +688,15 @@ mod tests {
         let started = std::time::Instant::now();
         let _ = catalog_view(&db).expect("view warm");
         let view_elapsed = started.elapsed();
-        println!("timing: derive={derive_elapsed:?} view(second)={view_elapsed:?}");
+        let started = std::time::Instant::now();
+        let _ = catalog_view_cached(&db).expect("cached warm");
+        let cached_cold = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = catalog_view_cached(&db).expect("cached hot");
+        let cached_hot = started.elapsed();
+        println!(
+            "timing: derive={derive_elapsed:?} view(second)={view_elapsed:?} cached(cold)={cached_cold:?} cached(hot)={cached_hot:?}"
+        );
         let upstreams: std::collections::BTreeSet<&str> =
             entries.iter().map(|e| e.upstream_id.as_str()).collect();
         let endpoints: std::collections::BTreeSet<&str> = entries

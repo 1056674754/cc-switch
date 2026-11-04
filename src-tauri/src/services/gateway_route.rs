@@ -34,7 +34,7 @@ pub fn resolve_reference_target(
         return Ok(None);
     }
 
-    let catalog = crate::services::gateway_catalog::catalog_view(db)?;
+    let catalog = crate::services::gateway_catalog::catalog_view_cached(db)?;
     let reference = format!("{supplier}/{upstream_model}");
     let Some(entry) = crate::services::gateway_catalog::resolve_reference(&catalog, &reference)
     else {

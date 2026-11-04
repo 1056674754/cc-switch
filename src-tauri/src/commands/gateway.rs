@@ -13,7 +13,7 @@ use crate::store::AppState;
 pub fn get_gateway_catalog(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<CatalogViewEntry>, String> {
-    gateway_catalog::catalog_view(&state.db).map_err(|error| error.to_string())
+    gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())
 }
 
 /// 把旧的 Stack（聚合）配置一次性翻译成每 app 模型配置。幂等：已配过的 app 不覆盖。
@@ -43,7 +43,8 @@ pub fn set_app_model_config(
     app_type: String,
     config: AppModelConfig,
 ) -> Result<(), String> {
-    let catalog = gateway_catalog::catalog_view(&state.db).map_err(|error| error.to_string())?;
+    let catalog =
+        gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())?;
     gateway_config::validate_app_model_config(&config, &catalog)
         .map_err(|error| error.to_string())?;
     state

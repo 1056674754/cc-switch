@@ -65,6 +65,7 @@ impl Database {
         app_type: &str,
         config: &AppModelConfig,
     ) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let payload = serde_json::to_string(config)
             .map_err(|e| AppError::Config(format!("序列化 {app_type} 模型配置失败: {e}")))?;
         let now = chrono::Utc::now().timestamp();
@@ -104,6 +105,7 @@ impl Database {
         display_name: Option<&str>,
         hidden: bool,
     ) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let id = Database::p1_stable_hash(&format!("{upstream_id}|{model_id}"));
         let now = chrono::Utc::now().timestamp();
         let conn = crate::database::lock_conn!(self.conn);
@@ -122,6 +124,7 @@ impl Database {
 
     /// 删掉一条人工覆盖，回到派生值。
     pub fn clear_model_override(&self, upstream_id: &str, model_id: &str) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let conn = crate::database::lock_conn!(self.conn);
         conn.execute(
             "DELETE FROM gateway_model_overrides WHERE upstream_id = ?1 AND model_id = ?2",

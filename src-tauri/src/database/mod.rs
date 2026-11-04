@@ -254,6 +254,11 @@ impl Database {
         })
     }
 
+    /// 库文件路径；内存库是 `None`。
+    pub(crate) fn file_path(&self) -> Option<&std::path::Path> {
+        self.conn.path()
+    }
+
     /// 打开一个已有的库并跑迁移（真实库副本的迁移验证用）。与 [`Self::init`] 的
     /// create_tables → apply_schema_migrations 两条一致，但路径由调用方给。
     #[cfg(test)]

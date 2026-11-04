@@ -390,6 +390,7 @@ impl Database {
     }
 
     pub fn save_provider(&self, app_type: &str, provider: &Provider) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let mut conn = lock_conn!(self.conn);
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
@@ -589,6 +590,7 @@ impl Database {
     }
 
     pub fn delete_provider(&self, app_type: &str, id: &str) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let mut conn = lock_conn!(self.conn);
         // 绑定要跟着删：否则 provider_bindings 留下孤儿行，`up-provider-{id}`
         // 这类上游也会永久堆积（读时对账只补不删，补不到这里）。
@@ -1020,6 +1022,7 @@ impl Database {
         conn: &mut rusqlite::Connection,
         app_type: &str,
     ) -> Result<(), AppError> {
+        crate::services::gateway_catalog::invalidate_catalog_cache();
         let rows = Database::p1_read_rows(conn, Some(app_type))?;
         if rows.is_empty() {
             return Ok(());

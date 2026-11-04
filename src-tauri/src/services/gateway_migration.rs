@@ -154,7 +154,7 @@ pub fn migrate_app(
 
 /// 迁移所有支持 Stack 的 app。
 pub fn migrate_all(db: &Database) -> Result<Vec<AppMigration>, AppError> {
-    let catalog = gateway_catalog::catalog_view(db)?;
+    let catalog = gateway_catalog::catalog_view_cached(db)?;
     let store = crate::live::engine::DeviceStore::for_device();
     let mut results = Vec::new();
     for app in [AppType::Claude, AppType::ClaudeDesktop, AppType::Codex] {
