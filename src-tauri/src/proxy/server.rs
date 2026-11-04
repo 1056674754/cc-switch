@@ -1502,4 +1502,128 @@ mod tests {
             "full URL"
         );
     }
+
+    /// P4-A 端到端：累加式 app 发裸模型 id → 网关按该 app 的模型配置选上游 →
+    /// 请求真的转发到上游（这里用一个本地假上游接收）。
+    #[tokio::test]
+    async fn additive_app_bare_model_resolves_to_the_configured_upstream() {
+        use crate::provider::Provider;
+        use crate::services::gateway_catalog::catalog_view_cached;
+        use crate::services::gateway_config::AppModelConfig;
+        use axum::extract::Json as AxumJson;
+        use serde_json::json;
+
+        let captured: Arc<std::sync::Mutex<Option<serde_json::Value>>> =
+            Arc::new(std::sync::Mutex::new(None));
+        let sink = captured.clone();
+        let mock_app = Router::new().route(
+            "/v1/chat/completions",
+            post(move |AxumJson(body): AxumJson<serde_json::Value>| {
+                let sink = sink.clone();
+                async move {
+                    *sink.lock().unwrap() = Some(body);
+                    AxumJson(json!({
+                        "id": "chatcmpl-e2e",
+                        "object": "chat.completion",
+                        "choices": [{
+                            "index": 0,
+                            "message": { "role": "assistant", "content": "upstream-ok" },
+                            "finish_reason": "stop"
+                        }],
+                        "usage": { "input_tokens": 1, "output_tokens": 1, "total_tokens": 2 }
+                    }))
+                }
+            }),
+        );
+        let mock_listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind mock upstream");
+        let mock_addr = mock_listener.local_addr().expect("mock addr");
+        let mock_handle = tokio::spawn(async move {
+            axum::serve(mock_listener, mock_app)
+                .await
+                .expect("serve mock");
+        });
+
+        let db = Arc::new(Database::memory().expect("memory database"));
+        let provider = Provider::with_id(
+            "p-open".to_string(),
+            "FakeSupplier".to_string(),
+            json!({
+                "name": "FakeSupplier",
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {
+                    "baseURL": format!("http://{mock_addr}/v1"),
+                    "apiKey": "sk-upstream"
+                },
+                "models": { "kimi-k3": { "name": "Kimi K3" } }
+            }),
+            None,
+        );
+        db.save_provider("opencode", &provider)
+            .expect("save opencode provider");
+
+        let catalog = catalog_view_cached(&db).expect("catalog");
+        let entry = catalog
+            .iter()
+            .find(|entry| {
+                entry.model_id == "kimi-k3"
+                    && entry
+                        .sources
+                        .iter()
+                        .any(|source| source.starts_with("opencode:"))
+            })
+            .unwrap_or_else(|| panic!("catalog has no opencode model: {catalog:#?}"))
+            .clone();
+        db.set_app_model_config(
+            "opencode",
+            &AppModelConfig {
+                default: Some(entry.reference.clone()),
+                slots: Default::default(),
+                allowed: Vec::new(),
+                routing: None,
+            },
+        )
+        .expect("set app model config");
+
+        let proxy = ProxyServer::new(
+            ProxyConfig {
+                listen_port: 0,
+                ..ProxyConfig::default()
+            },
+            db,
+            None,
+        );
+        let info = proxy.start().await.expect("start test proxy");
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let response = client
+            .post(format!(
+                "http://127.0.0.1:{}/opencode/v1/chat/completions",
+                info.port
+            ))
+            .json(&json!({
+                "model": "kimi-k3",
+                "messages": [{ "role": "user", "content": "ping" }]
+            }))
+            .send()
+            .await
+            .expect("send through gateway");
+        let status = response.status();
+        let body: serde_json::Value = response.json().await.expect("gateway body");
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(
+            body["choices"][0]["message"]["content"],
+            json!("upstream-ok")
+        );
+
+        let upstream_body = captured
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("upstream received the request");
+        assert_eq!(upstream_body["model"], json!("kimi-k3"));
+
+        proxy.stop().await.expect("stop proxy");
+        mock_handle.abort();
+    }
 }
