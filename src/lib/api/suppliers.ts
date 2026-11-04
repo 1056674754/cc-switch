@@ -45,6 +45,8 @@ export interface Supplier {
   credentialCount: number;
   /** 这个地址上出现过的凭据形态：literal / env_ref / managed / none 的子集 */
   credentialKinds: string[];
+  /** 归到这家供应商的上游 id，模型目录与人工覆盖按它对上（老 fixture 可能没有） */
+  upstreamIds?: string[];
 }
 
 /** 一键采用的结果：agent 侧新建的那条配置（地址和密钥都来自网关）。 */

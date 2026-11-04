@@ -63,6 +63,8 @@ pub struct Supplier {
     pub credential_count: i64,
     /// 这个地址上出现过的凭据形态：literal / env_ref / managed / none
     pub credential_kinds: Vec<String>,
+    /// 归到这家供应商的上游 id（目录与模型覆盖按它对齐，一个服务根可能对应多条上游）
+    pub upstream_ids: Vec<String>,
 }
 
 /// 把 `apiFormat` 的常见写法归一。
@@ -329,7 +331,12 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 bindings: Vec::new(),
                 credential_count: 0,
                 credential_kinds: Vec::new(),
+                upstream_ids: Vec::new(),
             });
+
+            if !supplier.upstream_ids.contains(&upstream_id) {
+                supplier.upstream_ids.push(upstream_id.clone());
+            }
 
             let (credential_count, kinds) = per_endpoint
                 .get(&endpoint_id)
