@@ -12,6 +12,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { gatewayApi } from "@/lib/api/gateway";
 import type { AppModelConfig, GatewayCatalogEntry } from "@/types/gateway";
 import { ModelPicker } from "./ModelPicker";
+import { ClientGatewayBar, type GatewayClientBarApp } from "./ClientGatewayBar";
 import { applySlotChange, slotDefinitions, validateDraft } from "./appModelConfig";
 import { gatewayKeys } from "./AppEditorPage";
 
@@ -47,9 +48,12 @@ function metaFromConfig(
 export function AppConfigPage({
   appType,
   appLabel,
+  clientApp,
 }: {
   appType: string;
   appLabel: string;
+  /** 累加式 app：页面顶部显示「压网关 / 释放」开关，接管状态由该 app 自己的命令回答。 */
+  clientApp?: GatewayClientBarApp;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
@@ -71,9 +75,11 @@ export function AppConfigPage({
   const [saving, setSaving] = useState(false);
   const [switchingRoute, setSwitchingRoute] = useState(false);
   const { data: takeoverStatus } = useProxyTakeoverStatus(false);
-  const adopted = Boolean(
-    (takeoverStatus as Record<string, boolean> | undefined)?.[appType],
-  );
+  const adopted =
+    !clientApp &&
+    Boolean(
+      (takeoverStatus as Record<string, boolean> | undefined)?.[appType],
+    );
 
   useEffect(() => {
     setDraft(configQuery.data ?? {});
@@ -83,7 +89,16 @@ export function AppConfigPage({
     });
   }, [configQuery.data, appLabel]);
 
-  const entries = catalogQuery.data ?? [];
+  // 只列这个 app 真的能用的模型：目录条目的 sources 形如 `claude:CTYun`。
+  const entries = useMemo(
+    () =>
+      (catalogQuery.data ?? []).filter((entry) =>
+        entry.sources.some(
+          (source) => source === appType || source.startsWith(`${appType}:`),
+        ),
+      ),
+    [catalogQuery.data, appType],
+  );
   const slots = slotDefinitions(appType);
   const allowed = draft.allowed ?? [];
 
@@ -110,6 +125,7 @@ export function AppConfigPage({
   };
 
   const toggleRoute = async () => {
+    if (clientApp) return;
     setSwitchingRoute(true);
     try {
       if (adopted) {
@@ -191,26 +207,30 @@ export function AppConfigPage({
           <h2 className="text-lg font-semibold">
             {t("gateway.form.title", { defaultValue: "编辑配置" })}
           </h2>
-          <div className="flex items-center gap-2">
-            <span className={adopted ? "text-caption text-success" : "text-caption text-fg-3"}>
-              {adopted
-                ? t("gateway.form.adoptedBadge", { defaultValue: "已接管" })
-                : t("gateway.form.directBadge", { defaultValue: "未接管" })}
-            </span>
-            <Button
-              variant="neutral"
-              size="sm"
-              disabled={switchingRoute}
-              onClick={() => void toggleRoute()}
-            >
-              {switchingRoute
-                ? t("gateway.form.routeSwitching", { defaultValue: "处理中…" })
-                : adopted
-                  ? t("gateway.form.release", { defaultValue: "释放" })
-                  : t("gateway.form.adopt", { defaultValue: "接管" })}
-            </Button>
-          </div>
+          {clientApp ? null : (
+            <div className="flex items-center gap-2">
+              <span className={adopted ? "text-caption text-success" : "text-caption text-fg-3"}>
+                {adopted
+                  ? t("gateway.form.adoptedBadge", { defaultValue: "已接管" })
+                  : t("gateway.form.directBadge", { defaultValue: "未接管" })}
+              </span>
+              <Button
+                variant="neutral"
+                size="sm"
+                disabled={switchingRoute}
+                onClick={() => void toggleRoute()}
+              >
+                {switchingRoute
+                  ? t("gateway.form.routeSwitching", { defaultValue: "处理中…" })
+                  : adopted
+                    ? t("gateway.form.release", { defaultValue: "释放" })
+                    : t("gateway.form.adopt", { defaultValue: "接管" })}
+              </Button>
+            </div>
+          )}
         </div>
+
+        {clientApp ? <ClientGatewayBar app={clientApp} /> : null}
 
         <div className="grid grid-cols-2 gap-4">
           <Field label={t("gateway.form.agent", { defaultValue: "Agent" })} required>

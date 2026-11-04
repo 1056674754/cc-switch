@@ -100,7 +100,7 @@ import {
 import { UsagePage } from "@/components/usage/UsagePage";
 import { EnvWarningBanner } from "@/components/env/EnvWarningBanner";
 import { AppConfigPage } from "@/components/gateway/AppConfigPage";
-import { ClientGatewayBar } from "@/components/gateway/ClientGatewayBar";
+import { ClientGatewayBar, type GatewayClientBarApp } from "@/components/gateway/ClientGatewayBar";
 import type { AppMode } from "@/types/proxy";
 import UsageScriptModal from "@/components/UsageScriptModal";
 import UnifiedMcpPanel from "@/components/mcp/UnifiedMcpPanel";
@@ -284,6 +284,16 @@ function App() {
 
   const { isRunning: isProxyRunning, takeoverStatus } = useProxyStatus();
   const modeAppId = isModeAppId(activeApp) ? activeApp : null;
+  // 累加式 app：页面也是「编辑配置」，接管开关由它们自己的 cc-switch 配置回答。
+  const [clientPageView, setClientPageView] = useState<"config" | "providers">("config");
+  useEffect(() => {
+    setClientPageView("config");
+  }, [activeApp]);
+  // OpenClaw / Hermes 有自己的页面导航，不在这里改；其余四个累加式 app 用编辑配置页。
+  const CLIENT_APP_IDS: readonly string[] = ["opencode", "pi", "omp", "dsh"];
+  const clientApp: GatewayClientBarApp | null = CLIENT_APP_IDS.includes(activeApp)
+    ? (activeApp as GatewayClientBarApp)
+    : null;
   // 模式（直连 / 路由 / 聚合）已取消：新增供应商表单不再按它选布局。
   const currentModeView: AppMode | undefined = undefined;
   const openAddProvider = (modeView: AppMode | undefined) => {
@@ -1466,6 +1476,56 @@ function App() {
       );
     }
 
+    // 累加式 app：默认打开「编辑配置」，供应商列表放在第二个页签里（原生格式的增删改还在）。
+    if (clientApp) {
+      const pageApp = clientApp;
+      return (
+        <div className="flex min-h-0 flex-1 flex-col">
+          <div
+            role="tablist"
+            aria-label="gateway-client-page"
+            className="flex shrink-0 items-center gap-1 border-b border-border px-6"
+          >
+            {(
+              [
+                ["config", t("gateway.client.tabConfig", { defaultValue: "编辑配置" })],
+                ["providers", t("gateway.client.tabProviders", { defaultValue: "供应商" })],
+              ] as const
+            ).map(([value, label]) => (
+              <button
+                key={value}
+                type="button"
+                role="tab"
+                aria-selected={clientPageView === value}
+                className={
+                  clientPageView === value
+                    ? "border-b-2 border-accent px-3 py-2 text-sm font-medium text-fg-0"
+                    : "border-b-2 border-transparent px-3 py-2 text-sm text-fg-3 hover:text-fg-1"
+                }
+                onClick={() => setClientPageView(value)}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          {clientPageView === "config" ? (
+            <AppConfigPage
+              key={pageApp}
+              appType={pageApp}
+              appLabel={APP_DISPLAY_NAME[pageApp]}
+              clientApp={clientApp}
+            />
+          ) : (
+            renderProviderListBody()
+          )}
+        </div>
+      );
+    }
+
+    return renderProviderListBody();
+  };
+
+  const renderProviderListBody = () => {
     return (
       <div
         ref={providerScrollContainerRef}
@@ -1473,12 +1533,7 @@ function App() {
         className="min-h-0 flex-1 overflow-y-auto scroll-stable overflow-x-hidden px-6 pb-12 pt-4"
       >
         <div className="space-y-4">
-          {activeApp === "opencode" ||
-          activeApp === "hermes" ||
-          activeApp === "openclaw" ||
-          activeApp === "pi" ||
-          activeApp === "omp" ||
-          activeApp === "dsh" ? (
+          {activeApp === "openclaw" || activeApp === "hermes" ? (
             <ClientGatewayBar app={activeApp} />
           ) : null}
           <ProviderList
