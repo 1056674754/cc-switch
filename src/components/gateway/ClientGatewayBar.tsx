@@ -5,7 +5,7 @@ import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { gatewayApi } from "@/lib/api/gateway";
 
-export type GatewayClientBarApp = "opencode" | "hermes" | "openclaw" | "pi" | "omp";
+export type GatewayClientBarApp = "opencode" | "hermes" | "openclaw" | "pi" | "omp" | "dsh";
 
 const APIS = {
   opencode: {
@@ -37,6 +37,12 @@ const APIS = {
     status: () => gatewayApi.getOmpGatewayStatus(),
     adopt: () => gatewayApi.adoptOmpToGateway(),
     release: () => gatewayApi.releaseOmpFromGateway(),
+  },
+  dsh: {
+    label: "DeepSeek Harness",
+    status: () => gatewayApi.getDshGatewayStatus(),
+    adopt: () => gatewayApi.adoptDshToGateway(),
+    release: () => gatewayApi.releaseDshFromGateway(),
   },
 } as const;
 

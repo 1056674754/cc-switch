@@ -124,6 +124,21 @@ export const gatewayApi = {
     return invoke("release_omp_from_gateway");
   },
 
+  /** P4-A：DSH 现在是否已经有 cc-switch provider。 */
+  async getDshGatewayStatus(): Promise<boolean> {
+    return invoke("get_dsh_gateway_status");
+  },
+
+  /** P4-A：把 DSH 的模型来源指向网关（写所有 profile 的 provider）。 */
+  async adoptDshToGateway(): Promise<void> {
+    return invoke("adopt_dsh_to_gateway");
+  },
+
+  /** P4-A：释放 DSH（删 provider、清凭据）。 */
+  async releaseDshFromGateway(): Promise<void> {
+    return invoke("release_dsh_from_gateway");
+  },
+
   /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
   async adoptOpencodeToGateway(): Promise<void> {
     return invoke("adopt_opencode_to_gateway");

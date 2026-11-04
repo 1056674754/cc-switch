@@ -7,6 +7,7 @@ pub mod codex_session_compression;
 pub mod coding_plan;
 pub mod config;
 pub mod dsh_account;
+pub mod dsh_gateway;
 pub mod env_checker;
 pub mod env_manager;
 pub mod exchange_rates;
