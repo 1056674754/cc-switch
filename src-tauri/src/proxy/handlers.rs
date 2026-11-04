@@ -148,21 +148,49 @@ fn is_claude_model_discovery(uri: &axum::http::Uri, headers: &axum::http::Header
 /// Claude Code 的 Stack 模型列表（Anthropic 形状）。只读数据库和 `live-state.json`，不做网络
 /// 请求：客户端只等 3 秒。不在代理模式、名单为空时返回空列表。
 fn claude_model_discovery(state: &ProxyState) -> Value {
+    let mut data: Vec<Value> = Vec::new();
+    // 目录里属于 Claude 的模型：id 就是模型引用（`<供应商名>/<模型 id>`），
+    // 选它就是按模型路由（P2）。
+    let catalog =
+        crate::services::gateway_catalog::catalog_view_cached(&state.db).unwrap_or_else(|error| {
+            log::warn!("[Claude] 读取模型目录失败，只返回 Stack 模型: {error}");
+            Vec::new()
+        });
+    data.extend(
+        catalog
+            .iter()
+            .filter(|entry| {
+                entry
+                    .sources
+                    .iter()
+                    .any(|source| source.starts_with("claude:"))
+            })
+            .map(|entry| {
+                json!({
+                    "type": "model",
+                    "id": entry.reference,
+                    "display_name": entry.display_name.clone().unwrap_or_else(|| entry.model_id.clone()),
+                    "description": crate::mode::stack::provider_model_description(
+                        &entry.upstream_name,
+                        &entry.model_id,
+                        entry.window.unwrap_or(0),
+                    ),
+                })
+            }),
+    );
+    // 旧 Stack id 保留：已经写进客户端设置的还能用
     let models = crate::mode::stack::claude_published_now(&state.db).unwrap_or_else(|error| {
-        log::warn!("[Claude] 读取 Stack 模型失败，返回空列表: {error}");
+        log::warn!("[Claude] 读取 Stack 模型失败，只返回目录模型: {error}");
         Vec::new()
     });
-    let data: Vec<Value> = models
-        .into_iter()
-        .map(|model| {
-            json!({
-                "type": "model",
-                "id": model.id,
-                "display_name": model.display_name,
-                "description": model.description,
-            })
+    data.extend(models.into_iter().map(|model| {
+        json!({
+            "type": "model",
+            "id": model.id,
+            "display_name": model.display_name,
+            "description": model.description,
         })
-        .collect();
+    }));
     json!({
         "data": data,
         "has_more": false,
