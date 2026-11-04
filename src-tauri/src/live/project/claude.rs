@@ -286,6 +286,88 @@ pub fn proxy_projection(
     }
 }
 
+/// 每 app 模型配置（引用形式）落到 Claude Code 客户端上的档位值。
+///
+/// P3「接管」用：和 Stack 模式不同，四档可以各写各的模型引用（`<供应商名>/<模型 id>`），
+/// 没配的档位回落到默认模型，默认也没配就不写。引用由网关在请求时解析成上游。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ModelConfigSlots<'a> {
+    /// 默认模型：(引用, 显示名)。
+    pub default: Option<(&'a str, Option<&'a str>)>,
+    /// 四档：(引用, 显示名)。顺序是 [`Tier::ENV_ORDER`]：haiku、sonnet、opus、fable。
+    pub slots: [Option<(&'a str, Option<&'a str>)>; 4],
+}
+
+impl ModelConfigSlots<'_> {
+    fn is_empty(&self) -> bool {
+        self.default.is_none() && self.slots.iter().all(Option::is_none)
+    }
+
+    /// 写进 `settings.json` 的模型字段：设置的槽位用自己的，否则用默认。
+    fn fields(&self) -> Vec<(&'static str, String)> {
+        let mut fields = Vec::with_capacity(1 + Tier::ENV_ORDER.len() * 2);
+        if let Some((reference, name)) = self.default {
+            fields.push(("ANTHROPIC_MODEL", reference.to_string()));
+            if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+                fields.push(("ANTHROPIC_MODEL_NAME", name.to_string()));
+            }
+        }
+        for (index, tier) in Tier::ENV_ORDER.into_iter().enumerate() {
+            let picked = self.slots[index].or(self.default);
+            let Some((reference, name)) = picked else {
+                continue;
+            };
+            fields.push((tier.model_key(), reference.to_string()));
+            if let Some(name) = name.filter(|name| !name.trim().is_empty()) {
+                fields.push((tier.name_key(), name.to_string()));
+            }
+        }
+        fields
+    }
+}
+
+/// 接管时按每 app 模型配置写代理契约：地址、占位凭据、默认模型与四档。
+///
+/// 配置为空时返回 `None`，调用方回落到原来的路由/Stack 写法。
+#[allow(dead_code)] // 接入 mode::controller 在 P3 下一轮，先保证映射本身可测
+pub fn proxy_projection_from_model_config(
+    route: &ClaudeProjection,
+    proxy_url: &str,
+    auth: ProxyAuth,
+    model_config: &ModelConfigSlots<'_>,
+) -> Option<ClaudeProjection> {
+    if model_config.is_empty() {
+        return None;
+    }
+    let mut env = Map::new();
+    env.insert(
+        "ANTHROPIC_BASE_URL".to_string(),
+        Value::String(proxy_url.to_string()),
+    );
+    for (key, value) in model_config.fields() {
+        env.insert(key.to_string(), Value::String(value));
+    }
+    let placeholder = Value::String(PROXY_TOKEN_PLACEHOLDER.to_string());
+    match auth {
+        ProxyAuth::AuthToken => {
+            env.insert("ANTHROPIC_AUTH_TOKEN".to_string(), placeholder);
+        }
+        ProxyAuth::Managed { auth_token } => {
+            let key = if auth_token {
+                "ANTHROPIC_AUTH_TOKEN"
+            } else {
+                "ANTHROPIC_API_KEY"
+            };
+            env.insert(key.to_string(), placeholder);
+        }
+    }
+    Some(ClaudeProjection {
+        top: Map::new(),
+        env,
+        exclusive: route.exclusive.clone(),
+    })
+}
+
 /// Claude Code 的四个档位。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Tier {
@@ -633,6 +715,96 @@ mod tests {
             "CLAUDE_CODE_MAX_CONTEXT_TOKENS": "262144",
             "CLAUDE_CODE_DISABLE_ARTIFACT": "1"
         }})
+    }
+
+    #[test]
+    fn model_config_projection_writes_default_and_slot_references() {
+        let route = ClaudeProjection::of(&json!({
+            "env": { "ENABLE_TOOL_SEARCH": "true" }
+        }));
+        let config = ModelConfigSlots {
+            default: Some(("CTYun/qwen3.8-max", Some("Qwen3.8 Max"))),
+            slots: [
+                Some(("Kimi/kimi-k3", Some("Kimi K3"))), // haiku
+                None,                                    // sonnet
+                Some(("CTYun/qwen3.8-max", None)),       // opus
+                None,                                    // fable
+            ],
+        };
+        let projected = proxy_projection_from_model_config(
+            &route,
+            "http://127.0.0.1:15721",
+            ProxyAuth::AuthToken,
+            &config,
+        )
+        .expect("projection");
+        let env = |key: &str| projected.env.get(key).and_then(Value::as_str);
+
+        assert_eq!(env("ANTHROPIC_BASE_URL"), Some("http://127.0.0.1:15721"));
+        assert_eq!(env("ANTHROPIC_AUTH_TOKEN"), Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_eq!(env("ANTHROPIC_MODEL"), Some("CTYun/qwen3.8-max"));
+        assert_eq!(env("ANTHROPIC_MODEL_NAME"), Some("Qwen3.8 Max"));
+
+        // 设了的槽位写自己的引用和显示名
+        assert_eq!(env("ANTHROPIC_DEFAULT_HAIKU_MODEL"), Some("Kimi/kimi-k3"));
+        assert_eq!(env("ANTHROPIC_DEFAULT_HAIKU_MODEL_NAME"), Some("Kimi K3"));
+        assert_eq!(
+            env("ANTHROPIC_DEFAULT_OPUS_MODEL"),
+            Some("CTYun/qwen3.8-max")
+        );
+        assert_eq!(env("ANTHROPIC_DEFAULT_OPUS_MODEL_NAME"), None);
+        // 没设的槽位回落到默认
+        for role in ["SONNET", "FABLE"] {
+            assert_eq!(
+                env(&format!("ANTHROPIC_DEFAULT_{role}_MODEL")),
+                Some("CTYun/qwen3.8-max")
+            );
+            assert_eq!(
+                env(&format!("ANTHROPIC_DEFAULT_{role}_MODEL_NAME")),
+                Some("Qwen3.8 Max")
+            );
+        }
+        // 路由那家的独有字段原样保留（客户端发请求时生效）
+        assert_eq!(projected.exclusive, route.exclusive);
+        // 不再写 claude-* 别名，也不写子代理模型
+        assert!(env("CLAUDE_CODE_SUBAGENT_MODEL").is_none());
+    }
+
+    #[test]
+    fn empty_model_config_returns_none_so_callers_keep_the_old_writing() {
+        let route = ClaudeProjection::default();
+        assert!(proxy_projection_from_model_config(
+            &route,
+            "http://127.0.0.1:15721",
+            ProxyAuth::AuthToken,
+            &ModelConfigSlots::default(),
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn model_config_projection_without_default_writes_only_configured_slots() {
+        let route = ClaudeProjection::default();
+        let config = ModelConfigSlots {
+            default: None,
+            slots: [None, None, None, Some(("Kimi/kimi-k3", None))], // fable
+        };
+        let projected = proxy_projection_from_model_config(
+            &route,
+            "http://127.0.0.1:15721",
+            ProxyAuth::Managed { auth_token: false },
+            &config,
+        )
+        .expect("projection");
+        let env = |key: &str| projected.env.get(key).and_then(Value::as_str);
+        assert_eq!(env("ANTHROPIC_MODEL"), None);
+        assert_eq!(env("ANTHROPIC_DEFAULT_FABLE_MODEL"), Some("Kimi/kimi-k3"));
+        for role in ["HAIKU", "SONNET", "OPUS"] {
+            assert_eq!(env(&format!("ANTHROPIC_DEFAULT_{role}_MODEL")), None);
+        }
+        // Managed 且用 API key 字段时写 ANTHROPIC_API_KEY
+        assert_eq!(env("ANTHROPIC_API_KEY"), Some(PROXY_TOKEN_PLACEHOLDER));
+        assert_eq!(env("ANTHROPIC_AUTH_TOKEN"), None);
     }
 
     #[test]
