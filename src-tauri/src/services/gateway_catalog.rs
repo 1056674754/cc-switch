@@ -8,6 +8,7 @@
 //! `sources` 记下是哪些 app 的行贡献的。
 
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 use serde::Serialize;
 use serde_json::Value;
@@ -89,8 +90,109 @@ fn raw_models(app: &AppType, provider: &Provider) -> Vec<RawModel> {
                 })
                 .collect()
         }
-        _ => Vec::new(),
+        _ => config_models(app, provider),
     }
+}
+
+/// 累加式 app 的模型：各家配置里的 `models` 容器形态不同，统一按下面三种读。
+///
+/// - 对象：`id → 元信息`（opencode/opencode V2/dsh/kimi/mcode）；kimi 的键是
+///   `<provider>/<model>`，上游模型名取内层的 `model` 字段
+/// - 数组：元素带 `id`（omp/openclaw），或只有一个键的对象（hermes）
+/// - 字符串数组：模型名本身就是 id
+fn config_models(app: &AppType, provider: &Provider) -> Vec<RawModel> {
+    let settings = match app {
+        // opencode 的 settings_config 可能是整份文件（旧数据），按读取路径抽那一条声明
+        AppType::OpenCode => {
+            crate::opencode_config::provider_fragment(&provider.id, &provider.settings_config, None)
+                .map(|(fragment, _)| fragment.clone())
+                .unwrap_or_else(|_| provider.settings_config.clone())
+        }
+        _ => provider.settings_config.clone(),
+    };
+    let Some(models) = settings.get("models") else {
+        return Vec::new();
+    };
+    let mut found: Vec<RawModel> = Vec::new();
+    let mut push = |model: &str, meta: Option<&Value>, found: &mut Vec<RawModel>| {
+        let model = model.trim();
+        if model.is_empty() {
+            return;
+        }
+        let one_m = model.to_ascii_lowercase().contains("[1m]");
+        let model = strip_one_m_suffix_for_upstream(model).trim().to_string();
+        let display = meta
+            .and_then(|meta| {
+                ["name", "display_name", "displayName", "label"]
+                    .iter()
+                    .find_map(|key| meta.get(*key).and_then(Value::as_str))
+            })
+            .map(|name| name.trim().to_string())
+            .filter(|name| !name.is_empty());
+        let window = meta.and_then(model_window);
+        match found.iter_mut().find(|entry| entry.model == model) {
+            Some(entry) => {
+                entry.one_m |= one_m;
+                if entry.display.is_none() {
+                    entry.display = display;
+                }
+                if entry.window.is_none() {
+                    entry.window = window;
+                }
+            }
+            None => found.push(RawModel {
+                model,
+                display,
+                one_m,
+                window,
+            }),
+        }
+    };
+    match models {
+        Value::Object(map) => {
+            for (key, meta) in map {
+                let model = meta
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .filter(|model| !model.trim().is_empty())
+                    .unwrap_or(key);
+                push(model, Some(meta), &mut found);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                match item {
+                    Value::String(model) => push(model, None, &mut found),
+                    Value::Object(map) => {
+                        if let Some(id) = map.get("id").and_then(Value::as_str) {
+                            push(id, Some(item), &mut found);
+                        } else if map.len() == 1 {
+                            let (key, meta) = map.iter().next().expect("one entry");
+                            push(key, Some(meta), &mut found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
+/// 模型元信息里的窗口字段：各家叫法不同。
+fn model_window(meta: &Value) -> Option<u64> {
+    for key in ["contextWindow", "max_context_size", "context_length"] {
+        if let Some(window) = meta.get(key).and_then(Value::as_u64) {
+            return Some(window);
+        }
+    }
+    for pointer in ["/limit/context", "/limits/context"] {
+        if let Some(window) = meta.pointer(pointer).and_then(Value::as_u64) {
+            return Some(window);
+        }
+    }
+    None
 }
 
 /// 把一条原始模型并进目录：同（端点, 模型）合并显示信息，`one_m` 取或。
@@ -141,7 +243,8 @@ fn merge(
 /// 从库里派生整份目录。读之前先对账绑定（从未走过代理的 app 在库里没有绑定）。
 pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
     // 1. 先对账：绑定由路由器的读路径派生，没走过代理的 app 需要补。
-    let (bindings, endpoint_upstream): (
+    let (apps, bindings, endpoint_upstream): (
+        Vec<String>,
         BTreeMap<(String, String), String>,
         BTreeMap<String, String>,
     ) = {
@@ -170,12 +273,15 @@ pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?;
         let endpoints = rows.collect::<Result<BTreeMap<_, _>, _>>()?;
-        (bindings, endpoints)
+        (apps, bindings, endpoints)
     };
 
     // 2. 逐 app 读 provider 行，用现有推导函数取模型，按（端点, 模型）合并。
     let mut entries: BTreeMap<(String, String), CatalogEntry> = BTreeMap::new();
-    for app in [AppType::Claude, AppType::ClaudeDesktop, AppType::Codex] {
+    for app in &apps {
+        let Ok(app) = AppType::from_str(app) else {
+            continue;
+        };
         let providers = match db.get_all_providers(app.as_str()) {
             Ok(providers) => providers,
             Err(error) => {
