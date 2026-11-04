@@ -17,6 +17,37 @@ pub fn get_gateway_catalog(
     gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())
 }
 
+/// P4-A：把 OpenCode 指到网关 —— 写一条 `cc-switch` provider，模型用当前配置里的引用。
+/// 需要网关已启动：先有网关地址，才写得出 baseURL。
+#[tauri::command(async)]
+pub async fn adopt_opencode_to_gateway(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let config = state
+        .db
+        .get_app_model_config("opencode")
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "OpenCode 还没有模型配置，先在应用页保存一次".to_string())?;
+    let catalog =
+        gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())?;
+    let plan = crate::services::opencode_gateway::plan(&config, &catalog)
+        .map_err(|error| error.to_string())?;
+    let status = state
+        .proxy_service
+        .get_status()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !status.running {
+        return Err("网关未启动，先在设置里打开总开关".to_string());
+    }
+    let origin = crate::services::proxy::proxy_origin(&status.address, status.port);
+    crate::services::opencode_gateway::apply(&origin, &plan).map_err(|error| error.to_string())
+}
+
+/// P4-A：释放 OpenCode —— 删掉 `cc-switch` provider。
+#[tauri::command(async)]
+pub fn release_opencode_from_gateway() -> Result<(), String> {
+    crate::services::opencode_gateway::release().map_err(|error| error.to_string())
+}
+
 /// 供应商卡片里的模型列表用：目录已应用过人工覆盖（隐藏的不出现、显示名已替换），
 /// 这里额外给「覆盖本身」，界面才能标出哪些是改过的、并提供还原。
 #[tauri::command(async)]

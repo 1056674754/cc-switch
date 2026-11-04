@@ -59,6 +59,16 @@ export const gatewayApi = {
     });
   },
 
+  /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
+  async adoptOpencodeToGateway(): Promise<void> {
+    return invoke("adopt_opencode_to_gateway");
+  },
+
+  /** P4-A：释放 OpenCode（删掉 cc-switch provider）。 */
+  async releaseOpencodeFromGateway(): Promise<void> {
+    return invoke("release_opencode_from_gateway");
+  },
+
   /** 接管：把该 app 的客户端指到网关（替代「进入路由模式」）。 */
   async adopt(appType: string): Promise<void> {
     return invoke("adopt_app_to_gateway", { appType });
