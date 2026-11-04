@@ -12,7 +12,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::mode::stack::StackTarget;
-use crate::services::gateway_catalog::{resolve_reference, CatalogViewEntry};
+use crate::services::gateway_catalog::{catalog_view_cached, resolve_reference, CatalogViewEntry};
 
 /// 把 `<供应商名>/<模型 id>` 解析成转发目标。不是引用形状时返回 `None`。
 ///
@@ -211,6 +211,75 @@ mod tests {
             allowed: allowed.iter().map(|value| value.to_string()).collect(),
             routing: None,
         }
+    }
+
+    /// 真机烟测（默认忽略）：把真实 cc-switch.db 的**副本**放进临时 home，
+    /// 让 `Database::init()` 走一遍真实迁移，再验证目录派生和引用解析。
+    ///
+    /// 跑法：`CC_SWITCH_REAL_DB=~/.cc-switch/cc-switch.db cargo test --lib
+    /// real_db_copy_migrates -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要 CC_SWITCH_REAL_DB 指向真实 cc-switch.db 的副本"]
+    #[serial_test::serial]
+    fn real_db_copy_migrates_to_current_schema_and_derives_catalog() {
+        let source = std::env::var("CC_SWITCH_REAL_DB").expect("CC_SWITCH_REAL_DB");
+        let home = tempfile::tempdir().expect("temp home");
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        let db_path = config_dir.join("cc-switch.db");
+        std::fs::copy(&source, &db_path).expect("copy real db");
+
+        let user_version = |path: &std::path::Path| -> i32 {
+            let conn = rusqlite::Connection::open(path).expect("open copy");
+            conn.query_row("PRAGMA user_version", [], |row| row.get(0))
+                .expect("user_version")
+        };
+        let before = user_version(&db_path);
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let db = Database::init().expect("migrate db copy");
+        let after = user_version(&db_path);
+        eprintln!("user_version: {before} -> {after}");
+        assert_eq!(after, crate::database::SCHEMA_VERSION);
+        assert!(after >= before, "迁移不能降版本");
+
+        let conn = rusqlite::Connection::open(&db_path).expect("reopen copy");
+        let table_count: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='gateway_app_profiles'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("gateway_app_profiles");
+        assert_eq!(table_count, 1, "迁移后应该有 gateway_app_profiles");
+        let upstreams: i64 = conn
+            .query_row("SELECT count(*) FROM upstreams", [], |row| row.get(0))
+            .expect("upstreams");
+        eprintln!("upstreams in real db: {upstreams}");
+        assert!(upstreams > 0, "真实库应该有供应商");
+
+        let catalog = catalog_view_cached(&db).expect("derive catalog from real db");
+        eprintln!("catalog entries: {}", catalog.len());
+        assert!(!catalog.is_empty(), "真实库的目录不该是空的");
+
+        let entry = catalog
+            .iter()
+            .find(|entry| {
+                entry
+                    .sources
+                    .iter()
+                    .any(|source| source.starts_with("claude:"))
+            })
+            .expect("real db has a claude-bound supplier");
+        let target = resolve_reference_target(&db, &AppType::Claude, &entry.reference)
+            .expect("resolve against real catalog")
+            .expect("hit");
+        assert!(!target.provider.id.is_empty());
+        eprintln!(
+            "resolved {} -> provider {} model {}",
+            entry.reference, target.provider.id, target.upstream_model
+        );
+
+        std::env::remove_var("CC_SWITCH_TEST_HOME");
     }
 
     #[test]
