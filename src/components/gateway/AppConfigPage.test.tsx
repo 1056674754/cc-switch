@@ -34,6 +34,11 @@ vi.mock("@/lib/toast", () => ({
   toast: { success: vi.fn(), error: vi.fn() },
 }));
 
+vi.mock("@/lib/query/proxy", () => ({
+  proxyKeys: { takeoverStatus: ["takeover"], status: ["status"] },
+  useProxyTakeoverStatus: () => ({ data: {}, isPending: false }),
+}));
+
 import { AppConfigPage } from "./AppConfigPage";
 
 const entries: GatewayCatalogEntry[] = [

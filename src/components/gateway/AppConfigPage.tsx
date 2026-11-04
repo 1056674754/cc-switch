@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useProxyTakeoverStatus } from "@/lib/query/proxy";
+import { proxyKeys } from "@/lib/query/proxy";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -67,6 +69,11 @@ export function AppConfigPage({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [saving, setSaving] = useState(false);
+  const [switchingRoute, setSwitchingRoute] = useState(false);
+  const { data: takeoverStatus } = useProxyTakeoverStatus(false);
+  const adopted = Boolean(
+    (takeoverStatus as Record<string, boolean> | undefined)?.[appType],
+  );
 
   useEffect(() => {
     setDraft(configQuery.data ?? {});
@@ -100,6 +107,35 @@ export function AppConfigPage({
       ? [...allowed.filter((item) => item !== reference), reference]
       : allowed.filter((item) => item !== reference);
     setDraft({ ...draft, allowed: next });
+  };
+
+  const toggleRoute = async () => {
+    setSwitchingRoute(true);
+    try {
+      if (adopted) {
+        await gatewayApi.release(appType);
+      } else {
+        await gatewayApi.adopt(appType);
+      }
+      await queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
+      await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+      toast.success(
+        adopted
+          ? t("gateway.form.released", { defaultValue: "已释放，客户端配置已还原" })
+          : t("gateway.form.adopted", {
+              defaultValue: "已接管，客户端指向网关",
+            }),
+      );
+    } catch (error) {
+      toast.error(
+        t("gateway.form.routeFailed", {
+          defaultValue: "切换失败：{{error}}",
+          error: String(error),
+        }),
+      );
+    } finally {
+      setSwitchingRoute(false);
+    }
   };
 
   const save = async () => {
@@ -151,9 +187,30 @@ export function AppConfigPage({
       className="flex min-h-0 flex-1 flex-col overflow-y-auto scroll-stable"
     >
       <div className="mx-auto flex w-full max-w-4xl flex-col gap-5 p-6">
-        <h2 className="text-lg font-semibold">
-          {t("gateway.form.title", { defaultValue: "编辑配置" })}
-        </h2>
+        <div className="flex items-center justify-between gap-3">
+          <h2 className="text-lg font-semibold">
+            {t("gateway.form.title", { defaultValue: "编辑配置" })}
+          </h2>
+          <div className="flex items-center gap-2">
+            <span className={adopted ? "text-caption text-success" : "text-caption text-fg-3"}>
+              {adopted
+                ? t("gateway.form.adoptedBadge", { defaultValue: "已接管" })
+                : t("gateway.form.directBadge", { defaultValue: "未接管" })}
+            </span>
+            <Button
+              variant="neutral"
+              size="sm"
+              disabled={switchingRoute}
+              onClick={() => void toggleRoute()}
+            >
+              {switchingRoute
+                ? t("gateway.form.routeSwitching", { defaultValue: "处理中…" })
+                : adopted
+                  ? t("gateway.form.release", { defaultValue: "释放" })
+                  : t("gateway.form.adopt", { defaultValue: "接管" })}
+            </Button>
+          </div>
+        </div>
 
         <div className="grid grid-cols-2 gap-4">
           <Field label={t("gateway.form.agent", { defaultValue: "Agent" })} required>
