@@ -95,6 +95,27 @@ pub async fn set_proxy_takeover_for_app(
     }
 }
 
+/// 接管：把这个应用的客户端指到网关（P3 的新名字，替代「进入路由模式」）。
+/// 底层还是 `enter`：写代理契约、记录契约、启动代理，幂等。
+#[tauri::command]
+pub async fn adopt_app_to_gateway(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<(), String> {
+    let app = require_mode_app(&app_type)?;
+    crate::mode::controller::enter(state.inner(), &app, false).await
+}
+
+/// 释放：把客户端文件还原成接管前的样子（P3 的新名字，替代「退出路由模式」）。
+#[tauri::command]
+pub async fn release_app_from_gateway(
+    state: tauri::State<'_, AppState>,
+    app_type: String,
+) -> Result<(), String> {
+    let app = require_mode_app(&app_type)?;
+    crate::mode::controller::exit(state.inner(), &app).await
+}
+
 /// 应用页模式行用：生效的模式、路由目标（直连时是上次路由的那家）、直连那家。
 #[tauri::command]
 pub async fn get_app_mode(

@@ -1804,6 +1804,8 @@ pub fn run() {
             commands::stop_proxy_with_restore,
             commands::get_proxy_takeover_status,
             commands::set_proxy_takeover_for_app,
+            commands::adopt_app_to_gateway,
+            commands::release_app_from_gateway,
             commands::get_app_mode,
             commands::set_proxy_route,
             commands::take_startup_attach_failures,

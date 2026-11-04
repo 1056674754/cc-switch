@@ -22,4 +22,14 @@ export const gatewayApi = {
   async migrateFromStack(): Promise<AppMigration[]> {
     return invoke("migrate_gateway_from_stack");
   },
+
+  /** 接管：把该 app 的客户端指到网关（替代「进入路由模式」）。 */
+  async adopt(appType: string): Promise<void> {
+    return invoke("adopt_app_to_gateway", { appType });
+  },
+
+  /** 释放：把客户端文件还原成接管前的样子（替代「退出路由模式」）。 */
+  async release(appType: string): Promise<void> {
+    return invoke("release_app_from_gateway", { appType });
+  },
 };
