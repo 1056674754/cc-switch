@@ -339,6 +339,16 @@ impl ProxyServer {
                 "/codex/v1/chat/completions",
                 post(handlers::handle_chat_completions),
             )
+            // 累加式 app（P4-A：路径前缀归属）。请求形状同 chat completions，
+            // 归属按前缀走 OpenCode 的模型配置。
+            .route(
+                "/opencode/v1/chat/completions",
+                post(handlers::handle_opencode_chat_completions),
+            )
+            .route(
+                "/opencode/chat/completions",
+                post(handlers::handle_opencode_chat_completions),
+            )
             // OpenAI Models API (Codex CLI reachability check)
             .route("/models", get(handlers::handle_models))
             .route("/v1/models", get(handlers::handle_models))

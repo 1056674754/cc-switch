@@ -1065,6 +1065,25 @@ pub async fn handle_chat_completions(
     State(state): State<ProxyState>,
     request: axum::extract::Request,
 ) -> Result<axum::response::Response, ProxyError> {
+    serve_chat_completions(state, request, AppType::Codex, "Codex", "codex").await
+}
+
+/// 累加式 app（OpenCode）的 chat completions 入口：P4 选定的「路径前缀归属」。
+/// 请求形状和 Codex 一样，区别只在归属的 app（决定用哪套模型配置、日志算谁的）。
+pub async fn handle_opencode_chat_completions(
+    State(state): State<ProxyState>,
+    request: axum::extract::Request,
+) -> Result<axum::response::Response, ProxyError> {
+    serve_chat_completions(state, request, AppType::OpenCode, "OpenCode", "opencode").await
+}
+
+async fn serve_chat_completions(
+    state: ProxyState,
+    request: axum::extract::Request,
+    app: AppType,
+    app_title: &'static str,
+    app_slug: &'static str,
+) -> Result<axum::response::Response, ProxyError> {
     let (parts, req_body) = request.into_parts();
     let method = parts.method.clone();
     let uri = parts.uri;
@@ -1078,7 +1097,7 @@ pub async fn handle_chat_completions(
     let body_bytes = decode_codex_request_body(&mut headers, body_bytes)?;
     let mut body: Value = serde_json::from_slice(&body_bytes)
         .map_err(|e| ProxyError::Internal(format!("Failed to parse request body: {e}")))?;
-    let stack = match resolve_stack_target(&state, &AppType::Codex, &mut body) {
+    let stack = match resolve_stack_target(&state, &app, &mut body) {
         Ok(stack) => stack,
         Err(rejected) => return Ok(*rejected),
     };
@@ -1087,9 +1106,9 @@ pub async fn handle_chat_completions(
         &state,
         &body,
         &headers,
-        AppType::Codex,
-        "Codex",
-        "codex",
+        app.clone(),
+        app_title,
+        app_slug,
         stack,
     )
     .await?;
@@ -1103,7 +1122,7 @@ pub async fn handle_chat_completions(
     let forwarder = ctx.create_forwarder(&state);
     let mut result = match forwarder
         .forward_with_retry(
-            &AppType::Codex,
+            &app,
             method,
             &endpoint,
             body,
