@@ -108,6 +108,11 @@ pub fn release() -> Result<(), AppError> {
 mod tests {
     use super::*;
     use crate::services::gateway_catalog::CatalogViewEntry;
+    use crate::settings::{get_settings, update_settings, AppSettings};
+    use serial_test::serial;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::path::PathBuf;
 
     fn entry(reference: &str, model_id: &str, display: Option<&str>) -> CatalogViewEntry {
         CatalogViewEntry {
@@ -165,6 +170,88 @@ mod tests {
     fn plan_rejects_a_reference_missing_from_the_catalog() {
         let error = plan(&config("CTYun/nope", &[], &[]), &[]).unwrap_err();
         assert!(error.to_string().contains("CTYun/nope"), "{error}");
+    }
+
+    struct FileFixture {
+        previous_settings: AppSettings,
+        previous_env: Vec<(&'static str, Option<OsString>)>,
+        config_path: PathBuf,
+        _dir: tempfile::TempDir,
+    }
+
+    impl FileFixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let previous_env = ["CC_SWITCH_TEST_HOME"]
+                .into_iter()
+                .map(|key| (key, std::env::var_os(key)))
+                .collect();
+            std::env::set_var("CC_SWITCH_TEST_HOME", dir.path());
+            let previous_settings = get_settings();
+            let config_dir = dir.path().join("opencode");
+            fs::create_dir_all(&config_dir).unwrap();
+            update_settings(AppSettings {
+                opencode_config_dir: Some(config_dir.to_string_lossy().into_owned()),
+                ..Default::default()
+            })
+            .unwrap();
+            let config_path = config_dir.join("opencode.json");
+            fs::write(
+                &config_path,
+                "{\n  // 用户自己的注释\n  \"model\": \"user/x\",\n  \"provider\": {\n    \"user\": { \"npm\": \"@ai-sdk/openai\" }\n  }\n}\n",
+            )
+            .unwrap();
+            Self {
+                previous_settings,
+                previous_env,
+                config_path,
+                _dir: dir,
+            }
+        }
+    }
+
+    impl Drop for FileFixture {
+        fn drop(&mut self) {
+            update_settings(self.previous_settings.clone()).unwrap();
+            for (key, value) in &self.previous_env {
+                match value {
+                    Some(value) => std::env::set_var(key, value),
+                    None => std::env::remove_var(key),
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn apply_writes_the_provider_and_keeps_user_content_and_comments() {
+        let fixture = FileFixture::new();
+        let plan = OpencodeGatewayPlan {
+            default_model: "kimi-k3".to_string(),
+            models: [("kimi-k3".to_string(), "Kimi K3".to_string())]
+                .into_iter()
+                .collect(),
+        };
+        apply("http://127.0.0.1:15721", &plan).unwrap();
+
+        let text = fs::read_to_string(&fixture.config_path).unwrap();
+        assert!(text.contains("// 用户自己的注释"), "{text}");
+        let value = crate::opencode_config::read_opencode_config().unwrap();
+        assert_eq!(
+            value["provider"]["cc-switch"]["options"]["baseURL"],
+            json!("http://127.0.0.1:15721/opencode/v1")
+        );
+        assert_eq!(
+            value["provider"]["cc-switch"]["models"]["kimi-k3"]["name"],
+            json!("Kimi K3")
+        );
+        assert_eq!(value["model"], json!("cc-switch/kimi-k3"));
+        assert_eq!(value["provider"]["user"]["npm"], json!("@ai-sdk/openai"));
+
+        release().unwrap();
+        let value = crate::opencode_config::read_opencode_config().unwrap();
+        assert!(value["provider"]["cc-switch"].is_null());
+        assert_eq!(value["provider"]["user"]["npm"], json!("@ai-sdk/openai"));
     }
 
     #[test]
