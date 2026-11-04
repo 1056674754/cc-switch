@@ -11,6 +11,7 @@ import {
 import { describe, it, expect, beforeEach, vi } from "vitest";
 import { http, HttpResponse } from "msw";
 import { providersApi } from "@/lib/api/providers";
+import type { Provider } from "@/types";
 import {
   resetProviderState,
   setCurrentProviderId,
@@ -208,9 +209,19 @@ vi.mock("@/components/mcp/UnifiedMcpPanel", async () => {
   return { default: Body };
 });
 
-/** 侧栏里的应用行（v7 侧栏取代了原来页头的应用切换器） */
-const seedProviderApp = (appType: "opencode" | "hermes") => {
-  const make = (id: string, name: string, category: string, sortIndex: number) => ({
+/**
+ * 模式应用（claude / claude-desktop / codex / gemini / grokbuild）的应用页换成了
+ * 「编辑配置」表单，供应商列表只在其它应用的页面上。供应商流程改在
+ * opencode / hermes / agy 上跑：其中 agy 不是累加式应用，新建和复制不要求
+ * providerKey，能覆盖完整的新增、编辑、切换、复制路径。
+ */
+const seedProviderApp = (appType: "opencode" | "hermes" | "agy") => {
+  const make = (
+    id: string,
+    name: string,
+    category: "official" | "custom",
+    sortIndex: number,
+  ): Provider => ({
     id,
     name,
     settingsConfig: {},
@@ -221,10 +232,11 @@ const seedProviderApp = (appType: "opencode" | "hermes") => {
   setProviders(appType, {
     [`${appType}-1`]: make(`${appType}-1`, `${appType} Default`, "official", 0),
     [`${appType}-2`]: make(`${appType}-2`, `${appType} Secondary`, "custom", 1),
-  } as never);
+  });
   setCurrentProviderId(appType, `${appType}-1`);
 };
 
+/** 侧栏里的应用行（v7 侧栏取代了原来页头的应用切换器） */
 const sidebarApp = (name: string) =>
   // 首次启动提示是模态对话框，会把侧栏标成 aria-hidden，所以带上 hidden
   within(document.querySelector("nav") as HTMLElement).getByRole("button", {
@@ -266,14 +278,24 @@ describe("App integration with MSW", () => {
   });
 
   it("covers basic provider flows via real hooks", async () => {
-    const { default: App } = await import("@/App");
     seedProviderApp("opencode");
+    seedProviderApp("agy");
+
+    const { default: App } = await import("@/App");
     renderApp(App);
 
+    // 换应用会重读该应用的供应商：OpenCode 的列表不再从 claude 那边拿
     fireEvent.click(sidebarApp("OpenCode"));
     await waitFor(() =>
       expect(screen.getByTestId("provider-list").textContent).toContain(
         "opencode-1",
+      ),
+    );
+
+    fireEvent.click(sidebarApp("Antigravity"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toContain(
+        "agy-1",
       ),
     );
 
@@ -283,14 +305,39 @@ describe("App integration with MSW", () => {
     await waitFor(() => expect(toastSuccessMock).toHaveBeenCalled());
     fireEvent.click(screen.getByText("close-usage"));
 
+    fireEvent.click(screen.getByText("create"));
+    expect(screen.getByTestId("add-provider-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("confirm-add"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toMatch(
+        /New agy Provider/,
+      ),
+    );
+
+    fireEvent.click(screen.getByText("edit"));
+    expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
+    fireEvent.click(screen.getByText("confirm-edit"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toMatch(
+        /-edited/,
+      ),
+    );
+
+    fireEvent.click(screen.getByText("switch"));
+    fireEvent.click(screen.getByText("duplicate"));
+    await waitFor(() =>
+      expect(screen.getByTestId("provider-list").textContent).toMatch(/copy/),
+    );
+
     fireEvent.click(screen.getByText("open-website"));
 
     emitTauriEvent("provider-switched", {
-      appType: "opencode",
-      providerId: "opencode-2",
+      appType: "agy",
+      providerId: "agy-2",
     });
 
     expect(toastErrorMock).not.toHaveBeenCalled();
+    expect(toastSuccessMock).toHaveBeenCalled();
   }, 10_000);
 
   it("refreshes the route pointer when the proxy fails over to another provider", async () => {
@@ -341,7 +388,7 @@ describe("App integration with MSW", () => {
     );
 
     const mainScrollContainer = container.querySelector("main") as HTMLElement;
-    // 列表的滚动区在模式行下面（切换式应用每个应用一份）
+    // 列表的滚动区：换应用时和 main 一起回到顶部
     const providerScrollContainer = () =>
       container.querySelector<HTMLElement>("#main-content");
 
@@ -380,8 +427,8 @@ describe("App integration with MSW", () => {
       ),
     );
 
-    // 面板只盖住内容区，侧栏还能点：切应用时编辑面板必须关掉，否则 Claude 的
-    // 供应商会以 appId=codex 保存进 Codex
+    // 面板只盖住内容区，侧栏还能点：切应用时编辑面板必须关掉，否则 OpenCode 的
+    // 供应商会以 appId=hermes 保存进 Hermes
     fireEvent.click(screen.getByText("edit"));
     expect(screen.getByTestId("edit-provider-dialog")).toBeInTheDocument();
     fireEvent.click(sidebarApp("Hermes"));
@@ -488,9 +535,21 @@ describe("App integration with MSW", () => {
   }, 10_000);
 
   it("shows toast when auto sync fails in background", async () => {
+    // 模式应用的应用页现在是「编辑配置」表单：等它替换掉旧的供应商列表再发事件
+    server.use(
+      http.post("http://tauri.local/get_gateway_catalog", () =>
+        HttpResponse.json([]),
+      ),
+      http.post("http://tauri.local/get_app_model_config", () =>
+        HttpResponse.json({}),
+      ),
+    );
+
     const { default: App } = await import("@/App");
     renderApp(App);
 
+    expect(await screen.findByText("编辑配置")).toBeInTheDocument();
+    expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
 
     expect(() => {
       emitTauriEvent("webdav-sync-status-updated", null);
