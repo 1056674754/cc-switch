@@ -170,6 +170,44 @@ pub fn release_pi_from_gateway() -> Result<(), String> {
     crate::services::pi_gateway::release().map_err(|error| error.to_string())
 }
 
+/// P4-A：把 OMP 的模型来源指向网关（写 models.yml 的 cc-switch provider）。
+#[tauri::command(async)]
+pub async fn adopt_omp_to_gateway(state: tauri::State<'_, AppState>) -> Result<(), String> {
+    let config = state
+        .db
+        .get_app_model_config("omp")
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "OMP 还没有模型配置，先在应用页保存一次".to_string())?;
+    let catalog =
+        gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())?;
+    let plan = crate::services::opencode_gateway::plan(&config, &catalog)
+        .map_err(|error| error.to_string())?;
+    let status = state
+        .proxy_service
+        .get_status()
+        .await
+        .map_err(|error| error.to_string())?;
+    if !status.running {
+        return Err("网关未启动，先在设置里打开总开关".to_string());
+    }
+    let origin = crate::services::proxy::proxy_origin(&status.address, status.port);
+    crate::services::omp_gateway::apply(&origin, &plan).map_err(|error| error.to_string())
+}
+
+/// P4-A：OMP 是否已经有 cc-switch provider。
+#[tauri::command(async)]
+pub fn get_omp_gateway_status() -> Result<bool, String> {
+    Ok(crate::omp_config::get_providers()
+        .map_err(|error| error.to_string())?
+        .contains_key(crate::services::omp_gateway::PROVIDER_ID))
+}
+
+/// P4-A：释放 OMP（删 provider，默认模型不动）。
+#[tauri::command(async)]
+pub fn release_omp_from_gateway() -> Result<(), String> {
+    crate::services::omp_gateway::release().map_err(|error| error.to_string())
+}
+
 /// 供应商卡片里的模型列表用：目录已应用过人工覆盖（隐藏的不出现、显示名已替换），
 /// 这里额外给「覆盖本身」，界面才能标出哪些是改过的、并提供还原。
 #[tauri::command(async)]

@@ -1476,7 +1476,8 @@ function App() {
           {activeApp === "opencode" ||
           activeApp === "hermes" ||
           activeApp === "openclaw" ||
-          activeApp === "pi" ? (
+          activeApp === "pi" ||
+          activeApp === "omp" ? (
             <ClientGatewayBar app={activeApp} />
           ) : null}
           <ProviderList

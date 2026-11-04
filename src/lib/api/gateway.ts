@@ -109,6 +109,21 @@ export const gatewayApi = {
     return invoke("release_pi_from_gateway");
   },
 
+  /** P4-A：OMP 现在是否已经有 cc-switch provider。 */
+  async getOmpGatewayStatus(): Promise<boolean> {
+    return invoke("get_omp_gateway_status");
+  },
+
+  /** P4-A：把 OMP 的模型来源指向网关（写 models.yml 的 provider）。 */
+  async adoptOmpToGateway(): Promise<void> {
+    return invoke("adopt_omp_to_gateway");
+  },
+
+  /** P4-A：释放 OMP（删 provider）。 */
+  async releaseOmpFromGateway(): Promise<void> {
+    return invoke("release_omp_from_gateway");
+  },
+
   /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
   async adoptOpencodeToGateway(): Promise<void> {
     return invoke("adopt_opencode_to_gateway");
