@@ -1578,6 +1578,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::get_providers,
+            commands::get_gateway_catalog,
             commands::get_suppliers_overview,
             commands::update_supplier_base_url,
             commands::adopt_supplier,
