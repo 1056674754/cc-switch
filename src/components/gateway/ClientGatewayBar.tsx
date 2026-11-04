@@ -5,7 +5,7 @@ import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { gatewayApi } from "@/lib/api/gateway";
 
-export type GatewayClientBarApp = "opencode" | "hermes";
+export type GatewayClientBarApp = "opencode" | "hermes" | "openclaw";
 
 const APIS = {
   opencode: {
@@ -19,6 +19,12 @@ const APIS = {
     status: () => gatewayApi.getHermesGatewayStatus(),
     adopt: () => gatewayApi.adoptHermesToGateway(),
     release: () => gatewayApi.releaseHermesFromGateway(),
+  },
+  openclaw: {
+    label: "OpenClaw",
+    status: () => gatewayApi.getOpenclawGatewayStatus(),
+    adopt: () => gatewayApi.adoptOpenclawToGateway(),
+    release: () => gatewayApi.releaseOpenclawFromGateway(),
   },
 } as const;
 

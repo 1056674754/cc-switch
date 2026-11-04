@@ -21,6 +21,7 @@ pub mod mcp_connectivity;
 pub mod model_fetch;
 pub mod model_pricing;
 pub mod omo;
+pub mod openclaw_gateway;
 pub mod opencode_gateway;
 pub mod pi_prompt_files;
 pub(crate) mod pi_state;

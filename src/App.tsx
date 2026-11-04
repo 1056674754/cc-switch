@@ -1473,10 +1473,10 @@ function App() {
         className="min-h-0 flex-1 overflow-y-auto scroll-stable overflow-x-hidden px-6 pb-12 pt-4"
       >
         <div className="space-y-4">
-          {activeApp === "opencode" || activeApp === "hermes" ? (
-            <ClientGatewayBar
-              app={activeApp === "hermes" ? "hermes" : "opencode"}
-            />
+          {activeApp === "opencode" ||
+          activeApp === "hermes" ||
+          activeApp === "openclaw" ? (
+            <ClientGatewayBar app={activeApp} />
           ) : null}
           <ProviderList
             {...listCallbacks}

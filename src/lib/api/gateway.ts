@@ -79,6 +79,21 @@ export const gatewayApi = {
     return invoke("release_hermes_from_gateway");
   },
 
+  /** P4-A：OpenClaw 现在是否已经指向网关。 */
+  async getOpenclawGatewayStatus(): Promise<boolean> {
+    return invoke("get_openclaw_gateway_status");
+  },
+
+  /** P4-A：把 OpenClaw 指到网关（写一条 provider + 默认模型）。 */
+  async adoptOpenclawToGateway(): Promise<void> {
+    return invoke("adopt_openclaw_to_gateway");
+  },
+
+  /** P4-A：释放 OpenClaw（删掉 cc-switch provider）。 */
+  async releaseOpenclawFromGateway(): Promise<void> {
+    return invoke("release_openclaw_from_gateway");
+  },
+
   /** P4-A：把 OpenCode 指到网关（写一条 cc-switch provider + 默认模型）。 */
   async adoptOpencodeToGateway(): Promise<void> {
     return invoke("adopt_opencode_to_gateway");
