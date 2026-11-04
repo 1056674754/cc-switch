@@ -300,12 +300,50 @@ pub async fn handle_claude_desktop_models(
     let provider = providers.first().ok_or(ProxyError::NoAvailableProvider)?;
     let mut response = crate::claude_desktop_config::model_list_response(provider)
         .map_err(|e| ProxyError::ConfigError(e.to_string()))?;
-    // 聚合的模型 Desktop 只从 profile 里拿，这里补上是为了带上说明，两边也一致
+    // 目录里属于 Desktop 的模型：id 就是模型引用（`<供应商名>/<模型 id>`），
+    // 选择后由 `resolve_stack_target` 按引用路由（P2）。Stack 的旧 id 一并保留，
+    // 已经写进 profile 的还能用。
+    let catalog =
+        crate::services::gateway_catalog::catalog_view(&state.db).unwrap_or_else(|error| {
+            log::warn!("[Claude Desktop] 读取模型目录失败，只返回路由那家的: {error}");
+            Vec::new()
+        });
     let stacked = crate::mode::stack::desktop_published_now(&state.db).unwrap_or_else(|error| {
         log::warn!("[Claude Desktop] 读取聚合模型失败，只返回路由那家的: {error}");
         Vec::new()
     });
     if let Some(data) = response.get_mut("data").and_then(Value::as_array_mut) {
+        data.extend(
+            catalog
+                .iter()
+                .filter(|entry| {
+                    entry
+                        .sources
+                        .iter()
+                        .any(|source| source.starts_with("claude-desktop:"))
+                })
+                .map(|entry| {
+                    let mut item = json!({
+                        "type": "model",
+                        "id": entry.reference,
+                        "display_name": entry
+                            .display_name
+                            .clone()
+                            .unwrap_or_else(|| entry.model_id.clone()),
+                        "created_at": crate::claude_desktop_config::DEFAULT_CREATED_AT,
+                    });
+                    if entry.one_m {
+                        item["supports1m"] = json!(true);
+                    }
+                    item["description"] =
+                        json!(crate::claude_desktop_config::discovered_model_description(
+                            &entry.upstream_name,
+                            &entry.model_id,
+                            entry.one_m,
+                        ));
+                    item
+                }),
+        );
         data.extend(stacked.into_iter().map(|model| {
             let mut item = json!({
                 "type": "model",

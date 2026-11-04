@@ -599,7 +599,13 @@ mod tests {
             conn.query_row("PRAGMA user_version", [], |row| row.get(0))?
         };
         assert_eq!(version, crate::database::SCHEMA_VERSION);
+        let started = std::time::Instant::now();
         let entries = derive_entries(&db).expect("derive");
+        let derive_elapsed = started.elapsed();
+        let started = std::time::Instant::now();
+        let _ = catalog_view(&db).expect("view warm");
+        let view_elapsed = started.elapsed();
+        println!("timing: derive={derive_elapsed:?} view(second)={view_elapsed:?}");
         let upstreams: std::collections::BTreeSet<&str> =
             entries.iter().map(|e| e.upstream_id.as_str()).collect();
         let endpoints: std::collections::BTreeSet<&str> = entries
