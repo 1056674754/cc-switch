@@ -180,6 +180,9 @@ impl RequestContext {
                             crate::error::AppError::AllProvidersCircuitOpen => {
                                 ProxyError::AllProvidersCircuitOpen
                             }
+                            crate::error::AppError::AllProvidersDisabled => {
+                                ProxyError::AllProvidersDisabled
+                            }
                             crate::error::AppError::NoProvidersConfigured => {
                                 ProxyError::NoProvidersConfigured
                             }

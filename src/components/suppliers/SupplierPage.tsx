@@ -8,12 +8,15 @@ import {
   EyeOff,
   KeyRound,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Plus,
   RefreshCw,
+  Trash2,
 } from "lucide-react";
 import {
   suppliersApi,
+  type DeleteSupplierSkipped,
   type Supplier,
   type SupplierBindingDetail,
 } from "@/lib/api/suppliers";
@@ -23,6 +26,7 @@ import { toast } from "@/lib/toast";
 import { cn } from "@/lib/utils";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { AppPageHeader } from "@/components/shell/AppPageHeader";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -34,6 +38,7 @@ import {
 import { HelpTip } from "@/components/ui/help-tip";
 import { Input } from "@/components/ui/input";
 import { Notice } from "@/components/ui/notice";
+import { Switch } from "@/components/ui/switch";
 import { ModelMapEditor } from "@/components/bindings/ModelMapEditor";
 import { SupplierModelsPanel } from "@/components/suppliers/SupplierModelsPanel";
 import {
@@ -78,6 +83,33 @@ interface EditingModelMap {
 }
 
 /**
+ * 被哪些 app 使用：以 apps 为准（应用名可能重名），bindings 里多出来的 app 补在后面。
+ */
+function collectAppTypes(supplier: Supplier): string[] {
+  const appTypes = [...supplier.apps];
+  for (const binding of supplier.bindings) {
+    if (!appTypes.includes(binding.appType)) {
+      appTypes.push(binding.appType);
+    }
+  }
+  return appTypes;
+}
+
+/**
+ * 删除时被跳过的配置：只列前三条「App（后端原因）」，剩下的折成「等 N 条」，
+ * 免得一次弹一整屏；原因由后端给（中文），这里不翻译。
+ */
+function formatSkippedDetail(skipped: DeleteSupplierSkipped[]): string {
+  const head = skipped
+    .slice(0, 3)
+    .map((item) => `${getAppLabel(item.appType)}（${item.reason}）`);
+  const remaining = skipped.length - head.length;
+  return remaining > 0
+    ? `${head.join("、")} 等 ${remaining} 条`
+    : head.join("、");
+}
+
+/**
  * 供应商页：网关级视角的供应商总览。
  *
  * 一家供应商 = 一个确切的上游 API（服务根 + 上游协议），所以这里是一张扁平列表：
@@ -110,6 +142,13 @@ export function SupplierPage() {
   const [editingModelMap, setEditingModelMap] =
     useState<EditingModelMap | null>(null);
   const [savingModelMap, setSavingModelMap] = useState(false);
+  // 正在切换启用状态的供应商：请求期间把开关禁掉，避免连点把开关拨来拨去
+  const [togglingSupplierId, setTogglingSupplierId] = useState<string | null>(
+    null,
+  );
+  // 「删除供应商」确认框的目标：非空即打开；请求期间保持打开，让按钮转成禁用态
+  const [deleteTarget, setDeleteTarget] = useState<Supplier | null>(null);
+  const [deleting, setDeleting] = useState(false);
   // 「新增供应商」对话框：网关侧一次配好地址 + 密钥，勾选要直接接入的 agent
   const [createOpen, setCreateOpen] = useState(false);
 
@@ -118,6 +157,9 @@ export function SupplierPage() {
   /** 托管登录账号没有网关地址：不显示编辑地址 / 换密钥。 */
   const isManagedSupplier = (supplier: Supplier) =>
     supplier.baseUrl.trim() === "";
+
+  /** 有没有启用：老 fixture / 更早的后端不带 enabled，缺省按启用处理，免得整页变灰。 */
+  const isEnabled = (supplier: Supplier) => supplier.enabled !== false;
 
   /**
    * 「采用到…」只在直连模式下成立：没有代理做协议转换，claude / claude-desktop
@@ -212,8 +254,8 @@ export function SupplierPage() {
   // 一键采用：地址和密钥都从网关读，用户在 agent 侧一个 key 都不用填
   const adoptInto = async (supplier: Supplier, app: string) => {
     if (adoptingSupplierId) return;
-    // 按钮已经按协议禁用，这里再挡一道，避免任何入口绕过状态
-    if (!canAdopt(supplier)) return;
+    // 按钮已经按协议 / 启用态禁用，这里再挡一道，避免任何入口绕过状态
+    if (!canAdopt(supplier) || !isEnabled(supplier)) return;
 
     setAdoptingSupplierId(supplier.id);
     try {
@@ -292,6 +334,88 @@ export function SupplierPage() {
     }
   };
 
+  // 启用 / 停用：只拨开关，地址和密钥都不动；失败时开关自然停回原样
+  const toggleEnabled = async (supplier: Supplier) => {
+    if (togglingSupplierId) return;
+    const nextEnabled = !isEnabled(supplier);
+
+    setTogglingSupplierId(supplier.id);
+    try {
+      const updated = await suppliersApi.setEnabled(supplier.id, nextEnabled);
+      // 后端返回的就是更新后的总览，直接落缓存，不再多拉一次
+      queryClient.setQueryData<Supplier[]>(suppliersKeys.overview, updated);
+      // 各应用里的供应商列表带着启用态，让它们下次进入时重读
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      toast.success(
+        t(nextEnabled ? "suppliers.enabledToast" : "suppliers.disabledToast", {
+          name: supplier.name,
+        }),
+      );
+    } catch (toggleError) {
+      // 供应商已经不存在之类的，后端给的是中文原因，原样透出
+      toast.error(
+        extractErrorMessage(toggleError) || t("suppliers.toggleFailed"),
+      );
+    } finally {
+      setTogglingSupplierId(null);
+    }
+  };
+
+  // 删除供应商会连它在各 app 里的配置一起删，所以只从这里（确认框）走
+  const confirmDelete = async () => {
+    if (!deleteTarget || deleting) return;
+    const supplier = deleteTarget;
+
+    setDeleting(true);
+    try {
+      const outcome = await suppliersApi.remove(supplier.id);
+      // 后端返回的就是删后的总览，直接落缓存；模型目录也少了一家上游，一并重读
+      queryClient.setQueryData<Supplier[]>(
+        suppliersKeys.overview,
+        outcome.suppliers,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["providers"] });
+      void queryClient.invalidateQueries({ queryKey: ["gateway", "catalog"] });
+      setDeleteTarget(null);
+
+      if (outcome.deleted > 0) {
+        toast.success(
+          t("suppliers.deleteSuccess", {
+            name: supplier.name,
+            count: outcome.deleted,
+          }),
+        );
+      }
+      // 后端删不掉的（配置已失效、写盘失败…）逐条报原因，不假装删干净了
+      if (outcome.skipped.length > 0) {
+        toast.warning(
+          t("suppliers.deleteSkipped", {
+            count: outcome.skipped.length,
+            detail: formatSkippedDetail(outcome.skipped),
+          }),
+        );
+      }
+    } catch (deleteError) {
+      // 后端说清楚为什么不能删，原样透出；确认框留着，用户可以重试或取消
+      toast.error(
+        extractErrorMessage(deleteError) || t("suppliers.deleteFailed"),
+      );
+    } finally {
+      setDeleting(false);
+    }
+  };
+
+  // 删除确认框的正文：先摊开会一起删掉的 app 和配置条数，用户点头前就知道代价
+  const deleteAppTypes = deleteTarget ? collectAppTypes(deleteTarget) : [];
+  const deleteMessage = deleteTarget
+    ? t("suppliers.deleteDescription", {
+        name: deleteTarget.name,
+        count: deleteAppTypes.length,
+        bindings: deleteTarget.bindings.length,
+        apps: deleteAppTypes.map((appType) => getAppLabel(appType)).join("、"),
+      })
+    : "";
+
   const renderBody = () => {
     if (isPending) {
       return (
@@ -353,18 +477,14 @@ export function SupplierPage() {
             const isEditingSecret = editingSecret?.supplierId === supplier.id;
             const isSavingSecret = savingSecretSupplierId === supplier.id;
             const isEditingMap = editingModelMap?.supplierId === supplier.id;
-            const adoptEnabled = canAdopt(supplier);
+            const isToggling = togglingSupplierId === supplier.id;
+            const enabled = isEnabled(supplier);
+            const adoptEnabled = canAdopt(supplier) && enabled;
             const modelBindings = supplier.bindings.filter((binding) =>
               supportsModelMap(binding.appType),
             );
 
-            // 被哪些 app 使用：以 apps 为准（应用名可能重名），bindings 里多出来的 app 补在后面
-            const appTypes = [...supplier.apps];
-            for (const binding of supplier.bindings) {
-              if (!appTypes.includes(binding.appType)) {
-                appTypes.push(binding.appType);
-              }
-            }
+            const appTypes = collectAppTypes(supplier);
 
             return (
               <li
@@ -372,7 +492,13 @@ export function SupplierPage() {
                 className="rounded-panel border border-border bg-surface"
               >
                 <div className="flex min-w-0 items-start gap-3 px-4 py-3">
-                  <div className="min-w-0 flex-1 space-y-1.5">
+                  {/* 停用只灰信息区，右侧动作区保持可点（编辑地址 / 换密钥 / 模型映射仍然可用） */}
+                  <div
+                    className={cn(
+                      "min-w-0 flex-1 space-y-1.5",
+                      !enabled && "opacity-60",
+                    )}
+                  >
                     <div className="flex min-w-0 flex-wrap items-center gap-2">
                       <span className="min-w-0 truncate text-strong text-fg-1">
                         {supplier.name}
@@ -384,6 +510,16 @@ export function SupplierPage() {
                       >
                         {protocolLabel(supplier.upstreamProtocol)}
                       </Badge>
+                      {/* 停用徽标：和协议徽标同一套 outline 样式，只降一档文字色，不另造颜色 */}
+                      {!enabled && (
+                        <Badge
+                          variant="outline"
+                          title={t("suppliers.disabledToggleHint")}
+                          className="h-[18px] shrink-0 rounded-full px-1.5 text-badge font-medium text-fg-3"
+                        >
+                          {t("suppliers.disabledBadge")}
+                        </Badge>
+                      )}
                       {isEditing ? (
                         <Input
                           // 展开就聚焦，省一次点击；地址可能很长，输入框吃掉整行
@@ -597,6 +733,27 @@ export function SupplierPage() {
                   </div>
 
                   <div className="flex shrink-0 flex-wrap items-center justify-end gap-2">
+                    {/* 启用 / 停用：停用后网关不再把请求路由到这家上游，配置一条不动。
+                        托管登录账号没有网关可关，不显示。 */}
+                    {!isManaged && (
+                      <Switch
+                        checked={enabled}
+                        // 有请求在飞时把所有开关一起禁掉：连点会把开关拨乱
+                        disabled={togglingSupplierId !== null}
+                        aria-busy={isToggling}
+                        aria-label={
+                          enabled
+                            ? t("suppliers.disableAction")
+                            : t("suppliers.enableAction")
+                        }
+                        title={
+                          enabled
+                            ? t("suppliers.enabledToggleHint")
+                            : t("suppliers.disabledToggleHint")
+                        }
+                        onCheckedChange={() => void toggleEnabled(supplier)}
+                      />
+                    )}
                     {isEditing ? (
                       <>
                         {/* 编辑地址时仍可切到换密钥：一行只开一个编辑器 */}
@@ -673,14 +830,16 @@ export function SupplierPage() {
                           </Button>
                         )}
                         {/* 「采用到…」：把这家供应商一键接进某个 agent，key 从网关读。
-                            直连模式下没有代理转换，协议不是 anthropic 或没有地址时直接禁用。 */}
+                            直连模式下没有代理转换，协议不是 anthropic、没有地址或已停用时直接禁用。 */}
                         {!isEditingSecret && (
                           <DropdownMenu>
                             <span
                               title={
-                                adoptEnabled
-                                  ? undefined
-                                  : t("suppliers.adoptDisabledHint")
+                                !enabled
+                                  ? t("suppliers.disabledAdoptHint")
+                                  : adoptEnabled
+                                    ? undefined
+                                    : t("suppliers.adoptDisabledHint")
                               }
                               className="inline-flex"
                             >
@@ -763,6 +922,40 @@ export function SupplierPage() {
                           </DropdownMenu>
                         )}
                       </>
+                    )}
+                    {/* 删除只放在这个菜单里：动作区唯一一处破坏性入口，避免误触 */}
+                    {!isManaged && (
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button
+                            type="button"
+                            variant="neutral"
+                            size="compact"
+                            aria-label={t("suppliers.moreActions")}
+                            title={t("suppliers.moreActions")}
+                          >
+                            <MoreHorizontal
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5"
+                            />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent
+                          align="end"
+                          className="min-w-[160px]"
+                        >
+                          <DropdownMenuItem
+                            onSelect={() => setDeleteTarget(supplier)}
+                            className="text-danger-text focus:text-danger-text"
+                          >
+                            <Trash2
+                              aria-hidden="true"
+                              className="h-3.5 w-3.5"
+                            />
+                            {t("suppliers.deleteAction")}
+                          </DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
                     )}
                   </div>
                 </div>
@@ -857,6 +1050,20 @@ export function SupplierPage() {
       <CreateSupplierDialog
         open={createOpen}
         onClose={() => setCreateOpen(false)}
+      />
+
+      {/* 删除确认：把会一起删掉的 app 和配置条数先摊开，删除中不让关也不让再点 */}
+      <ConfirmDialog
+        isOpen={deleteTarget !== null}
+        title={t("suppliers.deleteTitle")}
+        message={deleteMessage}
+        confirmText={t("suppliers.deleteConfirm")}
+        variant="destructive"
+        pending={deleting}
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleting) setDeleteTarget(null);
+        }}
       />
     </>
   );

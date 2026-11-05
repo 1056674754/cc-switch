@@ -35,6 +35,8 @@ export interface Supplier {
   baseUrl: string;
   /** 代理 → 上游 的协议：openai_chat / anthropic / openai_responses / gemini_native … */
   upstreamProtocol: string;
+  /** 网关是否把请求路由到这家上游；停用只是关开关，各 app 里的配置一条不动。 */
+  enabled: boolean;
   /** 使用它的 app，如 ["claude", "claude-desktop"] */
   apps: string[];
   /** `app:providerId` 明细，方便跳回各应用的原有配置 */
@@ -57,6 +59,20 @@ export interface AdoptedSupplierProvider {
   providerId: string;
   /** agent 侧新配置的名字，沿用供应商名 */
   providerName: string;
+}
+
+/** 删除时被跳过的一条配置：哪个 app 的哪条，以及后端给的中文原因。 */
+export interface DeleteSupplierSkipped {
+  appType: string;
+  providerId: string;
+  reason: string;
+}
+
+/** 删除一家供应商的结果：删后的总览 + 实际删掉的配置条数 + 没删掉的明细。 */
+export interface DeleteSupplierOutcome {
+  suppliers: Supplier[];
+  deleted: number;
+  skipped: DeleteSupplierSkipped[];
 }
 
 export const suppliersApi = {
@@ -93,6 +109,12 @@ export const suppliersApi = {
     return invoke("update_supplier_secret", { supplierId, secret });
   },
 
+  // 启用 / 停用一家供应商：只拨开关，地址和密钥都不动，返回更新后的总览。
+  // 停用后网关不再把请求路由到这家上游，但各 app 里的配置仍原样留着。
+  async setEnabled(supplierId: string, enabled: boolean): Promise<Supplier[]> {
+    return invoke("set_supplier_enabled", { supplierId, enabled });
+  },
+
   // 改一个接入的模型映射（app + provider 粒度，不动这家供应商上别的 app）。
   // modelMap 的槽位是固定的 haiku/sonnet/opus/fable/subagent/default，
   // 值为空串（或整个槽位缺省）表示清掉该槽位对应的模型字段。
@@ -116,5 +138,11 @@ export const suppliersApi = {
     supplierId: string,
   ): Promise<AdoptedSupplierProvider> {
     return invoke("adopt_supplier", { appType, supplierId });
+  },
+
+  // 删除一家供应商：连同它在各 app 里的配置一起删，返回删后的总览与统计。
+  // 个别配置删不掉（已过期、写盘失败…）不会让整个删除失败，而是进 skipped 由界面提示。
+  async remove(supplierId: string): Promise<DeleteSupplierOutcome> {
+    return invoke("delete_supplier", { supplierId });
   },
 };

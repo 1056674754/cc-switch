@@ -1609,6 +1609,8 @@ pub fn run() {
             commands::create_supplier,
             commands::update_supplier_secret,
             commands::update_binding_model_map,
+            commands::set_supplier_enabled,
+            commands::delete_supplier,
             commands::get_current_provider,
             commands::add_provider,
             commands::update_provider,

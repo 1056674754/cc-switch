@@ -958,6 +958,11 @@ impl Database {
                         Self::migrate_v26_to_v27(conn)?;
                         Self::set_user_version(conn, 27)?;
                     }
+                    27 => {
+                        log::info!("迁移数据库从 v27 到 v28（供应商启停开关）");
+                        Self::migrate_v27_to_v28(conn)?;
+                        Self::set_user_version(conn, 28)?;
+                    }
                     _ => {
                         return Err(AppError::Database(format!(
                             "未知的数据库版本 {version}，无法迁移到 {SCHEMA_VERSION}"
@@ -2048,6 +2053,7 @@ impl Database {
                  upstream_id TEXT NOT NULL,
                  protocol TEXT NOT NULL,
                  base_url TEXT NOT NULL DEFAULT '',
+                 enabled INTEGER NOT NULL DEFAULT 1,
                  created_at INTEGER NOT NULL,
                  FOREIGN KEY (upstream_id) REFERENCES upstreams(id) ON DELETE CASCADE
              );
@@ -2117,6 +2123,24 @@ impl Database {
 
     fn migrate_v26_to_v27(conn: &Connection) -> Result<(), AppError> {
         Self::create_gateway_tables(conn)
+    }
+
+    /// v27 -> v28：供应商（= 一家上游 API）的启停开关。
+    ///
+    /// 开关落在 `upstream_endpoints` 上而不是 `upstreams` 上：供应商的身份是
+    /// 「服务根 + 上游协议」，同一个 host（如 ai.ctaigw.cn）会同时承载
+    /// anthropic / openai_chat 几家供应商，挂在 host 上会把它们一起停掉。
+    /// 只加列不改任何既有读写路径，老库跑完迁移行为与之前一致（默认 1 = 全部启用）。
+    fn migrate_v27_to_v28(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "upstream_endpoints")? {
+            Self::add_column_if_missing(
+                conn,
+                "upstream_endpoints",
+                "enabled",
+                "INTEGER NOT NULL DEFAULT 1",
+            )?;
+        }
+        Ok(())
     }
 
     fn migrate_v25_to_v26(conn: &Connection) -> Result<(), AppError> {
@@ -5299,6 +5323,49 @@ mod tests {
         assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
         assert!(Database::table_exists(&conn, "gateway_app_profiles")?);
         assert!(Database::table_exists(&conn, "gateway_model_overrides")?);
+
+        // 再跑一遍是幂等的
+        Database::apply_schema_migrations_on_conn(&conn)?;
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        Ok(())
+    }
+
+    /// v27 -> v28：补 `upstream_endpoints.enabled`，默认全部启用；幂等。
+    #[test]
+    fn migrate_v27_to_v28_adds_endpoint_enabled() -> Result<(), AppError> {
+        let db = Database::memory()?;
+        let conn = lock_conn!(db.conn);
+
+        // 退回 v27 的形状：删掉启停列，再把 user_version 降一档
+        conn.execute_batch("ALTER TABLE upstream_endpoints DROP COLUMN enabled;")?;
+        Database::set_user_version(&conn, 27)?;
+
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        assert!(Database::has_column(
+            &conn,
+            "upstream_endpoints",
+            "enabled"
+        )?);
+
+        // 新加的行默认启用：升级不该把任何一家上游悄悄停掉
+        conn.execute(
+            "INSERT INTO upstreams (id, name, host, created_at)
+             VALUES ('up-test', 'Test', 'test.dev', 1)",
+            [],
+        )?;
+        conn.execute(
+            "INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
+             VALUES ('ep-test', 'up-test', 'anthropic', 'https://test.dev/v1', 1)",
+            [],
+        )?;
+        let enabled: i64 = conn.query_row(
+            "SELECT enabled FROM upstream_endpoints WHERE id = 'ep-test'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(enabled, 1, "默认必须是启用");
 
         // 再跑一遍是幂等的
         Database::apply_schema_migrations_on_conn(&conn)?;

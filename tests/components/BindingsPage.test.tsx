@@ -59,6 +59,7 @@ const supplier = (
   host: "",
   baseUrl: "",
   upstreamProtocol: "anthropic",
+  enabled: true,
   apps: [],
   consumers: [],
   bindings: [],

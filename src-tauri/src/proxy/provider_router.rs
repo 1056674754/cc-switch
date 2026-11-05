@@ -295,7 +295,18 @@ impl ProviderRouter {
     ) -> Result<Vec<Provider>, AppError> {
         let mut result = Vec::new();
         let mut total_providers = 0usize;
+        let mut disabled_count = 0usize;
         let mut circuit_open_count = 0usize;
+
+        // 供应商页的启停开关：停用的一家整家跳过（配置、凭证、模型映射全部保留，
+        // 重新启用即恢复）。读失败按「全部启用」处理——开关表读不出来不能把路由带挂。
+        let disabled_endpoints = match self.db.get_disabled_endpoint_ids() {
+            Ok(disabled) => disabled,
+            Err(error) => {
+                log::warn!("[{app_type}] 读取供应商启停状态失败，按全部启用处理: {error}");
+                HashSet::new()
+            }
+        };
 
         // 检查该应用的自动故障转移开关是否开启（从 proxy_config 表读取）
         let auto_failover_enabled = match self.db.get_proxy_config_for_app(app_type).await {
@@ -357,6 +368,17 @@ impl ProviderRouter {
                 }
                 total_providers += 1;
 
+                // 停用的供应商不参与选路：跳过但保留候选计数，最后才能把
+                // 「全停了」和「没配供应商」两种情况分开报。
+                if self
+                    .provider_is_disabled(app_type, &provider.id, &disabled_endpoints)
+                    .await
+                {
+                    disabled_count += 1;
+                    log::debug!("[{app_type}] 跳过已停用的供应商 {}", provider.id);
+                    continue;
+                }
+
                 let circuit_key = self.circuit_key_for(app_type, &provider.id).await;
                 let breaker = self
                     .get_or_create_circuit_breaker(&circuit_key, app_type)
@@ -383,21 +405,49 @@ impl ProviderRouter {
             // 故障转移关闭：仅使用当前供应商，跳过熔断器检查
             if let Some(current) = current_provider {
                 total_providers = 1;
-                result.push(current);
+                if self
+                    .provider_is_disabled(app_type, &current.id, &disabled_endpoints)
+                    .await
+                {
+                    disabled_count = 1;
+                    log::warn!("[{app_type}] 当前供应商 {} 所在上游已停用", current.id);
+                } else {
+                    result.push(current);
+                }
             }
         }
 
         if result.is_empty() {
-            if total_providers > 0 && circuit_open_count == total_providers {
+            if disabled_count > 0 && disabled_count == total_providers {
+                log::warn!("[{app_type}] [FO-006] 所有供应商都已停用");
+                return Err(AppError::AllProvidersDisabled);
+            }
+            if circuit_open_count > 0 && circuit_open_count + disabled_count == total_providers {
                 log::warn!("[{app_type}] [FO-004] 所有供应商均已熔断");
                 return Err(AppError::AllProvidersCircuitOpen);
-            } else {
-                log::warn!("[{app_type}] [FO-005] 未配置供应商");
-                return Err(AppError::NoProvidersConfigured);
             }
+            log::warn!("[{app_type}] [FO-005] 未配置供应商");
+            return Err(AppError::NoProvidersConfigured);
         }
 
         Ok(result)
+    }
+
+    /// 这家接入挂在的供应商是否被人工停用（供应商页的开关）。
+    ///
+    /// 没有绑定（新库、官方托管账号）时按启用处理：开关只关「明确停用」的上游。
+    async fn provider_is_disabled(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        disabled: &HashSet<String>,
+    ) -> bool {
+        if disabled.is_empty() {
+            return false;
+        }
+        self.resolve_binding(app_type, provider_id)
+            .await
+            .is_some_and(|binding| disabled.contains(&binding.endpoint_id))
     }
 
     /// 请求执行前获取熔断器“放行许可”
@@ -1387,5 +1437,108 @@ mod tests {
         let third = router.allow_provider_request("a", "claude").await;
         assert!(third.allowed);
         assert!(third.used_half_open_permit);
+    }
+
+    /// 供应商页停用一家上游后，故障转移关闭时当前供应商不能再被选中；
+    /// 重新启用立刻恢复（开关是读时生效，不许缓存成永久状态）。
+    #[tokio::test]
+    #[serial]
+    async fn disabled_supplier_is_not_selected_when_failover_off() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let provider = Provider::with_id(
+            "acme".to_string(),
+            "Acme".to_string(),
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://acme.dev/v1",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-1",
+                }
+            }),
+            None,
+        );
+        db.save_provider("claude", &provider)?;
+        db.set_current_provider("claude", "acme")?;
+        // 读一次绑定，让上游行派生出来
+        db.get_provider_upstream_keys("claude")?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE upstream_endpoints SET enabled = 0
+                 WHERE upstream_id IN (SELECT id FROM upstreams WHERE host = 'acme.dev')",
+                [],
+            )?;
+        }
+
+        let router = ProviderRouter::new(db.clone());
+        let error = router
+            .select_providers("claude")
+            .await
+            .expect_err("上游停用后不应选出供应商");
+        assert!(
+            matches!(error, AppError::AllProvidersDisabled),
+            "应报「全部停用」，实际: {error}"
+        );
+
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE upstream_endpoints SET enabled = 1
+                 WHERE upstream_id IN (SELECT id FROM upstreams WHERE host = 'acme.dev')",
+                [],
+            )?;
+        }
+        let providers = router.select_providers("claude").await?;
+        assert_eq!(providers.len(), 1, "重新启用后应恢复选路");
+        assert_eq!(providers[0].id, "acme");
+        Ok(())
+    }
+
+    /// 故障转移开启时，停用的上游从队列里跳过，其余候选照常参与。
+    #[tokio::test]
+    #[serial]
+    async fn failover_queue_skips_disabled_supplier() -> Result<(), AppError> {
+        let _home = TempHome::new();
+        let db = Arc::new(Database::memory().unwrap());
+
+        let make = |id: &str, host: &str| {
+            Provider::with_id(
+                id.to_string(),
+                id.to_string(),
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": format!("https://{host}/v1"),
+                        "ANTHROPIC_AUTH_TOKEN": "sk-1",
+                    }
+                }),
+                None,
+            )
+        };
+        db.save_provider("claude", &make("bad", "acme.dev"))?;
+        db.save_provider("claude", &make("good", "other.dev"))?;
+        db.set_current_provider("claude", "bad")?;
+        db.add_to_failover_queue("claude", "bad")?;
+        db.add_to_failover_queue("claude", "good")?;
+
+        let mut config = db.get_proxy_config_for_app("claude").await?;
+        config.auto_failover_enabled = true;
+        db.update_proxy_config_for_app(config).await?;
+
+        db.get_provider_upstream_keys("claude")?;
+        {
+            let conn = lock_conn!(db.conn);
+            conn.execute(
+                "UPDATE upstream_endpoints SET enabled = 0
+                 WHERE upstream_id IN (SELECT id FROM upstreams WHERE host = 'acme.dev')",
+                [],
+            )?;
+        }
+
+        let router = ProviderRouter::new(db.clone());
+        let providers = router.select_providers("claude").await?;
+        let ids: Vec<&str> = providers.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["good"], "被停用的上游应整家跳过");
+        Ok(())
     }
 }

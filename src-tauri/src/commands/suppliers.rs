@@ -22,11 +22,13 @@
 //! 开了「完整 URL」的客户端写 `.../v1/chat/completions`）。这些是**同一条路由的不同写法**，
 //! 不是多个端点。这里把它们规范化到服务根再归并，界面上一个供应商只有**一个地址**。
 
+use crate::app_config::AppType;
 use crate::database::lock_conn;
 use crate::error::AppError;
 use crate::store::AppState;
 use serde::Serialize;
 use std::collections::BTreeMap;
+use std::str::FromStr;
 
 /// 一条接入：哪个 app、哪个 provider、当前模型映射、下游协议。
 #[derive(Debug, Serialize, Clone)]
@@ -65,6 +67,9 @@ pub struct Supplier {
     pub credential_kinds: Vec<String>,
     /// 归到这家供应商的上游 id（目录与模型覆盖按它对齐，一个服务根可能对应多条上游）
     pub upstream_ids: Vec<String>,
+    /// 启停开关（供应商页的「启用/停用」）：停用 = 网关选路时跳过这家上游，
+    /// 配置、凭证、模型映射全部保留，重新启用即恢复。
+    pub enabled: bool,
 }
 
 /// 把 `apiFormat` 的常见写法归一。
@@ -299,7 +304,8 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
     let mut suppliers: BTreeMap<String, Supplier> = BTreeMap::new();
     {
         let mut stmt = conn.prepare(
-            "SELECT e.id, e.upstream_id, COALESCE(e.protocol, 'unknown'), e.base_url, u.name, u.host
+            "SELECT e.id, e.upstream_id, COALESCE(e.protocol, 'unknown'), e.base_url, u.name, u.host,
+                    COALESCE(e.enabled, 1)
              FROM upstream_endpoints e JOIN upstreams u ON u.id = e.upstream_id
              ORDER BY u.name COLLATE NOCASE, e.base_url, e.protocol",
         )?;
@@ -311,10 +317,11 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
+                row.get::<_, i64>(6)?,
             ))
         })?;
         for row in rows {
-            let (endpoint_id, upstream_id, fallback_protocol, base_url, name, host) = row?;
+            let (endpoint_id, upstream_id, fallback_protocol, base_url, name, host, enabled) = row?;
             let protocol = upstream_protocols
                 .get(&endpoint_id)
                 .cloned()
@@ -332,7 +339,13 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 credential_count: 0,
                 credential_kinds: Vec::new(),
                 upstream_ids: Vec::new(),
+                enabled: enabled != 0,
             });
+
+            // 一个供应商理论上只对应一条上游；真合并了多条时以「全部启用」为启用
+            if enabled == 0 {
+                supplier.enabled = false;
+            }
 
             if !supplier.upstream_ids.contains(&upstream_id) {
                 supplier.upstream_ids.push(upstream_id.clone());
@@ -566,6 +579,160 @@ pub async fn update_supplier_secret(
     collect(&state.db).map_err(|error| error.to_string())
 }
 
+/// 供应商启停开关：停用后网关选路跳过这家上游，所有 app 的配置原样保留。
+///
+/// 开关落在 `upstream_endpoints.enabled`（一家供应商一个开关，端点行按「服务根 +
+/// 协议」区分），不是每个 app 各一个：供应商页的语义就是「这家上游还能不能用」，
+/// 与它被几个 app 接进来无关。
+#[tauri::command]
+pub async fn set_supplier_enabled(
+    state: tauri::State<'_, AppState>,
+    supplier_id: String,
+    enabled: bool,
+) -> Result<Vec<Supplier>, String> {
+    set_supplier_enabled_in_db(&state.db, &supplier_id, enabled)
+}
+
+fn set_supplier_enabled_in_db(
+    db: &crate::database::Database,
+    supplier_id: &str,
+    enabled: bool,
+) -> Result<Vec<Supplier>, String> {
+    let supplier = collect(db)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|supplier| supplier.id == supplier_id)
+        .ok_or_else(|| "找不到这家供应商（可能已被删除）".to_string())?;
+
+    // 托管登录账号没有网关地址，不参与选路：开关对它没有意义
+    if supplier.base_url.trim().is_empty() {
+        return Err("托管登录账号没有网关地址，不能启用/停用".to_string());
+    }
+
+    {
+        let mut conn = lock_conn!(db.conn);
+        let endpoint_ids = endpoint_ids_of(&conn, supplier_id)?;
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .map_err(|error| error.to_string())?;
+        // 一家供应商可能对应多条端点行（完整 URL / 服务根的不同写法），一起改
+        for endpoint_id in &endpoint_ids {
+            tx.execute(
+                "UPDATE upstream_endpoints SET enabled = ?1 WHERE id = ?2",
+                rusqlite::params![if enabled { 1i64 } else { 0i64 }, endpoint_id],
+            )
+            .map_err(|error| error.to_string())?;
+        }
+        tx.commit().map_err(|error| error.to_string())?;
+    }
+
+    collect(db).map_err(|error| error.to_string())
+}
+
+/// 删除一家供应商：把它在每个接入的 app 里的那几条 provider 一起删掉。
+///
+/// 供应商不是库里独立的一行——它是从各 app 的 `providers` 对账派生出来的。所以「删除
+/// 供应商」必须真的删底层 provider，否则下一次读又被对账重建回来。删除走各 app 既有的
+/// `ProviderService::delete`（客户端配置、快照、只读限制都由它处理）；删不掉的（官方
+/// 只读、托管账号等）不阻断其它 app，原样回报给界面。
+#[tauri::command]
+pub async fn delete_supplier(
+    state: tauri::State<'_, AppState>,
+    supplier_id: String,
+) -> Result<DeleteSupplierOutcome, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || delete_supplier_consumers(&state, &supplier_id))
+        .await
+        .map_err(|error| format!("删除供应商任务失败: {error}"))?
+}
+
+/// 删除时被跳过的接入（原因原样透出给界面）。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSupplierSkip {
+    pub app_type: String,
+    pub provider_id: String,
+    pub reason: String,
+}
+
+/// 删除结果：删除后的总览 + 删掉的接入数 + 删不掉的明细。
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteSupplierOutcome {
+    pub suppliers: Vec<Supplier>,
+    pub deleted: usize,
+    pub skipped: Vec<DeleteSupplierSkip>,
+}
+
+fn delete_supplier_consumers(
+    state: &AppState,
+    supplier_id: &str,
+) -> Result<DeleteSupplierOutcome, String> {
+    let supplier = collect(&state.db)
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|supplier| supplier.id == supplier_id)
+        .ok_or_else(|| "找不到这家供应商（可能已被删除）".to_string())?;
+
+    if supplier.base_url.trim().is_empty() {
+        return Err("托管登录账号没有网关地址，请在「账号」页删除".to_string());
+    }
+
+    let mut deleted = 0usize;
+    let mut skipped = Vec::new();
+    let mut touched_apps: Vec<String> = Vec::new();
+    for binding in &supplier.bindings {
+        let Ok(app_type) = AppType::from_str(&binding.app_type) else {
+            skipped.push(DeleteSupplierSkip {
+                app_type: binding.app_type.clone(),
+                provider_id: binding.provider_id.clone(),
+                reason: format!("未知应用 {}", binding.app_type),
+            });
+            continue;
+        };
+        match crate::services::provider::ProviderService::delete(
+            state,
+            app_type,
+            &binding.provider_id,
+        ) {
+            Ok(()) => {
+                deleted += 1;
+                if !touched_apps.contains(&binding.app_type) {
+                    touched_apps.push(binding.app_type.clone());
+                }
+            }
+            Err(error) => skipped.push(DeleteSupplierSkip {
+                app_type: binding.app_type.clone(),
+                provider_id: binding.provider_id.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    // 删掉的接入由 delete_provider 顺带清好；删不掉的仍在。再兜一次孤儿清理，保证
+    // 「全部删光」之后这家供应商立刻从总览里消失。
+    {
+        let mut conn = lock_conn!(state.db.conn);
+        for app in &touched_apps {
+            if let Err(error) =
+                crate::database::Database::reconcile_provider_bindings(&mut conn, app)
+            {
+                log::warn!("[suppliers] 删除后对账 {app} 失败: {error}");
+            }
+        }
+        if let Err(error) = crate::database::Database::cleanup_orphan_upstreams(&conn) {
+            log::warn!("[suppliers] 删除后清理孤儿上游失败: {error}");
+        }
+    }
+
+    let suppliers = collect(&state.db).map_err(|error| error.to_string())?;
+    Ok(DeleteSupplierOutcome {
+        suppliers,
+        deleted,
+        skipped,
+    })
+}
+
 /// 一键采用：把网关上的某家供应商接进某个 agent。
 ///
 /// 这是「填 0 次 key」的实现——地址和密钥都从网关读，agent 侧只生成一条配置。
@@ -599,6 +766,22 @@ fn adopt_into(
     if endpoint_ids.is_empty() {
         return Err("找不到这家供应商（可能已被删除）".to_string());
     }
+
+    // 停用的供应商不再允许「采用」进来：采用会把它写成 agent 的直连配置，而停用是
+    // 网关级决定，两边不一致只会制造「刚采用就报错」的困惑。
+    let disabled = endpoint_ids.iter().any(|endpoint_id| {
+        conn.query_row(
+            "SELECT COALESCE(enabled, 1) FROM upstream_endpoints WHERE id = ?1",
+            rusqlite::params![endpoint_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|enabled| enabled == 0)
+        .unwrap_or(false)
+    });
+    if disabled {
+        return Err("这家供应商已停用，先启用再采用".to_string());
+    }
+
     let (protocols, _) = endpoint_upstream_protocols(&conn).map_err(|error| error.to_string())?;
 
     // 直连模式下没有代理做转换，下游协议必须等于上游协议：
@@ -1162,5 +1345,100 @@ mod tests {
             .expect("托管 provider 必须自成一条供应商");
         assert_eq!(official.host, "");
         assert_eq!(official.name, "claude-official");
+    }
+
+    /// 启停开关落库后总览要如实返回；托管账号没有网关地址，不允许启停。
+    #[test]
+    fn supplier_enabled_toggle_roundtrip() {
+        let db = Database::memory().expect("内存库");
+        insert_provider(
+            &db,
+            "claude",
+            "a",
+            json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://acme.dev/v1",
+                    "ANTHROPIC_AUTH_TOKEN": "sk-1",
+                }
+            }),
+        );
+
+        let supplier = collect(&db)
+            .expect("总览")
+            .into_iter()
+            .find(|supplier| supplier.host == "acme.dev")
+            .expect("应有这家供应商");
+        assert!(supplier.enabled, "默认启用");
+
+        let updated = set_supplier_enabled_in_db(&db, &supplier.id, false).expect("停用应成功");
+        let disabled = updated
+            .iter()
+            .find(|item| item.id == supplier.id)
+            .expect("停用后供应商还在总览里");
+        assert!(!disabled.enabled, "停用后 enabled 应为 false");
+        assert_eq!(disabled.consumers.len(), 1, "停用不删接入");
+
+        let updated = set_supplier_enabled_in_db(&db, &supplier.id, true).expect("启用应成功");
+        assert!(
+            updated
+                .iter()
+                .find(|item| item.id == supplier.id)
+                .expect("供应商")
+                .enabled,
+            "重新启用后应恢复"
+        );
+    }
+
+    /// 托管登录账号没有网关地址，既不能停用，也不该被杀掉（删除只在账号页做）。
+    #[test]
+    fn managed_supplier_cannot_be_toggled() {
+        let db = Database::memory().expect("内存库");
+        insert_provider(&db, "claude", "claude-official", json!({"env": {}}));
+
+        let supplier = collect(&db)
+            .expect("总览")
+            .into_iter()
+            .find(|supplier| supplier.base_url.is_empty())
+            .expect("托管供应商");
+        let error =
+            set_supplier_enabled_in_db(&db, &supplier.id, false).expect_err("托管账号不允许启停");
+        assert!(error.contains("托管"), "错误应说明原因: {error}");
+    }
+
+    /// 删除供应商 = 删掉它在各 app 里的 provider；底层删光后总览里不应再出现。
+    #[test]
+    fn deleting_underlying_providers_removes_supplier() {
+        let db = Database::memory().expect("内存库");
+        for (app, id) in [("claude", "a"), ("claude-desktop", "b")] {
+            insert_provider(
+                &db,
+                app,
+                id,
+                json!({
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://acme.dev/v1",
+                        "ANTHROPIC_AUTH_TOKEN": "sk-1",
+                    }
+                }),
+            );
+        }
+        let supplier = collect(&db)
+            .expect("总览")
+            .into_iter()
+            .find(|supplier| supplier.host == "acme.dev")
+            .expect("应有这家供应商");
+        assert_eq!(supplier.bindings.len(), 2, "两个 app 各一条接入");
+
+        for (app, id) in [("claude", "a"), ("claude-desktop", "b")] {
+            db.delete_provider(app, id).expect("删底层 provider");
+        }
+
+        assert!(
+            collect(&db)
+                .expect("总览")
+                .iter()
+                .all(|supplier| supplier.host != "acme.dev"),
+            "底层 provider 删光后供应商应消失"
+        );
     }
 }

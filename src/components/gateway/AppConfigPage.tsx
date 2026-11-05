@@ -131,6 +131,29 @@ export function AppConfigPage({
     );
   }, [entries, search]);
 
+  // 允许列表按供应商加横栏分组（两列网格不变）。目录本身按上游 id 排序（id 是哈希，
+  // 对人没意义），这里按供应商名、组内按模型显示名重排，保证每次打开顺序一致。
+  const allowedGroups = useMemo(() => {
+    const nameOf = (entry: GatewayCatalogEntry) =>
+      entry.displayName?.trim() || entry.modelId;
+    const groups = new Map<string, GatewayCatalogEntry[]>();
+    for (const entry of filtered) {
+      const bucket = groups.get(entry.upstreamName);
+      if (bucket) bucket.push(entry);
+      else groups.set(entry.upstreamName, [entry]);
+    }
+    return [...groups.entries()]
+      .sort(([left], [right]) => left.localeCompare(right, "zh"))
+      .map(([upstreamName, items]) => ({
+        upstreamName,
+        items: [...items].sort(
+          (left, right) =>
+            nameOf(left).localeCompare(nameOf(right), "zh") ||
+            left.modelId.localeCompare(right.modelId),
+        ),
+      }));
+  }, [filtered]);
+
   const toggleAllowed = (reference: string, checked: boolean) => {
     if (isPinned(reference)) return;
     const next = checked
@@ -422,34 +445,61 @@ export function AppConfigPage({
                     defaultValue: "搜索供应商或模型",
                   })}
                 />
-                <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto">
-                  {filtered.map((entry) => {
-                    const pinnedHere = isPinned(entry.reference);
-                    return (
-                      <label
-                        key={entry.reference}
-                        className={`flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm ${
-                          pinnedHere ? "bg-muted/50" : ""
-                        }`}
-                      >
-                        <Checkbox
-                          checked={pinnedHere || allowed.includes(entry.reference)}
-                          disabled={pinnedHere}
-                          onCheckedChange={(checked) =>
-                            toggleAllowed(entry.reference, checked === true)
-                          }
-                        />
-                        <span className="truncate">{entry.reference}</span>
-                        {pinnedHere && (
-                          <span className="ml-auto shrink-0 text-caption text-fg-3">
-                            {t("gateway.form.pinnedModel", {
-                              defaultValue: "上方已选",
-                            })}
-                          </span>
-                        )}
-                      </label>
-                    );
-                  })}
+                <div className="flex max-h-80 flex-col gap-3 overflow-y-auto pr-1">
+                  {allowedGroups.map((group) => (
+                    <div key={group.upstreamName} className="flex flex-col gap-1.5">
+                      {/* 供应商横栏：名字 + 这一栏的模型数 */}
+                      <div className="flex items-center justify-between gap-2 border-b border-border pb-1">
+                        <span className="truncate text-caption font-medium text-fg-2">
+                          {group.upstreamName}
+                        </span>
+                        <span className="shrink-0 text-caption text-fg-3">
+                          {group.items.length}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        {group.items.map((entry) => {
+                          const pinnedHere = isPinned(entry.reference);
+                          return (
+                            <label
+                              key={entry.reference}
+                              title={entry.reference}
+                              className={`flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm ${
+                                pinnedHere ? "bg-muted/50" : ""
+                              }`}
+                            >
+                              <Checkbox
+                                checked={
+                                  pinnedHere || allowed.includes(entry.reference)
+                                }
+                                disabled={pinnedHere}
+                                onCheckedChange={(checked) =>
+                                  toggleAllowed(entry.reference, checked === true)
+                                }
+                              />
+                              <span className="truncate">
+                                {entry.displayName?.trim() || entry.modelId}
+                              </span>
+                              {pinnedHere && (
+                                <span className="ml-auto shrink-0 text-caption text-fg-3">
+                                  {t("gateway.form.pinnedModel", {
+                                    defaultValue: "上方已选",
+                                  })}
+                                </span>
+                              )}
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                  {allowedGroups.length === 0 && (
+                    <div className="py-6 text-center text-sm text-fg-3">
+                      {t("gateway.form.noAllowedMatch", {
+                        defaultValue: "没有匹配的模型",
+                      })}
+                    </div>
+                  )}
                 </div>
               </div>
             </div>

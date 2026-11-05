@@ -53,6 +53,7 @@ const created: Supplier[] = [
     host: "api.acme.dev",
     baseUrl: "https://api.acme.dev",
     upstreamProtocol: "anthropic",
+    enabled: true,
     apps: ["claude", "claude-desktop"],
     consumers: ["claude:p-new", "claude-desktop:p-new"],
     credentialCount: 1,

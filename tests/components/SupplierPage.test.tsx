@@ -11,8 +11,11 @@ const mocks = vi.hoisted(() => ({
   updateSecret: vi.fn(),
   updateBindingModelMap: vi.fn(),
   adopt: vi.fn(),
+  setEnabled: vi.fn(),
+  remove: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
+  warning: vi.fn(),
 }));
 
 vi.mock("@/lib/api/suppliers", () => ({
@@ -29,6 +32,9 @@ vi.mock("@/lib/api/suppliers", () => ({
     ) => mocks.updateBindingModelMap(appType, providerId, modelMap),
     adopt: (appType: string, supplierId: string) =>
       mocks.adopt(appType, supplierId),
+    setEnabled: (supplierId: string, enabled: boolean) =>
+      mocks.setEnabled(supplierId, enabled),
+    remove: (supplierId: string) => mocks.remove(supplierId),
   },
 }));
 
@@ -36,6 +42,7 @@ vi.mock("@/lib/toast", () => ({
   toast: {
     success: (...args: unknown[]) => mocks.success(...args),
     error: (...args: unknown[]) => mocks.error(...args),
+    warning: (...args: unknown[]) => mocks.warning(...args),
   },
 }));
 
@@ -70,6 +77,7 @@ const supplier = (overrides: Partial<Supplier> = {}): Supplier => ({
   host: "api.acme.dev",
   baseUrl: "https://api.acme.dev/v1",
   upstreamProtocol: "anthropic",
+  enabled: true,
   apps: ["claude", "codex"],
   consumers: ["claude:p1", "codex:p2"],
   bindings: [
@@ -126,8 +134,11 @@ describe("SupplierPage", () => {
     mocks.updateSecret.mockReset();
     mocks.updateBindingModelMap.mockReset();
     mocks.adopt.mockReset();
+    mocks.setEnabled.mockReset();
+    mocks.remove.mockReset();
     mocks.success.mockReset();
     mocks.error.mockReset();
+    mocks.warning.mockReset();
   });
 
   it("renders one flat row per supplier with address, protocol, apps and credentials", async () => {
@@ -167,6 +178,13 @@ describe("SupplierPage", () => {
     expect(adoptButton()).toBeEnabled();
     expect(
       screen.getByRole("button", { name: "suppliers.modelMapAction" }),
+    ).toBeInTheDocument();
+    // 启用/停用开关与删除入口
+    expect(
+      screen.getByRole("switch", { name: "suppliers.disableAction" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "suppliers.moreActions" }),
     ).toBeInTheDocument();
   });
 
@@ -789,5 +807,115 @@ describe("SupplierPage", () => {
       screen.queryByLabelText("suppliers.baseUrlLabel"),
     ).not.toBeInTheDocument();
     expect(screen.getByLabelText("suppliers.secretLabel")).toBeInTheDocument();
+  });
+
+  it("disables a supplier from the row switch and dims it", async () => {
+    mocks.setEnabled.mockResolvedValue([supplier({ enabled: false })]);
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("switch", { name: "suppliers.disableAction" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.setEnabled).toHaveBeenCalledWith("sup-1", false),
+    );
+    expect(mocks.success).toHaveBeenCalledWith(
+      "suppliers.disabledToast:Acme Gateway",
+    );
+    expect(
+      await screen.findByText("suppliers.disabledBadge"),
+    ).toBeInTheDocument();
+    // 开关翻成「启用」入口；停用态不允许再往 agent 里采用
+    expect(
+      screen.getByRole("switch", { name: "suppliers.enableAction" }),
+    ).toBeInTheDocument();
+    expect(adoptButton()).toBeDisabled();
+  });
+
+  it("keeps the switch untouched and shows the backend reason when toggling fails", async () => {
+    mocks.setEnabled.mockRejectedValue("找不到这家供应商（可能已被删除）");
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("switch", { name: "suppliers.disableAction" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.error).toHaveBeenCalledWith(
+        "找不到这家供应商（可能已被删除）",
+      ),
+    );
+    // 失败不改界面：开关仍是「停用」入口，也没有已停用徽标
+    expect(
+      screen.getByRole("switch", { name: "suppliers.disableAction" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("suppliers.disabledBadge"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("deletes a supplier only after the confirmation and clears the row", async () => {
+    mocks.remove.mockResolvedValue({ suppliers: [], deleted: 2, skipped: [] });
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.moreActions" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "suppliers.deleteAction" }),
+    );
+
+    // 确认框先把会一起删掉的 app 与配置条数摊开（mock 的 t 只回传 count）
+    expect(
+      await screen.findByText("suppliers.deleteTitle"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("suppliers.deleteDescription:2"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.deleteConfirm" }),
+    );
+
+    await waitFor(() => expect(mocks.remove).toHaveBeenCalledWith("sup-1"));
+    expect(mocks.success).toHaveBeenCalledWith("suppliers.deleteSuccess:2");
+    expect(await screen.findByText("suppliers.empty")).toBeInTheDocument();
+  });
+
+  it("warns about configurations that could not be deleted", async () => {
+    mocks.remove.mockResolvedValue({
+      suppliers: [supplier()],
+      deleted: 1,
+      skipped: [{ appType: "codex", providerId: "p2", reason: "配置不可写" }],
+    });
+
+    renderPage();
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.moreActions" }),
+    );
+    await user.click(
+      await screen.findByRole("menuitem", { name: "suppliers.deleteAction" }),
+    );
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.deleteConfirm" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.warning).toHaveBeenCalledWith("suppliers.deleteSkipped:1"),
+    );
+    expect(await screen.findByText("Acme Gateway")).toBeInTheDocument();
   });
 });

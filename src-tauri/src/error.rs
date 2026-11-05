@@ -61,6 +61,8 @@ pub enum AppError {
     OmoConfigNotFound,
     #[error("所有供应商已熔断，无可用渠道")]
     AllProvidersCircuitOpen,
+    #[error("所有供应商都已停用，无可用渠道")]
+    AllProvidersDisabled,
     #[error("未配置供应商")]
     NoProvidersConfigured,
 }

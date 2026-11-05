@@ -145,8 +145,8 @@ describe("AppConfigPage", () => {
 
     await user.click(await screen.findByText("高级设置"));
 
-    const defaultRow = (await screen.findByText("CTYun/gpt-5.6-sol")).closest("label");
-    const slotRow = screen.getByText("Kimi/kimi-k3").closest("label");
+    const defaultRow = await screen.findByTitle("CTYun/gpt-5.6-sol");
+    const slotRow = screen.getByTitle("Kimi/kimi-k3");
     expect(defaultRow).toBeTruthy();
     expect(slotRow).toBeTruthy();
     for (const row of [defaultRow as HTMLElement, slotRow as HTMLElement]) {
@@ -166,6 +166,44 @@ describe("AppConfigPage", () => {
     );
   });
 
+  it("允许列表按供应商加横栏分组，组内保持目录顺序", async () => {
+    const groupedEntries: GatewayCatalogEntry[] = [
+      ...entries,
+      {
+        reference: "CTYun/qwen3.8-max",
+        upstreamId: "u1",
+        upstreamName: "CTYun",
+        modelId: "qwen3.8-max",
+        displayName: "Qwen3.8 Max",
+        endpointIds: [],
+        sources: ["claude"],
+      },
+    ];
+    getCatalog.mockResolvedValue(groupedEntries);
+    getAppModelConfig.mockResolvedValue({ default: "CTYun/gpt-5.6-sol" });
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByText("高级设置"));
+
+    // 每个供应商一条横栏（同供应商只出现一次），右侧是这栏的模型数
+    const ctyunHeader = (await screen.findByText("CTYun")).parentElement;
+    expect(ctyunHeader?.textContent).toContain("2");
+    expect(screen.getByText("Kimi").parentElement?.textContent).toContain("1");
+
+    // 组内/组间顺序 = 目录顺序（上游 → 模型）
+    const titles = Array.from(
+      document.querySelectorAll<HTMLElement>(
+        'label[title^="CTYun/"], label[title^="Kimi/"]',
+      ),
+    ).map((label) => label.getAttribute("title"));
+    expect(titles).toEqual([
+      "CTYun/gpt-5.6-sol",
+      "CTYun/qwen3.8-max",
+      "Kimi/kimi-k3",
+    ]);
+  });
+
   it("opens advanced settings with the allowed-model checklist and saves", async () => {
     getCatalog.mockResolvedValue(entries);
     getAppModelConfig.mockResolvedValue({
@@ -178,9 +216,9 @@ describe("AppConfigPage", () => {
 
     await user.click(await screen.findByText("高级设置"));
     expect(await screen.findByText("允许模型列表")).toBeTruthy();
-    // 目录里的两条都出现在勾选列表里
-    expect(await screen.findByText("CTYun/gpt-5.6-sol")).toBeTruthy();
-    expect(screen.getByText("Kimi/kimi-k3")).toBeTruthy();
+    // 目录里的两条都出现在勾选列表里（行上 title 是模型引用，显示的是模型名）
+    expect(await screen.findByTitle("CTYun/gpt-5.6-sol")).toBeTruthy();
+    expect(screen.getByTitle("Kimi/kimi-k3")).toBeTruthy();
 
     await user.click(screen.getByRole("button", { name: "保存" }));
     expect(setAppModelConfig).toHaveBeenCalledWith(

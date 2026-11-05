@@ -1205,6 +1205,31 @@ impl Database {
         Ok(keys)
     }
 
+    /// 被人工停用的端点 id（供应商页的启用/停用开关）。
+    ///
+    /// 开关按端点存：供应商的身份是「服务根 + 上游协议」，同一 host 下的不同协议
+    /// 是不同供应商，挂在 host（`upstreams`）上会一停停一家。老库还没跑到 v28 时
+    /// 没有 `enabled` 列：按「全部启用」返回，绝不让开关列不存在把路由带坏。
+    pub fn get_disabled_endpoint_ids(&self) -> Result<HashSet<String>, AppError> {
+        let conn = lock_conn!(self.conn);
+        if !Self::table_exists(&conn, "upstream_endpoints")?
+            || !Self::has_column(&conn, "upstream_endpoints", "enabled")?
+        {
+            return Ok(HashSet::new());
+        }
+        let mut stmt = conn
+            .prepare("SELECT id FROM upstream_endpoints WHERE enabled = 0")
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|e| AppError::Database(e.to_string()))?;
+        let mut disabled = HashSet::new();
+        for row in rows {
+            disabled.insert(row.map_err(|e| AppError::Database(e.to_string()))?);
+        }
+        Ok(disabled)
+    }
+
     /// 判断指定 app 下是否已存在任意 provider。
     ///
     /// 启动阶段的 live import 需要使用这个更严格的判断：
