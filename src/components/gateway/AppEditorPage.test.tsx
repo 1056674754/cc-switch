@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GatewayCatalogEntry } from "@/types/gateway";
@@ -87,7 +87,18 @@ describe("AppEditorPage", () => {
 
     await user.click(screen.getByRole("button", { name: "编辑" }));
     await user.click(screen.getAllByRole("combobox")[0]);
-    await user.click(await screen.findByRole("option", { name: /Kimi K3/ }));
+    // 两栏选择器：先在左栏切供应商，再点它的模型
+    await user.click(
+      within(await screen.findByRole("listbox", { name: "供应商" })).getByText(
+        "Kimi",
+      ),
+    );
+    await user.click(
+      within(screen.getByRole("listbox", { name: "模型" })).getByRole(
+        "option",
+        { name: /Kimi K3/ },
+      ),
+    );
     await user.click(screen.getByRole("button", { name: "保存" }));
 
     expect(gatewayApi.setAppModelConfig).toHaveBeenCalledWith(

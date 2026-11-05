@@ -6,6 +6,8 @@ export interface ModelPickerOption {
   label: string;
   /** 次要说明：供应商 · 窗口。 */
   description?: string;
+  /** 窗口大小，两栏选择器里单独显示。 */
+  window?: string;
   oneM: boolean;
   /** 找不到对应目录项时为 true（配置里的旧引用/手工改过的值）。 */
   stale?: boolean;
@@ -28,6 +30,7 @@ function optionOf(entry: GatewayCatalogEntry): ModelPickerOption {
   return {
     value: entry.reference,
     label,
+    window,
     description: window
       ? `${entry.upstreamName} · ${window}`
       : entry.upstreamName,
