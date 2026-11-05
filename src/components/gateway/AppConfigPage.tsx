@@ -102,12 +102,26 @@ export function AppConfigPage({
   const slots = slotDefinitions(appType);
   const allowed = draft.allowed ?? [];
 
+  // 上方选过的模型（默认 + 槽位）永远算「已允许」：列表里勾上并禁用，
+  // 不允许在下面取消，避免出现「默认模型不在允许列表里」这种自相矛盾的配置。
+  const pinned = useMemo(() => {
+    const references = [draft.default, ...Object.values(draft.slots ?? {})].filter(
+      (reference): reference is string => Boolean(reference),
+    );
+    return [...new Set(references)];
+  }, [draft.default, draft.slots]);
+  const isPinned = (reference: string) => pinned.includes(reference);
+  const effectiveAllowed = useMemo(
+    () => [...new Set([...allowed, ...pinned])],
+    [allowed, pinned],
+  );
+
   const errors = useMemo(() => {
     if (!draft.default) {
       return [t("gateway.form.defaultRequired", { defaultValue: "默认模型必填" })];
     }
-    return validateDraft(draft, entries);
-  }, [draft, entries, t]);
+    return validateDraft({ ...draft, allowed: effectiveAllowed }, entries);
+  }, [draft, entries, t, effectiveAllowed]);
 
   const filtered = useMemo(() => {
     const keyword = search.trim().toLowerCase();
@@ -118,10 +132,12 @@ export function AppConfigPage({
   }, [entries, search]);
 
   const toggleAllowed = (reference: string, checked: boolean) => {
+    if (isPinned(reference)) return;
     const next = checked
-      ? [...allowed.filter((item) => item !== reference), reference]
-      : allowed.filter((item) => item !== reference);
-    setDraft({ ...draft, allowed: next });
+      ? [...effectiveAllowed.filter((item) => item !== reference), reference]
+      : effectiveAllowed.filter((item) => item !== reference);
+    // 勾选/取消后仍保证默认 + 槽位在列表里（它们由上方字段控制）。
+    setDraft({ ...draft, allowed: [...new Set([...pinned, ...next])] });
   };
 
   const toggleRoute = async () => {
@@ -161,6 +177,8 @@ export function AppConfigPage({
       await gatewayApi.setAppModelConfig(appType, {
         ...draft,
         default: draft.default,
+        // 默认 + 槽位一并写进允许列表：后端校验与客户端发布都要求它们在里面。
+        allowed: effectiveAllowed,
         routing: meta,
       });
       await queryClient.invalidateQueries({
@@ -375,7 +393,15 @@ export function AppConfigPage({
                       variant="ghost"
                       size="sm"
                       onClick={() =>
-                        setDraft({ ...draft, allowed: entries.map((e) => e.reference) })
+                        setDraft({
+                          ...draft,
+                          allowed: [
+                            ...new Set([
+                              ...pinned,
+                              ...entries.map((e) => e.reference),
+                            ]),
+                          ],
+                        })
                       }
                     >
                       {t("gateway.form.selectAll", { defaultValue: "全部" })}
@@ -383,7 +409,7 @@ export function AppConfigPage({
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => setDraft({ ...draft, allowed: [] })}
+                      onClick={() => setDraft({ ...draft, allowed: pinned })}
                     >
                       {t("gateway.form.clear", { defaultValue: "清除" })}
                     </Button>
@@ -397,20 +423,33 @@ export function AppConfigPage({
                   })}
                 />
                 <div className="grid max-h-72 grid-cols-2 gap-2 overflow-y-auto">
-                  {filtered.map((entry) => (
-                    <label
-                      key={entry.reference}
-                      className="flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm"
-                    >
-                      <Checkbox
-                        checked={allowed.includes(entry.reference)}
-                        onCheckedChange={(checked) =>
-                          toggleAllowed(entry.reference, checked === true)
-                        }
-                      />
-                      <span className="truncate">{entry.reference}</span>
-                    </label>
-                  ))}
+                  {filtered.map((entry) => {
+                    const pinnedHere = isPinned(entry.reference);
+                    return (
+                      <label
+                        key={entry.reference}
+                        className={`flex items-center gap-2 rounded-md border border-border px-3 py-2 text-sm ${
+                          pinnedHere ? "bg-muted/50" : ""
+                        }`}
+                      >
+                        <Checkbox
+                          checked={pinnedHere || allowed.includes(entry.reference)}
+                          disabled={pinnedHere}
+                          onCheckedChange={(checked) =>
+                            toggleAllowed(entry.reference, checked === true)
+                          }
+                        />
+                        <span className="truncate">{entry.reference}</span>
+                        {pinnedHere && (
+                          <span className="ml-auto shrink-0 text-caption text-fg-3">
+                            {t("gateway.form.pinnedModel", {
+                              defaultValue: "上方已选",
+                            })}
+                          </span>
+                        )}
+                      </label>
+                    );
+                  })}
                 </div>
               </div>
             </div>

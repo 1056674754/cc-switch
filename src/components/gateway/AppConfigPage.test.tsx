@@ -131,6 +131,41 @@ describe("AppConfigPage", () => {
     );
   });
 
+  it("把默认模型和槽位自动勾进允许列表、禁用，并一起保存", async () => {
+    getCatalog.mockResolvedValue(entries);
+    // 复现旧问题：允许列表非空但没包含默认模型 → 之前会报「默认模型不在允许列表里」
+    getAppModelConfig.mockResolvedValue({
+      default: "CTYun/gpt-5.6-sol",
+      slots: { opus: "Kimi/kimi-k3" },
+      allowed: ["Kimi/kimi-k3"],
+    });
+    setAppModelConfig.mockResolvedValue(undefined);
+    const user = userEvent.setup();
+    renderPage();
+
+    await user.click(await screen.findByText("高级设置"));
+
+    const defaultRow = (await screen.findByText("CTYun/gpt-5.6-sol")).closest("label");
+    const slotRow = screen.getByText("Kimi/kimi-k3").closest("label");
+    expect(defaultRow).toBeTruthy();
+    expect(slotRow).toBeTruthy();
+    for (const row of [defaultRow as HTMLElement, slotRow as HTMLElement]) {
+      const checkbox = within(row).getByRole("checkbox");
+      expect(checkbox).toBeChecked();
+      expect(checkbox).toBeDisabled();
+      expect(within(row).getByText("上方已选")).toBeTruthy();
+    }
+    expect(screen.queryByText(/默认模型不在允许列表里/)).toBeNull();
+
+    await user.click(screen.getByRole("button", { name: "保存" }));
+    expect(setAppModelConfig).toHaveBeenCalledWith(
+      "claude",
+      expect.objectContaining({
+        allowed: expect.arrayContaining(["CTYun/gpt-5.6-sol", "Kimi/kimi-k3"]),
+      }),
+    );
+  });
+
   it("opens advanced settings with the allowed-model checklist and saves", async () => {
     getCatalog.mockResolvedValue(entries);
     getAppModelConfig.mockResolvedValue({
