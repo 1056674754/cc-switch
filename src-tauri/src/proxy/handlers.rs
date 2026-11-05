@@ -215,6 +215,28 @@ fn resolve_stack_target(
     let Some(model) = body.get("model").and_then(Value::as_str) else {
         return Ok(None);
     };
+    // Claude Desktop 的角色槽位（1+4）：菜单发的是 `claude-opus-5` 这类 route id，
+    // 应用配置里对应槽位配了模型就换成引用，再按引用选上游；没配沿用原来的映射表。
+    if matches!(app_type, AppType::ClaudeDesktop) {
+        match crate::services::gateway_route::resolve_desktop_role_target(&state.db, model) {
+            Ok(Some(target)) => {
+                body["model"] = Value::String(target.upstream_model.clone());
+                return Ok(Some(target));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let message = error.to_string();
+                log::warn!("[{}] {message}", app_type.as_str());
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(stack_miss_body(app_type, &message)),
+                    )
+                        .into_response(),
+                ));
+            }
+        }
+    }
     if matches!(stack::decode(app_type, model), Decoded::Plain) {
         // 普通模型名里如果写着 `<供应商名>/<模型 id>`，就按模型选上游（P2）。
         // 不是引用形状、或供应商名不认识的别名，交给默认路由；点名的模型查不到则报错。

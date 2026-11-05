@@ -85,6 +85,41 @@ pub const DEFAULT_PROXY_ROUTES: &[ClaudeDesktopDefaultRoute] = &[
     },
 ];
 
+/// 角色名 → Desktop 的 route id（`claude-opus-5` 等）。
+///
+/// 与前端 `CLAUDE_DESKTOP_ROLE_ROUTE_IDS` 同源：都从 [`DEFAULT_PROXY_ROUTES`] 派生，
+/// 一处改这里和前端预设就一起变。
+pub(crate) fn role_route_id(role: &str) -> Option<&'static str> {
+    let env_key = format!("ANTHROPIC_DEFAULT_{}_MODEL", role.to_ascii_uppercase());
+    DEFAULT_PROXY_ROUTES
+        .iter()
+        .find(|route| route.env_key == env_key)
+        .map(|route| route.route_id)
+}
+
+/// route id → 角色名（`opus` / `sonnet` / `haiku` / `fable`）。
+///
+/// Desktop 的模型菜单发的是 route id；应用配置把 1+4 槽位按角色名存，所以请求进来时
+/// 需要这个反查。兼容旧 route id（Opus 4.8、Haiku 5.5），历史 profile 里可能还留着。
+pub(crate) fn role_for_route_id(model: &str) -> Option<&'static str> {
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    for role in ["sonnet", "opus", "haiku", "fable"] {
+        if role_route_id(role).is_some_and(|route_id| route_id.eq_ignore_ascii_case(model)) {
+            return Some(role);
+        }
+    }
+    if model.eq_ignore_ascii_case(LEGACY_OPUS_ROUTE_ID) {
+        return Some("opus");
+    }
+    if model.eq_ignore_ascii_case(CURRENT_HAIKU_ROUTE_ID) {
+        return Some("haiku");
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 struct ClaudeDesktopPaths {
     normal_config_path: PathBuf,
@@ -1698,6 +1733,27 @@ fn unsupported_platform_error() -> AppError {
 mod tests {
     use super::*;
     use crate::config::write_json_file;
+
+    #[test]
+    fn role_route_ids_round_trip() {
+        assert_eq!(role_route_id("sonnet"), Some("claude-sonnet-5"));
+        assert_eq!(role_route_id("opus"), Some(CURRENT_OPUS_ROUTE_ID));
+        assert_eq!(role_route_id("haiku"), Some(LEGACY_HAIKU_ROUTE_ID));
+        assert_eq!(role_route_id("fable"), Some("claude-fable-5"));
+        assert_eq!(role_route_id("nothing"), None);
+
+        for role in ["sonnet", "opus", "haiku", "fable"] {
+            let route_id = role_route_id(role).expect("route id");
+            assert_eq!(role_for_route_id(route_id), Some(role));
+        }
+        // 旧库里的两个历史 route id 也认得
+        assert_eq!(role_for_route_id("claude-opus-4-8"), Some("opus"));
+        assert_eq!(role_for_route_id("claude-haiku-5-5"), Some("haiku"));
+        assert_eq!(role_for_route_id("claude-sonnet-5"), Some("sonnet"));
+        // 不是角色 id 就不掺和
+        assert_eq!(role_for_route_id("kimi-k3"), None);
+        assert_eq!(role_for_route_id(""), None);
+    }
     use crate::database::Database;
     use crate::provider::{ClaudeDesktopModelRoute, ProviderMeta};
     use serde_json::json;

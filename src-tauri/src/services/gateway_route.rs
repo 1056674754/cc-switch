@@ -158,6 +158,40 @@ pub fn resolve_configured_model(
     resolve_reference_target(db, app, &reference)
 }
 
+/// Claude Desktop 的角色 route id（`claude-opus-5` 等）→ 应用配置里该槽位配的模型引用。
+///
+/// Desktop 的模型菜单发的是角色 route id，应用配置把 1+4 槽位按角色名存；槽位没配就
+/// 返回 `None`，交给原来的 provider 映射表（老行为不变）。
+pub(crate) fn desktop_slot_reference(
+    db: &Database,
+    model: &str,
+) -> Result<Option<String>, AppError> {
+    let Some(role) = crate::claude_desktop_config::role_for_route_id(model) else {
+        return Ok(None);
+    };
+    let Some(config) = db.get_app_model_config(AppType::ClaudeDesktop.as_str())? else {
+        return Ok(None);
+    };
+    Ok(config
+        .slots
+        .get(role)
+        .map(|reference| reference.trim())
+        .filter(|reference| !reference.is_empty())
+        .map(str::to_string))
+}
+
+/// Desktop 请求里是角色 route id 时，按应用配置的槽位换成模型引用再解析上游。
+/// 槽位没配返回 `None`（沿用 provider 映射表）。
+pub(crate) fn resolve_desktop_role_target(
+    db: &Database,
+    model: &str,
+) -> Result<Option<StackTarget>, AppError> {
+    let Some(reference) = desktop_slot_reference(db, model)? else {
+        return Ok(None);
+    };
+    resolve_reference_target(db, &AppType::ClaudeDesktop, &reference)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -435,6 +469,66 @@ mod tests {
         // 客户端自己的别名（供应商名不存在）→ 交给默认路由
         assert!(resolve_reference_target(&db, &AppType::Claude, "anthropic/claude-x")?.is_none());
         Ok(())
+    }
+
+    #[test]
+    fn claude_desktop_role_ids_resolve_through_slots() {
+        use crate::provider::{ClaudeDesktopModelRoute, ProviderMeta};
+
+        let db = Database::memory().expect("memory db");
+        let mut provider = claude_provider(
+            "p-ctyun",
+            "CTYun",
+            "https://ai.ctaigw.cn/v1",
+            &["deepseek-v4.1-flash-1017"],
+        );
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_model_routes: [(
+                "claude-sonnet-5".to_string(),
+                ClaudeDesktopModelRoute {
+                    model: "deepseek-v4.1-flash-1017".to_string(),
+                    label_override: Some("DeepSeek V4.1".to_string()),
+                    supports_1m: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProviderMeta::default()
+        });
+        db.save_provider("claude-desktop", &provider).expect("save");
+        db.set_app_model_config(
+            "claude-desktop",
+            &app_config(
+                None,
+                &[],
+                &[
+                    ("opus", "CTYun/deepseek-v4.1-flash-1017"),
+                    ("haiku", "CTYun/deepseek-v4.1-flash-1017"),
+                ],
+            ),
+        )
+        .expect("save config");
+
+        // 配了槽位的角色 → 按槽位里的引用选上游（Opus 的当前 route id 与旧 route id 都认）
+        for model in ["claude-opus-5", "claude-opus-4-8"] {
+            let target = resolve_desktop_role_target(&db, model)
+                .expect("resolve")
+                .unwrap_or_else(|| panic!("{model} 应命中 opus 槽位"));
+            assert_eq!(target.provider.id, "p-ctyun");
+            assert_eq!(target.upstream_model, "deepseek-v4.1-flash-1017");
+        }
+        // Haiku 5.5 是旧库可能留下的另一个 id
+        assert!(resolve_desktop_role_target(&db, "claude-haiku-5-5")
+            .expect("resolve")
+            .is_some());
+        // 没配槽位的角色 → 交给原来的 provider 映射表
+        assert!(resolve_desktop_role_target(&db, "claude-sonnet-5")
+            .expect("resolve")
+            .is_none());
+        // 不是角色 id → 不掺和
+        assert!(resolve_desktop_role_target(&db, "kimi-k3")
+            .expect("resolve")
+            .is_none());
     }
 
     #[test]

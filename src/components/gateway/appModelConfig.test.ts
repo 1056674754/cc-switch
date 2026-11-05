@@ -28,13 +28,14 @@ const catalog: GatewayCatalogEntry[] = [
 ];
 
 describe("appModelConfig", () => {
-  it("only claude has slots", () => {
-    expect(slotDefinitions("claude").map((slot) => slot.key)).toEqual([
-      "fable",
-      "opus",
-      "sonnet",
-      "haiku",
-    ]);
+  it("claude and claude-desktop have the fixed four slots", () => {
+    const keys = ["fable", "opus", "sonnet", "haiku"];
+    expect(slotDefinitions("claude").map((slot) => slot.key)).toEqual(keys);
+    expect(slotDefinitions("claude-desktop").map((slot) => slot.key)).toEqual(keys);
+    // Desktop 的提示写的是它模型菜单里的角色 route id
+    expect(slotDefinitions("claude-desktop")[1].hint).toBe(
+      "Desktop 菜单的 claude-opus-5",
+    );
     expect(slotDefinitions("codex")).toEqual([]);
     expect(slotDefinitions("opencode")).toEqual([]);
   });

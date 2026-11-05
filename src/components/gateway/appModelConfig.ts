@@ -1,6 +1,7 @@
 import type { AppModelConfig, GatewayCatalogEntry } from "@/types/gateway";
+import { CLAUDE_DESKTOP_ROLE_ROUTE_IDS } from "@/config/claudeDesktopProviderPresets";
 
-/** 槽位定义：只有 Claude Code 有四档，其余 app 没有槽位。 */
+/** 槽位定义：Claude 系（Claude Code / Claude Desktop）都有固定的四档，其余 app 没有。 */
 export interface SlotDefinition {
   key: string;
   /** 界面上显示的名字。 */
@@ -9,14 +10,41 @@ export interface SlotDefinition {
   hint: string;
 }
 
+const CLAUDE_CODE_SLOTS: SlotDefinition[] = [
+  { key: "fable", label: "Fable", hint: "ANTHROPIC_DEFAULT_FABLE_MODEL" },
+  { key: "opus", label: "Opus", hint: "ANTHROPIC_DEFAULT_OPUS_MODEL" },
+  { key: "sonnet", label: "Sonnet", hint: "ANTHROPIC_DEFAULT_SONNET_MODEL" },
+  { key: "haiku", label: "Haiku", hint: "ANTHROPIC_DEFAULT_HAIKU_MODEL" },
+];
+
+/** Desktop 的四档对应它模型菜单里的角色 route id；槽位本身固定，值可选。 */
+const CLAUDE_DESKTOP_SLOTS: SlotDefinition[] = [
+  {
+    key: "fable",
+    label: "Fable",
+    hint: `Desktop 菜单的 ${CLAUDE_DESKTOP_ROLE_ROUTE_IDS.fable}`,
+  },
+  {
+    key: "opus",
+    label: "Opus",
+    hint: `Desktop 菜单的 ${CLAUDE_DESKTOP_ROLE_ROUTE_IDS.opus}`,
+  },
+  {
+    key: "sonnet",
+    label: "Sonnet",
+    hint: `Desktop 菜单的 ${CLAUDE_DESKTOP_ROLE_ROUTE_IDS.sonnet}`,
+  },
+  {
+    key: "haiku",
+    label: "Haiku",
+    hint: `Desktop 菜单的 ${CLAUDE_DESKTOP_ROLE_ROUTE_IDS.haiku}`,
+  },
+];
+
 export function slotDefinitions(appType: string): SlotDefinition[] {
-  if (appType !== "claude") return [];
-  return [
-    { key: "fable", label: "Fable", hint: "ANTHROPIC_DEFAULT_FABLE_MODEL" },
-    { key: "opus", label: "Opus", hint: "ANTHROPIC_DEFAULT_OPUS_MODEL" },
-    { key: "sonnet", label: "Sonnet", hint: "ANTHROPIC_DEFAULT_SONNET_MODEL" },
-    { key: "haiku", label: "Haiku", hint: "ANTHROPIC_DEFAULT_HAIKU_MODEL" },
-  ];
+  if (appType === "claude") return CLAUDE_CODE_SLOTS;
+  if (appType === "claude-desktop") return CLAUDE_DESKTOP_SLOTS;
+  return [];
 }
 
 /** 设置一个槽位；传 undefined 表示清空（不发空串）。 */
