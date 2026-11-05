@@ -166,17 +166,17 @@ pub fn main() -> i32 {
         }
     };
 
-    if parsed.has_flag("help") || parsed.words.is_empty() || parsed.group() == "help" {
-        print!("{}", help_text(parsed.group()));
-        return EXIT_OK;
-    }
-
     if parsed.has_flag("version") || parsed.group() == "version" {
         println!(
             "ccswitch {} ({})",
             env!("CARGO_PKG_VERSION"),
             protocol_tag()
         );
+        return EXIT_OK;
+    }
+
+    if parsed.has_flag("help") || parsed.words.is_empty() || parsed.group() == "help" {
+        print!("{}", help_text(parsed.group()));
         return EXIT_OK;
     }
 
@@ -336,7 +336,19 @@ fn print_payload(payload: &Payload, json: bool) {
                 print_table(table);
             }
         }
-        Payload::Text(text) => print!("{text}"),
+        Payload::Text(text) => {
+            if json {
+                // 纯文本结果（如「已删除」这类确认消息）在 --json 下统一包成对象，
+                // 脚本至少能拿到 message 而不是一段无法解析的文本。
+                let value = serde_json::json!({ "message": text });
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&value).unwrap_or_default()
+                );
+            } else {
+                print!("{text}");
+            }
+        }
         Payload::Lines(lines) => {
             if json {
                 println!(
