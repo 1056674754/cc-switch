@@ -4328,6 +4328,11 @@
     "noBaseUrl": "No address (managed sign-in)",
     "credentialCount_one": "{{count}} credential",
     "credentialCount_other": "{{count}} credentials",
+    "accountsTitle": "Accounts",
+    "accountInUse": "In use",
+    "accountsLoadFailed": "Failed to load accounts",
+    "accountsEmpty": "No accounts for this service yet",
+    "manageAccounts": "Manage accounts",
     "credentialKinds": "Credentials",
     "credentialKind": {
       "literal": "API key in config",

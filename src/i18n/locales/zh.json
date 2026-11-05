@@ -4327,6 +4327,11 @@
     "noHost": "托管登录",
     "noBaseUrl": "无地址（托管登录）",
     "credentialCount_other": "{{count}} 个凭据",
+    "accountsTitle": "账号",
+    "accountInUse": "使用中",
+    "accountsLoadFailed": "读取账号失败",
+    "accountsEmpty": "这个服务还没有账号",
+    "manageAccounts": "管理账号",
     "credentialKinds": "凭据形态",
     "credentialKind": {
       "literal": "明文密钥",

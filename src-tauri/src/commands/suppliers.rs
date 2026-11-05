@@ -65,6 +65,12 @@ pub struct Supplier {
     pub credential_count: i64,
     /// 这个地址上出现过的凭据形态：literal / env_ref / managed / none
     pub credential_kinds: Vec<String>,
+    /// 托管登录的认证供应商（`codex_oauth` / `claude_official` / …）。有值说明
+    /// 这家供应商的凭据来自授权中心的账号池，卡片要列账号而不是只报「1 个凭据」。
+    pub managed_auth_provider: Option<String>,
+    /// 绑定到这家供应商的 provider 分别选了账号池里的哪个账号
+    /// （`provider.meta.authBinding.accountId`），用于在账号行上标「使用中」。
+    pub bound_account_ids: Vec<String>,
     /// 归到这家供应商的上游 id（目录与模型覆盖按它对齐，一个服务根可能对应多条上游）
     pub upstream_ids: Vec<String>,
     /// 启停开关（供应商页的「启用/停用」）：停用 = 网关选路时跳过这家上游，
@@ -239,6 +245,31 @@ fn endpoint_upstream_protocols(
     Ok((protocols, mixed))
 }
 
+/// 从 provider 的 meta 认托管登录：优先读新的 `authBinding`，老官方卡再按 id 兜底。
+///
+/// 返回（认证供应商, 绑定账号）。`authBinding.accountId` 为空表示跟随该服务的默认账号。
+fn managed_auth_binding(meta: &str, provider_id: &str) -> (Option<String>, Option<String>) {
+    if let Ok(meta) = serde_json::from_str::<serde_json::Value>(meta) {
+        let provider = meta
+            .pointer("/authBinding/authProvider")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let account = meta
+            .pointer("/authBinding/accountId")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        if provider.is_some() || account.is_some() {
+            return (provider, account);
+        }
+    }
+    let fallback = match provider_id {
+        "codex-official" => Some("codex_oauth"),
+        "claude-official" | "claude-desktop-official" => Some("claude_official"),
+        _ => None,
+    };
+    (fallback.map(str::to_string), None)
+}
+
 fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
     let mut conn = lock_conn!(db.conn);
 
@@ -257,6 +288,19 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
     }
 
     let (upstream_protocols, _mixed) = endpoint_upstream_protocols(&conn)?;
+
+    // (app_type, provider_id) → provider.meta：认托管登录的认证供应商和绑定的账号。
+    // provider 行才是账号归属的真相，端点和供应商都是从它派生出来的。
+    let provider_metas: BTreeMap<(String, String), String> = {
+        let mut stmt = conn.prepare("SELECT app_type, id, COALESCE(meta, '') FROM providers")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                (row.get::<_, String>(0)?, row.get::<_, String>(1)?),
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.collect::<Result<_, _>>()?
+    };
 
     // endpoint_id → 该端点上的一条条接入
     let mut consumers: BTreeMap<String, Vec<(String, String, String)>> = BTreeMap::new();
@@ -338,6 +382,8 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 bindings: Vec::new(),
                 credential_count: 0,
                 credential_kinds: Vec::new(),
+                managed_auth_provider: None,
+                bound_account_ids: Vec::new(),
                 upstream_ids: Vec::new(),
                 enabled: enabled != 0,
             });
@@ -371,6 +417,17 @@ fn collect(db: &crate::database::Database) -> Result<Vec<Supplier>, AppError> {
                 let consumer = format!("{app_type}:{provider_id}");
                 if !supplier.consumers.contains(&consumer) {
                     supplier.consumers.push(consumer);
+                }
+                if let Some(meta) = provider_metas.get(&(app_type.clone(), provider_id.clone())) {
+                    let (auth_provider, account_id) = managed_auth_binding(meta, provider_id);
+                    if let Some(auth_provider) = auth_provider {
+                        supplier.managed_auth_provider.get_or_insert(auth_provider);
+                    }
+                    if let Some(account_id) = account_id {
+                        if !supplier.bound_account_ids.contains(&account_id) {
+                            supplier.bound_account_ids.push(account_id);
+                        }
+                    }
                 }
                 if supplier.bindings.iter().any(|binding| {
                     binding.app_type == *app_type && binding.provider_id == *provider_id
@@ -1004,6 +1061,74 @@ mod tests {
         let provider =
             crate::provider::Provider::with_id(id.to_string(), id.to_string(), config, None);
         db.save_provider(app, &provider).expect("插入 provider");
+    }
+
+    /// 带 meta 插入：托管登录的认证供应商与绑定账号都在 provider.meta 里。
+    fn insert_provider_with_meta(
+        db: &Database,
+        app: &str,
+        id: &str,
+        config: serde_json::Value,
+        meta: serde_json::Value,
+    ) {
+        let mut provider =
+            crate::provider::Provider::with_id(id.to_string(), id.to_string(), config, None);
+        provider.meta = Some(serde_json::from_value(meta).expect("provider meta"));
+        db.save_provider(app, &provider).expect("插入 provider");
+    }
+
+    /// 托管登录的供应商要带上账号池信息，卡片才能列账号而不是只报「1 个凭据」。
+    #[test]
+    fn managed_provider_exposes_account_pool_metadata() {
+        let db = Database::memory().expect("内存库");
+        insert_provider_with_meta(
+            &db,
+            "claude-desktop",
+            "codex-link",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex",
+                "ANTHROPIC_AUTH_TOKEN": ""
+            }}),
+            json!({"authBinding": {
+                "source": "managed_account",
+                "authProvider": "codex_oauth",
+                "accountId": "acc-default"
+            }}),
+        );
+        let suppliers = collect(&db).expect("总览");
+        let supplier = suppliers
+            .iter()
+            .find(|supplier| supplier.host == "chatgpt.com")
+            .expect("codex 供应商");
+        assert_eq!(
+            supplier.managed_auth_provider.as_deref(),
+            Some("codex_oauth")
+        );
+        assert_eq!(supplier.bound_account_ids, vec!["acc-default".to_string()]);
+        assert!(supplier.credential_kinds.contains(&"managed".to_string()));
+    }
+
+    /// 老官方卡的 meta 没写 authBinding（Claude 官方卡是 {}）：按 provider id 兜底认成
+    /// claude_official，卡片仍然能列出 Claude 账号池。
+    #[test]
+    fn official_provider_falls_back_to_known_auth_provider() {
+        let db = Database::memory().expect("内存库");
+        insert_provider(&db, "claude", "claude-official", json!({"env": {}}));
+        let suppliers = collect(&db).expect("总览");
+        let supplier = suppliers
+            .iter()
+            .find(|supplier| {
+                supplier
+                    .bindings
+                    .iter()
+                    .any(|binding| binding.provider_id == "claude-official")
+            })
+            .expect("Claude 官方供应商");
+        assert_eq!(
+            supplier.managed_auth_provider.as_deref(),
+            Some("claude_official")
+        );
+        assert!(supplier.bound_account_ids.is_empty());
     }
 
     /// 同一个网关被两个 app 使用时，总览里应当只有一条供应商、一个端点，被 2 个 app 使用。

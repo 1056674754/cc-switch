@@ -4327,6 +4327,11 @@
     "noHost": "マネージドログイン",
     "noBaseUrl": "アドレスなし（マネージドログイン）",
     "credentialCount_other": "{{count}} 認証情報",
+    "accountsTitle": "アカウント",
+    "accountInUse": "使用中",
+    "accountsLoadFailed": "アカウントの読み込みに失敗しました",
+    "accountsEmpty": "このサービスにはまだアカウントがありません",
+    "manageAccounts": "アカウントを管理",
     "credentialKinds": "認証情報の種類",
     "credentialKind": {
       "literal": "平文キー",

@@ -47,6 +47,10 @@ export interface Supplier {
   credentialCount: number;
   /** 这个地址上出现过的凭据形态：literal / env_ref / managed / none 的子集 */
   credentialKinds: string[];
+  /** 托管登录的认证供应商（如 `codex_oauth`）；非托管为空 */
+  managedAuthProvider?: string | null;
+  /** 绑定到这家供应商的 provider 各自选了账号池里的哪个账号 */
+  boundAccountIds?: string[];
   /** 归到这家供应商的上游 id，模型目录与人工覆盖按它对上（老 fixture 可能没有） */
   upstreamIds?: string[];
 }

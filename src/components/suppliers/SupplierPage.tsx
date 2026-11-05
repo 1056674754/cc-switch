@@ -42,6 +42,10 @@ import { Switch } from "@/components/ui/switch";
 import { ModelMapEditor } from "@/components/bindings/ModelMapEditor";
 import { SupplierModelsPanel } from "@/components/suppliers/SupplierModelsPanel";
 import {
+  SupplierAccounts,
+  isManagedAuthProvider,
+} from "@/components/suppliers/SupplierAccounts";
+import {
   supportsModelMap,
   toModelMapDraft,
   toModelMapPayload,
@@ -115,7 +119,12 @@ function formatSkippedDetail(skipped: DeleteSupplierSkipped[]): string {
  * 一家供应商 = 一个确切的上游 API（服务根 + 上游协议），所以这里是一张扁平列表：
  * 每行一家，地址改一次，所有接入它的 agent 一起被改写。
  */
-export function SupplierPage() {
+export function SupplierPage({
+  onOpenAuthCenter,
+}: {
+  /** 托管登录的供应商卡片上「管理账号」要跳到授权中心 */
+  onOpenAuthCenter?: () => void;
+} = {}) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const { data, isPending, isError, error, refetch, isFetching } = useQuery({
@@ -157,6 +166,12 @@ export function SupplierPage() {
   /** 托管登录账号没有网关地址：不显示编辑地址 / 换密钥。 */
   const isManagedSupplier = (supplier: Supplier) =>
     supplier.baseUrl.trim() === "";
+
+  /** 凭据全在账号池里（托管登录）时没有密钥可换，不摆「换密钥」。 */
+  const hasEditableSecret = (supplier: Supplier) =>
+    supplier.credentialKinds.some(
+      (kind) => kind === "literal" || kind === "env_ref",
+    );
 
   /** 有没有启用：老 fixture / 更早的后端不带 enabled，缺省按启用处理，免得整页变灰。 */
   const isEnabled = (supplier: Supplier) => supplier.enabled !== false;
@@ -621,23 +636,31 @@ export function SupplierPage() {
                       )}
                     </div>
 
-                    <div className="flex flex-wrap items-center gap-1.5 text-caption text-fg-3">
-                      <span>
-                        {t("suppliers.credentialCount", {
-                          count: supplier.credentialCount,
-                        })}
-                      </span>
-                      {supplier.credentialKinds.map((kind) => (
-                        <span
-                          key={kind}
-                          className="rounded-full bg-subtle px-1.5 py-0.5 text-badge text-fg-2"
-                        >
-                          {t(`suppliers.credentialKind.${kind}`, {
-                            defaultValue: kind,
+                    {isManagedAuthProvider(supplier.managedAuthProvider) ? (
+                      // 托管登录：凭据是账号池，列账号而不是只报「1 个凭据」
+                      <SupplierAccounts
+                        supplier={supplier}
+                        onManageAccounts={onOpenAuthCenter}
+                      />
+                    ) : (
+                      <div className="flex flex-wrap items-center gap-1.5 text-caption text-fg-3">
+                        <span>
+                          {t("suppliers.credentialCount", {
+                            count: supplier.credentialCount,
                           })}
                         </span>
-                      ))}
-                    </div>
+                        {supplier.credentialKinds.map((kind) => (
+                          <span
+                            key={kind}
+                            className="rounded-full bg-subtle px-1.5 py-0.5 text-badge text-fg-2"
+                          >
+                            {t(`suppliers.credentialKind.${kind}`, {
+                              defaultValue: kind,
+                            })}
+                          </span>
+                        ))}
+                      </div>
+                    )}
 
                     {/* 换密钥就地编辑器：只收新值，界面不显示也没拿到过旧密钥 */}
                     {isEditingSecret && editingSecret && (
@@ -757,7 +780,7 @@ export function SupplierPage() {
                     {isEditing ? (
                       <>
                         {/* 编辑地址时仍可切到换密钥：一行只开一个编辑器 */}
-                        {!isManaged && (
+                        {!isManaged && hasEditableSecret(supplier) && (
                           <Button
                             type="button"
                             variant="neutral"

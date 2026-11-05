@@ -1755,7 +1755,7 @@ function App() {
       case "apps":
         return <AppsPage />;
       case "suppliers":
-        return <SupplierPage />;
+        return <SupplierPage onOpenAuthCenter={() => openPage("auth")} />;
       case "bindings":
         return <BindingsPage />;
       default:

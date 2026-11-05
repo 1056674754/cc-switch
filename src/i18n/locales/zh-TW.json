@@ -4328,6 +4328,11 @@
     "noHost": "託管登入",
     "noBaseUrl": "無位址（託管登入）",
     "credentialCount_other": "{{count}} 個憑證",
+    "accountsTitle": "帳號",
+    "accountInUse": "使用中",
+    "accountsLoadFailed": "讀取帳號失敗",
+    "accountsEmpty": "這個服務還沒有帳號",
+    "manageAccounts": "管理帳號",
     "credentialKinds": "憑證型態",
     "credentialKind": {
       "literal": "明文金鑰",
