@@ -46,6 +46,7 @@ const BOOL_FLAGS: &[&str] = &[
     "dry-run",
     "current",
     "resnapshot",
+    "version",
     "no-color",
     "yes",
 ];
@@ -170,7 +171,7 @@ pub fn main() -> i32 {
         return EXIT_OK;
     }
 
-    if parsed.group() == "version" || parsed.group() == "--version" {
+    if parsed.has_flag("version") || parsed.group() == "version" {
         println!(
             "ccswitch {} ({})",
             env!("CARGO_PKG_VERSION"),
