@@ -192,6 +192,50 @@ pub(crate) fn resolve_desktop_role_target(
     resolve_reference_target(db, &AppType::ClaudeDesktop, &reference)
 }
 
+/// 应用模型配置里点过名的引用（默认 + 允许列表，去重保序）：发布和反解都用这个顺序。
+pub(crate) fn desktop_config_references(
+    config: &crate::services::gateway_config::AppModelConfig,
+) -> Vec<&str> {
+    let mut references: Vec<&str> = Vec::new();
+    for reference in std::iter::once(config.default.as_deref())
+        .flatten()
+        .chain(config.allowed.iter().map(String::as_str))
+    {
+        if !references.contains(&reference) {
+            references.push(reference);
+        }
+    }
+    references
+}
+
+/// Claude Desktop 的模型配置引用发布出去的编码 id（`claude-fable-ccs-<数字>`）→ 配置里的引用。
+///
+/// 引用本身是 `供应商/模型` 形状，Desktop 的选择器不收（见
+/// `controller::desktop_model_config_publications` 的注释），所以发布前编码、请求回来时在
+/// 这里解回引用再按引用选上游。配置接管后 Stack 已经关掉，这段会先于 Stack 解析命中。
+pub(crate) fn resolve_desktop_config_target(
+    db: &Database,
+    model: &str,
+) -> Result<Option<StackTarget>, AppError> {
+    let crate::mode::stack::Decoded::Code(code) =
+        crate::mode::stack::decode(&AppType::ClaudeDesktop, model)
+    else {
+        return Ok(None);
+    };
+    let Some(config) = db.get_app_model_config(AppType::ClaudeDesktop.as_str())? else {
+        return Ok(None);
+    };
+    let wanted = crate::mode::stack::desktop_id_from_code(code);
+    for reference in desktop_config_references(&config) {
+        if crate::mode::stack::desktop_config_id(reference) == wanted {
+            return resolve_reference_target(db, &AppType::ClaudeDesktop, reference);
+        }
+    }
+    Err(AppError::Config(format!(
+        "Claude Desktop 的模型配置里没有 {model}（可能已被移除），请重新选择模型"
+    )))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -550,5 +594,96 @@ mod tests {
             resolve_reference_target(&db, &AppType::Claude, "CTYun/deepseek-v4.1-flash-1017")
                 .expect("resolve");
         assert!(result.is_none());
+    }
+
+    fn desktop_with_config() -> Database {
+        use crate::provider::{ClaudeDesktopMode, ClaudeDesktopModelRoute, ProviderMeta};
+
+        let db = Database::memory().expect("memory db");
+        let mut provider = claude_provider(
+            "p-ctyun",
+            "CTYun",
+            "https://ai.ctaigw.cn/v1",
+            &["deepseek-v4.1-flash-1017"],
+        );
+        // 目录里的 Desktop 行来自映射表：没有 meta 的 provider 不贡献模型。
+        provider.meta = Some(ProviderMeta {
+            claude_desktop_mode: Some(ClaudeDesktopMode::Proxy),
+            claude_desktop_model_routes: [(
+                "claude-sonnet-5".to_string(),
+                ClaudeDesktopModelRoute {
+                    model: "deepseek-v4.1-flash-1017".to_string(),
+                    label_override: None,
+                    supports_1m: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+            ..ProviderMeta::default()
+        });
+        db.save_provider("claude-desktop", &provider).expect("save");
+        db.set_app_model_config(
+            "claude-desktop",
+            &app_config(
+                Some("CTYun/deepseek-v4.1-flash-1017"),
+                &["CTYun/deepseek-v4.1-flash-1017"],
+                &[],
+            ),
+        )
+        .expect("save config");
+        db
+    }
+
+    #[test]
+    fn claude_desktop_config_references_resolve_through_encoded_ids() {
+        let db = desktop_with_config();
+        let id = crate::mode::stack::desktop_config_id("CTYun/deepseek-v4.1-flash-1017");
+        assert!(
+            crate::claude_desktop_config::is_claude_safe_model_id(&id),
+            "编码后的 id 必须是 Desktop 认的 claude-* 形状: {id}"
+        );
+
+        let target = resolve_desktop_config_target(&db, &id)
+            .expect("resolve")
+            .expect("hit");
+        assert_eq!(target.provider.id, "p-ctyun");
+        assert_eq!(target.upstream_model, "deepseek-v4.1-flash-1017");
+        assert_eq!(target.original_model, "CTYun/deepseek-v4.1-flash-1017");
+
+        // Desktop 对 supports1m 的条目会在 id 后面补 [1m]
+        let target = resolve_desktop_config_target(&db, &format!("{id}[1m]"))
+            .expect("resolve")
+            .expect("hit");
+        assert_eq!(target.upstream_model, "deepseek-v4.1-flash-1017");
+
+        // 角色 id、别的普通模型名不走这条
+        for other in ["claude-haiku-5-5", "claude-fable-5", "kimi-k3"] {
+            assert!(
+                resolve_desktop_config_target(&db, other)
+                    .expect("resolve")
+                    .is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn claude_desktop_config_reference_removed_from_config_is_an_error() {
+        let db = desktop_with_config();
+        let id = crate::mode::stack::desktop_config_id("CTYun/removed-model");
+        let error = resolve_desktop_config_target(&db, &id).expect_err("要报错");
+        assert!(error.to_string().contains("模型配置里没有"), "{error}");
+    }
+
+    #[test]
+    fn claude_desktop_config_ids_are_left_to_the_stack_when_no_config() {
+        let db = Database::memory().expect("memory db");
+        let id = crate::mode::stack::desktop_config_id("CTYun/deepseek-v4.1-flash-1017");
+        assert!(
+            resolve_desktop_config_target(&db, &id)
+                .expect("resolve")
+                .is_none(),
+            "没配模型配置时编码 id 交给 Stack 解析"
+        );
     }
 }

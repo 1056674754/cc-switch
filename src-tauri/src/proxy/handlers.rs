@@ -236,6 +236,26 @@ fn resolve_stack_target(
                 ));
             }
         }
+        // 模型配置里的引用发布出去时编码成了 `claude-fable-ccs-<数字>`（Desktop 不收
+        // `供应商/模型` 形状的 id），请求回来时在这里解回引用。
+        match crate::services::gateway_route::resolve_desktop_config_target(&state.db, model) {
+            Ok(Some(target)) => {
+                body["model"] = Value::String(target.upstream_model.clone());
+                return Ok(Some(target));
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let message = error.to_string();
+                log::warn!("[{}] {message}", app_type.as_str());
+                return Err(Box::new(
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(stack_miss_body(app_type, &message)),
+                    )
+                        .into_response(),
+                ));
+            }
+        }
     }
     if matches!(stack::decode(app_type, model), Decoded::Plain) {
         // 普通模型名里如果写着 `<供应商名>/<模型 id>`，就按模型选上游（P2）。
