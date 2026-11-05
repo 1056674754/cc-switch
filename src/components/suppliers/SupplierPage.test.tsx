@@ -132,8 +132,11 @@ describe("SupplierPage 托管登录供应商卡片", () => {
     expect(screen.getByText("默认")).toBeTruthy();
     expect(screen.getByText("使用中")).toBeTruthy();
     // 托管登录没有密钥可换，也不该再出现「1 个凭据」
+    //（i18n 在测试里退化成 key，因此 key 也一起断言）
     expect(screen.queryByText(/个凭据/)).toBeNull();
+    expect(screen.queryByText("suppliers.credentialCount_other")).toBeNull();
     expect(screen.queryByText("换密钥")).toBeNull();
+    expect(screen.queryByText("suppliers.changeSecret")).toBeNull();
   });
 
   it("「管理账号」跳授权中心", async () => {

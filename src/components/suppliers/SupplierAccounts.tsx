@@ -79,15 +79,17 @@ function AccountRow({
   const { t, i18n } = useTranslation();
   const needsReauth = Boolean(account.reauth_required || account.requires_reauth);
   const signedIn = signedInDate(account.authenticated_at, i18n.language);
-  const details = [account.plan, signedIn, account.github_domain].filter(
-    (detail): detail is string => Boolean(detail && detail.trim()),
-  );
+  const details = [
+    account.plan,
+    signedIn,
+    provider === "github_copilot" ? account.github_domain : null,
+  ].filter((detail): detail is string => Boolean(detail && detail.trim()));
 
   return (
     <li className="flex items-center gap-3 rounded-md border border-border px-3 py-2">
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
-          <span className="min-w-0 truncate text-sm" title={account.login}>
+          <span className="min-w-0 break-all text-sm" title={account.login}>
             {account.login}
           </span>
           {account.is_default && (
@@ -108,7 +110,7 @@ function AccountRow({
           )}
         </div>
         {details.length > 0 && (
-          <div className="mt-0.5 truncate text-caption text-fg-3">
+          <div className="mt-0.5 break-words text-caption text-fg-3">
             {details.join(" · ")}
           </div>
         )}

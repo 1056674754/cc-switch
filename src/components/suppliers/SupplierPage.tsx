@@ -838,8 +838,10 @@ export function SupplierPage({
                           </Button>
                         )}
                         {/* 「换密钥」：就地输入新密钥，一把换掉这家供应商下所有 app 的 */}
-                        {!isManaged && !isEditingSecret && (
-                          <Button
+                        {!isManaged &&
+                          !isEditingSecret &&
+                          hasEditableSecret(supplier) && (
+                            <Button
                             type="button"
                             variant="neutral"
                             size="compact"
@@ -849,9 +851,9 @@ export function SupplierPage({
                               aria-hidden="true"
                               className="h-3.5 w-3.5"
                             />
-                            {t("suppliers.changeSecret")}
-                          </Button>
-                        )}
+                              {t("suppliers.changeSecret")}
+                            </Button>
+                          )}
                         {/* 「采用到…」：把这家供应商一键接进某个 agent，key 从网关读。
                             直连模式下没有代理转换，协议不是 anthropic、没有地址或已停用时直接禁用。 */}
                         {!isEditingSecret && (
