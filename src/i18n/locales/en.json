@@ -4318,7 +4318,7 @@
     "viewUsage": "View usage for this app"
   },
   "suppliers": {
-    "description": "One supplier = one upstream address + one upstream protocol. Change the address or key once here and every connected agent follows.",
+    "description": "One supplier = one upstream address + one upstream protocol. Change the address or key once here and every connected agent follows. Managed-login accounts are managed on this page too.",
     "helpTitle": "Suppliers",
     "helpBody": "A supplier is a gateway-level upstream: each one maps to a single upstream API (service root + upstream protocol) and can be shared by several agents. When the upstream protocol differs from the client protocol, requests are converted by the proxy. Change the address or key once and every connected app follows.",
     "loadFailed": "Couldn't load suppliers",

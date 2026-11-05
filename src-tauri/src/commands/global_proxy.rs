@@ -245,3 +245,10 @@ pub async fn scan_local_proxies() -> Vec<DetectedProxy> {
     .await
     .unwrap_or_default()
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/global_proxy.rs");
+}
+// <<< command adapters

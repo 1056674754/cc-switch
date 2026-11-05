@@ -352,3 +352,10 @@ pub async fn set_app_model_config(
     }
     Ok(())
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/gateway.rs");
+}
+// <<< command adapters

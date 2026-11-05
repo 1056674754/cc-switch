@@ -424,3 +424,10 @@ mod tests {
         assert_eq!(settings.region, "us-east-1");
     }
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/s3_sync.rs");
+}
+// <<< command adapters

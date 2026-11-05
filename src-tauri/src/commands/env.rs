@@ -20,3 +20,10 @@ pub fn delete_env_vars(conflicts: Vec<EnvConflict>) -> Result<BackupInfo, String
 pub fn restore_env_backup(backup_path: String) -> Result<(), String> {
     restore_from_backup(backup_path)
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/env.rs");
+}
+// <<< command adapters

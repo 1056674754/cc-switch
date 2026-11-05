@@ -106,3 +106,10 @@ pub async fn import_from_deeplink_unified(
         _ => Err(format!("Unsupported resource type: {}", request.resource)),
     }
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/deeplink.rs");
+}
+// <<< command adapters

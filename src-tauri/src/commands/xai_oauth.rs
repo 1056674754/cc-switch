@@ -133,3 +133,10 @@ pub async fn get_xai_oauth_models(
     models.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(models)
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/xai_oauth.rs");
+}
+// <<< command adapters

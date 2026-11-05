@@ -332,6 +332,24 @@ Download the latest Linux build from the [Releases](../../releases) page:
 - **Sessions**: Click "Sessions" in the sidebar → Browse and search conversation history, open the reading view, or restore each tool's sessions
 - **Accounts**: Click "Accounts" in the sidebar to sign in to GitHub Copilot, ChatGPT, xAI (Grok), and Kimi Code accounts and use your subscriptions as providers. Kimi Code supports multiple official accounts, each with separate credentials and a native provider; the first login uses Kimi's native default credential slot. Manage sign-in, reauthentication and sign-out here. Official Kimi OAuth nodes still present in the native configuration are protected on the provider page; saved profiles can be deleted after their native nodes are removed.
 
+### Command Line (ccswitch)
+
+You can also manage the same data from a terminal. When the desktop app is running, the CLI hands each command to
+the desktop process, and the UI refreshes only the affected data domain (no page reload). When the desktop app is
+not running, the CLI executes one command headlessly and exits, so there is never a second writer.
+
+```bash
+scripts/install-cli.sh            # build and symlink to ~/.local/bin/ccswitch
+
+ccswitch status
+ccswitch provider list --app claude
+ccswitch provider use claude 3f2a1b
+ccswitch mcp list
+ccswitch backup create
+```
+
+Run `ccswitch --help` for all commands; see the [CLI guide](docs/ccswitch-cli-zh.md) for details.
+
 > **Note**: On first launch, CC Switch automatically imports your existing Claude Code, Codex, Gemini CLI, and Grok Build configuration as a provider named `default` and adds an official provider for each of these tools and Claude Desktop, so nothing you had configured is lost.
 
 For detailed guides on every feature, check out the **[User Manual](docs/user-manual/en/README.md)**, covering provider management, MCP/Prompts/Skills, local routing & failover, and more.

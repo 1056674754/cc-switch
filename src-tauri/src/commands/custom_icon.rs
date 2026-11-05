@@ -33,3 +33,10 @@ pub fn rename_custom_icon(
 pub fn delete_custom_icon(state: State<'_, AppState>, id: String) -> Result<(), String> {
     icon::delete_library_icon(&state.db, &id).map_err(|e| e.to_string())
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/custom_icon.rs");
+}
+// <<< command adapters

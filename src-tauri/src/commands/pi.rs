@@ -28,3 +28,10 @@ pub(crate) fn update_pi_provider_usage_script(
 pub(crate) fn get_pi_session_discovery() -> PiSessionDiscovery {
     crate::session_manager::providers::pi::session_discovery()
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/pi.rs");
+}
+// <<< command adapters

@@ -79,3 +79,10 @@ pub async fn kimi_oauth_use_account(
 ) -> Result<(), String> {
     state.use_account(&account_id).await
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/kimi_oauth.rs");
+}
+// <<< command adapters

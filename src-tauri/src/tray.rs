@@ -4995,3 +4995,10 @@ mod tests {
         assert!(collect_problems(None, &rerouted).is_empty());
     }
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("ipc/adapters/tray.rs");
+}
+// <<< command adapters

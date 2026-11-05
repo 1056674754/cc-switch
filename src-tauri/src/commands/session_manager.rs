@@ -253,3 +253,10 @@ pub async fn export_session_markdown<R: tauri::Runtime>(
     crate::config::write_text_file(&path, &content).map_err(|e| e.to_string())?;
     Ok(Some(path.to_string_lossy().into_owned()))
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/session_manager.rs");
+}
+// <<< command adapters

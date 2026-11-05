@@ -71,3 +71,10 @@ pub async fn disable_current_omo_slim(state: State<'_, AppState>) -> Result<(), 
     OmoService::delete_config_file(&SLIM).map_err(|e| e.to_string())?;
     Ok(())
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/omo.rs");
+}
+// <<< command adapters

@@ -142,3 +142,10 @@ pub async fn launch_hermes_dashboard() -> Result<(), String> {
     .await
     .map_err(|e| format!("launch task join error: {e}"))?
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/hermes.rs");
+}
+// <<< command adapters

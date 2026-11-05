@@ -306,3 +306,10 @@ pub async fn set_auto_failover_enabled(
 
     Ok(())
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/failover.rs");
+}
+// <<< command adapters

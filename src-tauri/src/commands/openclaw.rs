@@ -125,3 +125,10 @@ pub fn set_openclaw_tools(
 ) -> Result<openclaw_config::OpenClawWriteOutcome, String> {
     openclaw_config::set_tools_config(&tools).map_err(|e| e.to_string())
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/openclaw.rs");
+}
+// <<< command adapters

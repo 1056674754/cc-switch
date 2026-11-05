@@ -440,3 +440,10 @@ mod tests {
         assert_eq!(settings.base_url, "https://dav.example.com/dav/");
     }
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/webdav_sync.rs");
+}
+// <<< command adapters

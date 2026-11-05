@@ -42,6 +42,7 @@ import { hermesApi } from "@/lib/api/hermes";
 import type { ProviderEditorSave } from "@/lib/api/providers";
 import { useProxyStatus } from "@/hooks/useProxyStatus";
 import { useUsageCacheBridge } from "@/hooks/useUsageCacheBridge";
+import { useExternalChangeRefresh } from "@/hooks/useExternalChangeRefresh";
 import {
   useTrayAppPageSeen,
   useTrayNavigation,
@@ -267,6 +268,8 @@ function App() {
   const providerScrollContainerRef = useRef<HTMLDivElement>(null);
 
   useUsageCacheBridge();
+  // CLI 命令（ccswitch）打到桌面进程执行完后，界面重拉数据
+  useExternalChangeRefresh();
 
   useLayoutEffect(() => {
     if (currentView !== "providers") return;

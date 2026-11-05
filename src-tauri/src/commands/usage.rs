@@ -447,3 +447,10 @@ mod tests {
         assert_eq!(crate::usage_events::take_test_notify_count(), 1);
     }
 }
+
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/usage.rs");
+}
+// <<< command adapters
