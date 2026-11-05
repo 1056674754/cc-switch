@@ -34,10 +34,9 @@ pub fn delete_custom_icon(state: State<'_, AppState>, id: String) -> Result<(), 
     icon::delete_library_icon(&state.db, &id).map_err(|e| e.to_string())
 }
 
-// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
-#[cfg(feature = "dev-ipc")]
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
 #[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
-pub(crate) mod dev_ipc_adapters {
-    include!("../dev_ipc/adapters/custom_icon.rs");
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/custom_icon.rs");
 }
-// <<< dev-ipc adapters
+// <<< command adapters

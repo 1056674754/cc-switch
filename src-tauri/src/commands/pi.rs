@@ -29,10 +29,9 @@ pub(crate) fn get_pi_session_discovery() -> PiSessionDiscovery {
     crate::session_manager::providers::pi::session_discovery()
 }
 
-// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
-#[cfg(feature = "dev-ipc")]
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
 #[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
-pub(crate) mod dev_ipc_adapters {
-    include!("../dev_ipc/adapters/pi.rs");
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/pi.rs");
 }
-// <<< dev-ipc adapters
+// <<< command adapters

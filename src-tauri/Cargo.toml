@@ -1,5 +1,6 @@
 [package]
 name = "cc-switch"
+default-run = "cc-switch"
 version = "4.0.25"
 description = "All-in-One Assistant for Claude Code, Codex & Gemini CLI"
 authors = ["Jason Young"]
@@ -9,6 +10,10 @@ edition = "2021"
 rust-version = "1.85.0"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[[bin]]
+name = "ccswitch"
+path = "src/bin/ccswitch.rs"
 
 [lib]
 name = "cc_switch_lib"

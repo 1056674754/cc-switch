@@ -333,6 +333,24 @@ paru -S cc-switch-bin
 - **会话**：点击侧栏的“会话” → 浏览、搜索会话历史，打开阅读页，或恢复各工具的会话
 - **授权中心**：点击侧栏的“授权中心”，登录 GitHub Copilot、ChatGPT、xAI（Grok）、Kimi Code 账号，把订阅当作供应商使用。Kimi Code 支持同时保存多个官方账号，每个账号使用独立凭据和原生供应商，首个登录沿用 Kimi 原生默认凭据槽位，在此添加、重新登录和退出账号。仍在原生配置中的 Kimi 官方 OAuth 节点在供应商页受到保护；原生节点被移除后，可以删除留下的档案。
 
+### 命令行（ccswitch）
+
+除了图形界面，也可以用 `ccswitch` 在终端里管理同一份数据。桌面版在运行时，CLI 把命令交给桌面进程执行，
+界面只按域刷新被改动的那部分数据（不重载页面）；桌面版没运行时，CLI 以 headless 方式执行一条命令后退出，
+不会出现第二个写者。
+
+```bash
+scripts/install-cli.sh            # 构建并软链到 ~/.local/bin/ccswitch
+
+ccswitch status
+ccswitch provider list --app claude
+ccswitch provider use claude 3f2a1b
+ccswitch mcp list
+ccswitch backup create
+```
+
+`ccswitch --help` 查看全部命令，详细说明见 [命令行文档](docs/ccswitch-cli-zh.md)。
+
 > **注意**：首次启动时，CC Switch 会自动把 Claude Code、Codex、Gemini CLI、Grok Build 的现有配置导入为名为 `default` 的供应商，并为这几个工具和 Claude Desktop 添加官方供应商，原有配置不会丢失。
 
 各项功能的详细用法请查阅 **[用户手册](docs/user-manual/zh/README.md)**，涵盖供应商管理、MCP/提示词/Skills、本地路由与故障转移等全部功能。

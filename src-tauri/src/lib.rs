@@ -7,12 +7,14 @@ mod auto_launch;
 mod claude_desktop_config;
 mod claude_mcp;
 mod claude_plugin;
+pub mod cli;
 mod codex_config;
 mod codex_history_migration;
 mod codex_rollout_file;
 mod codex_state_db;
 mod commands;
 mod config;
+pub mod control;
 mod database;
 mod deeplink;
 #[cfg(feature = "dev-ipc")]
@@ -24,6 +26,7 @@ mod gemini_mcp;
 mod grok_config;
 pub mod hermes_config;
 mod init_status;
+pub mod ipc;
 mod jsonc_document;
 mod kimi_config;
 mod kimi_session;
@@ -485,7 +488,7 @@ fn handle_second_instance(app: &tauri::AppHandle, args: Vec<String>) {
 fn headless_dev_ipc() -> bool {
     #[cfg(feature = "dev-ipc")]
     {
-        return crate::dev_ipc::is_headless();
+        crate::dev_ipc::is_headless()
     }
     #[cfg(not(feature = "dev-ipc"))]
     {
@@ -494,6 +497,13 @@ fn headless_dev_ipc() -> bool {
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// 是否是「无窗口」运行：浏览器开发模式的 headless core，或 CLI 的一次性执行。
+///
+/// 两者都要跳过窗口、托盘、单实例、deep link 注册；CLI 还要在 setup 末尾执行一条命令后退出。
+fn headless_mode() -> bool {
+    crate::cli::once::is_one_shot() || headless_dev_ipc()
+}
+
 pub fn run() {
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
     panic_hook::setup_panic_hook();
@@ -516,7 +526,7 @@ pub fn run() {
     // headless 开发核心不注册单实例：它会和生产版抢 /tmp/<identifier>_si.sock，
     // 抢输的一方直接 exit(0)（见 tauri-plugin-single-instance 的 macOS 实现）。
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    if !headless_dev_ipc() {
+    if !headless_mode() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             log::info!("=== Single Instance Callback Triggered ===");
             // Windows 上这个回调跑在主线程处理 WM_COPYDATA 的窗口过程里，第二个实例的
@@ -599,6 +609,12 @@ pub fn run() {
         .setup(|app| {
             let _ = rustls::crypto::ring::default_provider().install_default();
 
+            // 无窗口运行（浏览器开发模式的 headless core / CLI 一次性执行）不要在 Dock 里露脸。
+            #[cfg(target_os = "macos")]
+            if headless_mode() {
+                let _ = app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+            }
+
             // 预先刷新 Store 覆盖配置，确保后续路径读取正确（日志/数据库等）
             app_store::refresh_app_config_dir_override(app.handle());
             panic_hook::init_app_config_dir(crate::config::get_app_config_dir());
@@ -624,13 +640,20 @@ pub fn run() {
                         .filter(|metadata| {
                             runtime_log_level_allows(metadata.level(), log::max_level())
                         })
-                        .targets([
-                            Target::new(TargetKind::Stdout),
-                            Target::new(TargetKind::Folder {
-                                path: log_dir,
-                                file_name: Some("cc-switch".into()),
-                            }),
-                        ])
+                        .targets({
+                            let mut targets = vec![
+                                Target::new(TargetKind::Stdout),
+                                Target::new(TargetKind::Folder {
+                                    path: log_dir,
+                                    file_name: Some("cc-switch".into()),
+                                }),
+                            ];
+                            // CLI 的 stdout 只放命令结果；一次性执行时日志只落文件。
+                            if crate::cli::once::is_one_shot() {
+                                targets.remove(0);
+                            }
+                            targets
+                        })
                         // KeepSome(4) 保留 4 个轮转归档，加上当前文件最多约 100 MiB。
                         // 轮转仅按大小触发；跨重启继续追加，不再丢失上一次运行的日志。
                         .rotation_strategy(RotationStrategy::KeepSome(4))
@@ -1223,7 +1246,7 @@ pub fn run() {
                         .unwrap_or(true);
 
                     // headless 开发核心不抢系统 URL scheme，免得把生产版的 ccswitch:// 抢走。
-                    if should_register && !headless_dev_ipc() {
+                    if should_register && !headless_mode() {
                         if let Err(e) = app.deep_link().register_all() {
                             log::error!("✗ Failed to register deep link schemes: {}", e);
                         } else {
@@ -1236,7 +1259,7 @@ pub fn run() {
 
                 #[cfg(all(debug_assertions, windows))]
                 {
-                    if !headless_dev_ipc() {
+                    if !headless_mode() {
                         if let Err(e) = app.deep_link().register_all() {
                             log::error!("✗ Failed to register deep link schemes: {}", e);
                         } else {
@@ -1290,7 +1313,7 @@ pub fn run() {
             }
 
             // headless 开发核心不建托盘：它在菜单栏多出一个图标，还会让生产版和 dev 版抢同一套托盘状态。
-            if !headless_dev_ipc() {
+            if !headless_mode() {
                 // 构建托盘：Windows 左键打开主界面，右键默认弹出面板；macOS 左右键默认都弹出面板。
                 // 设置里打开「原生托盘菜单」就挂原生菜单（`tray::apply_tray_style` 运行时切换）。
                 // Linux（AppIndicator）不派发点击事件，只能出原生菜单，菜单里有一项打开面板。
@@ -1602,6 +1625,25 @@ pub fn run() {
             #[cfg(feature = "dev-ipc")]
             if crate::dev_ipc::is_headless() {
                 crate::dev_ipc::start(app.handle().clone());
+            }
+
+            // 本地控制服务：ccswitch 命令行通过它驱动本进程，保证 CLI 改动与界面同源。
+            // 一次性执行模式自己就是 CLI 进程，不再开控制端口。
+            if !crate::cli::once::is_one_shot() {
+                let control_mode = if headless_mode() { "headless" } else { "gui" };
+                crate::control::start(app.handle().clone(), control_mode);
+            }
+
+            // CLI 一次性执行：用和桌面版完全相同的分派表跑一条命令，把结果交回 CLI 主流程。
+            if let Some(request) = crate::cli::once::request() {
+                let app_handle = app.handle().clone();
+                let command = request.command.clone();
+                let args = request.args.clone();
+                tauri::async_runtime::spawn(async move {
+                    let outcome = crate::commands::command_table::dispatch(&command, &app_handle, args).await;
+                    crate::cli::once::store_result(outcome);
+                    app_handle.exit(0);
+                });
             }
 
             Ok(())
@@ -2067,7 +2109,7 @@ pub fn run() {
     // headless 开发核心不建窗口：清掉 tauri.conf.json 里的窗口定义，setup 里所有
     // `get_webview_window("main")` 分支自然跳过，进程只留 DB / gateway / IPC 桥。
     let mut context = tauri::generate_context!();
-    if headless_dev_ipc() {
+    if headless_mode() {
         let removed = context.config_mut().app.windows.len();
         context.config_mut().app.windows.clear();
         log::info!("[dev-ipc] headless 模式：已跳过 {removed} 个窗口");
@@ -2077,7 +2119,12 @@ pub fn run() {
         .build(context)
         .expect("error while running tauri application");
 
-    app.run(|app_handle, event| {
+    /// 事件循环回调。CLI 一次性执行时直接返回：结果已经写好，不需要 GUI 退出清理。
+    fn handle_run_event(app_handle: &tauri::AppHandle, event: RunEvent) {
+        if crate::cli::once::is_one_shot() {
+            return;
+        }
+
         // 处理退出请求（所有平台）
         if let RunEvent::ExitRequested { api, code, .. } = &event {
             match classify_exit_request(*code) {
@@ -2142,6 +2189,8 @@ pub fn run() {
         // RunEvent::Exit，回调一返回进程就结束，只能在这里同步补做退出清理。重启也会走到
         // 这里，照上面 DeferToTauriRestart 的约定交还 Tauri 默认流程，不清理。
         if matches!(event, RunEvent::Exit) {
+            // 描述文件里有 token，退出就删掉，别把入口留给下一个进程猜。
+            crate::control::shutdown();
             if !RESTART_REQUESTED.load(Ordering::SeqCst) {
                 cleanup_before_system_exit(app_handle);
             }
@@ -2175,7 +2224,13 @@ pub fn run() {
         {
             let _ = (app_handle, event);
         }
-    });
+    }
+
+    if crate::cli::once::is_one_shot() {
+        let _ = app.run_return(handle_run_event);
+        return;
+    }
+    app.run(handle_run_event);
 }
 
 // ============================================================
@@ -2720,10 +2775,9 @@ mod tests {
     }
 }
 
-// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
-#[cfg(feature = "dev-ipc")]
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
 #[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
-pub(crate) mod dev_ipc_adapters {
-    include!("dev_ipc/adapters/lib.rs");
+pub(crate) mod ipc_adapters {
+    include!("ipc/adapters/lib.rs");
 }
-// <<< dev-ipc adapters
+// <<< command adapters

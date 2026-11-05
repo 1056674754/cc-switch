@@ -31,10 +31,9 @@ pub fn dsh_account_login_cancel(flow_id: String) {
     crate::services::dsh_account::cancel_login(&flow_id)
 }
 
-// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
-#[cfg(feature = "dev-ipc")]
+// >>> command adapters（生成物：scripts/gen_command_adapters.py，勿手改）
 #[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
-pub(crate) mod dev_ipc_adapters {
-    include!("../dev_ipc/adapters/dsh.rs");
+pub(crate) mod ipc_adapters {
+    include!("../ipc/adapters/dsh.rs");
 }
-// <<< dev-ipc adapters
+// <<< command adapters

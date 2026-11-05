@@ -37,16 +37,17 @@
 适配层是**生成**的，不要手写：
 
 ```bash
-python3 scripts/gen_dev_ipc_adapters.py     # 改了 generate_handler! 或命令签名后重跑
+python3 scripts/gen_command_adapters.py     # 改了 generate_handler! 或命令签名后重跑
 ```
 
-它会读 `src/lib.rs` 的命令表 + 每个命令的真实签名，生成 `src-tauri/src/dev_ipc/adapters/*.rs`
-和 `src-tauri/src/commands/dev_ipc_table.rs`，并在命令所在源文件末尾挂一个
-`mod dev_ipc_adapters { include!(...) }`。因为 include 进的是命令函数所在的模块，参数/返回
+它会读 `src/lib.rs` 的命令表 + 每个命令的真实签名，生成 `src-tauri/src/ipc/adapters/*.rs`
+和 `src-tauri/src/commands/command_table.rs`，并在命令所在源文件末尾挂一个
+`mod ipc_adapters { include!(...) }`。因为 include 进的是命令函数所在的模块，参数/返回
 类型不用做任何路径解析。
 
-`commands::dev_ipc_table` 里有一个漂移守卫测试：`generate_handler!` 增删命令但忘了重跑生成器时，
-`cargo test --lib --features dev-ipc dev_ipc` 会直接失败。
+这张表不只给浏览器开发模式用：`ccswitch` 命令行（以及桌面版的控制服务）走的是同一份分派表，
+所以默认构建也会编译它。生成物里有漂移守卫测试：`generate_handler!` 增删命令但忘了重跑
+生成器时，`cargo test --lib command_table` 会直接失败。
 
 ## 启动
 

@@ -11,8 +11,9 @@
 //!
 //! 命令本身走的是和桌面端完全相同的实现：headless 进程仍然是一个真的 Tauri app
 //! （真 `AppHandle`、真 managed state、真 AppState/ProxyService），只是没有窗口。
-//! 分发表 `crate::commands::dev_ipc_table` 由 `scripts/gen_dev_ipc_adapters.py` 从
-//! `generate_handler!` 的命令表和各命令签名生成，保证一个不漏。
+//! 分发表 `crate::commands::command_table` 由 `scripts/gen_command_adapters.py` 从
+//! `generate_handler!` 的命令表和各命令签名生成，保证一个不漏；同一张表也供桌面版的
+//! 本地控制服务（`crate::control`，`ccswitch` 命令行用）使用。
 //!
 //! 安全边界：只在编译期打开 `dev-ipc` feature 时存在，只绑 `127.0.0.1`，且必须显式
 //! `--headless` / `CC_SWITCH_DEV_IPC=1` 才会启动。正式构建里这段代码根本不编进去。
@@ -28,10 +29,8 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use serde::de::DeserializeOwned;
-use serde::Serialize;
-use serde_json::{json, Map, Value};
-use tauri::{AppHandle, Listener, Manager};
+use serde_json::{json, Value};
+use tauri::{AppHandle, Listener};
 use tokio::sync::broadcast;
 
 /// 默认端口。和 `scripts/dev-core.sh` / vite 代理里的默认值保持一致。
@@ -41,7 +40,7 @@ pub const DEFAULT_PORT: u16 = 3999;
 const EVENT_BUFFER: usize = 256;
 
 /// 桥接的命令数量与名单由生成的表决定。
-pub(crate) use crate::commands::dev_ipc_table::{COMMANDS, COMMAND_COUNT};
+use crate::commands::command_table::{COMMANDS, COMMAND_COUNT};
 
 static EVENT_TX: OnceLock<broadcast::Sender<String>> = OnceLock::new();
 static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
@@ -182,6 +181,7 @@ pub fn start(app: AppHandle) {
 /// 前端会监听的事件名。和 `src/**` 里的 `listen(...)`、Rust 侧 `emit(...)` 的并集对齐；
 /// 新增事件时两边一起加（漏了只影响实时刷新，不影响功能）。
 const EVENT_NAMES: &[&str] = &[
+    "cli-command-applied",
     "configLoadError",
     "deeplink-pending",
     "profile-applied",
@@ -259,98 +259,16 @@ async fn invoke_command(
         }
     };
 
-    let payload = match crate::commands::dev_ipc_table::dispatch(&command, &ctx.app, args).await {
+    let payload = match crate::commands::command_table::dispatch(&command, &ctx.app, args).await {
         Ok(data) => json!({ "ok": true, "data": data }),
         Err(error) => json!({ "ok": false, "error": error }),
     };
     (StatusCode::OK, Json(payload))
 }
 
-/// 命令参数的 JSON 取值器。key 是前端传的 camelCase 名字。
-#[derive(Debug)]
-pub struct Args {
-    map: Map<String, Value>,
-}
-
-impl Args {
-    pub fn new(value: Value) -> Result<Self, String> {
-        match value {
-            Value::Null => Ok(Self { map: Map::new() }),
-            Value::Object(map) => Ok(Self { map }),
-            other => Err(format!(
-                "dev-ipc: 参数必须是 JSON 对象，收到 {}",
-                match other {
-                    Value::Array(_) => "数组",
-                    Value::String(_) => "字符串",
-                    Value::Number(_) => "数字",
-                    Value::Bool(_) => "布尔值",
-                    _ => "其它类型",
-                }
-            )),
-        }
-    }
-
-    /// 必填参数。缺失或类型不符都返回可读错误。
-    pub fn required<T: DeserializeOwned>(&mut self, key: &str) -> Result<T, String> {
-        match self.map.remove(key) {
-            None => Err(format!("dev-ipc: 缺少参数 `{key}`")),
-            Some(value) => serde_json::from_value(value)
-                .map_err(|error| format!("dev-ipc: 参数 `{key}` 解析失败：{error}")),
-        }
-    }
-
-    /// 可选参数：缺失或显式 `null` 都得到 `None`。
-    pub fn option<T: DeserializeOwned>(&mut self, key: &str) -> Result<Option<T>, String> {
-        match self.map.remove(key) {
-            None => Ok(None),
-            Some(value) => serde_json::from_value::<Option<T>>(value)
-                .map_err(|error| format!("dev-ipc: 参数 `{key}` 解析失败：{error}")),
-        }
-    }
-
-    /// 取 managed state；没注册时给一条明确错误而不是 panic。
-    pub fn state<'a, T: Send + Sync + 'static>(
-        &self,
-        app: &'a AppHandle,
-    ) -> Result<tauri::State<'a, T>, String> {
-        app.try_state::<T>().ok_or_else(|| {
-            format!(
-                "dev-ipc: state {} 未注册（headless 启动流程是否跳过了初始化？）",
-                std::any::type_name::<T>()
-            )
-        })
-    }
-}
-
-/// 命令的桥接返回值。
-pub type Outcome = Result<Value, String>;
-
-/// 把命令返回值转成 JSON。序列化失败说明这个命令不适合桥接，给可读错误。
-pub fn ok<T: Serialize>(value: T) -> Outcome {
-    serde_json::to_value(value).map_err(|error| format!("dev-ipc: 返回值序列化失败：{error}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 必填与可选参数都按_camel_case_key_取值() {
-        let mut args = Args::new(json!({ "app": "claude", "addToLive": true })).unwrap();
-        assert_eq!(args.required::<String>("app").unwrap(), "claude");
-        assert_eq!(args.option::<bool>("addToLive").unwrap(), Some(true));
-        assert_eq!(args.option::<String>("missing").unwrap(), None);
-        let error = args.required::<String>("missing").unwrap_err();
-        assert!(error.contains("缺少参数"), "{error}");
-    }
-
-    #[test]
-    fn 参数不是对象时给出可读错误() {
-        let error = Args::new(json!([1, 2, 3])).unwrap_err();
-        assert!(error.contains("必须是 JSON 对象"), "{error}");
-        // 空 body 走 Null，等价于没有参数。
-        assert!(Args::new(Value::Null).is_ok());
-    }
 
     #[test]
     fn 事件名清单不重复() {
