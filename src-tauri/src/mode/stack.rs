@@ -43,6 +43,9 @@ const CODEX_SEPARATOR: char = '/';
 /// Desktop 给出 effort 选择器，内嵌的 Claude Code 不会因此把它当成真的 Fable。
 const DESKTOP_PREFIX: &str = "claude-fable-ccs-";
 const DESKTOP_CODE_DIGITS: usize = 6;
+/// 每 app 模型配置里的引用发布给 Desktop 时用的散列键。和 Stack 成员的 key 分开：配置接管
+/// 后 Stack 已关，撞了也只会按配置解析，但分开更稳，旧 Stack id 不会误命中配置。
+const DESKTOP_CONFIG_HASH_KEY: &str = "config";
 
 /// key 的最大长度：只是为了模型 id 不至于太长。
 const KEY_MAX_LEN: usize = 24;
@@ -138,6 +141,25 @@ fn desktop_code(key: &str, model: &str) -> String {
         "{:0width$}",
         hash % 10u64.pow(DESKTOP_CODE_DIGITS as u32),
         width = DESKTOP_CODE_DIGITS
+    )
+}
+
+/// 从 Desktop id 里的数字拼回完整 id（[`decode`] 的逆操作；1M 后缀已经剥掉）。
+pub fn desktop_id_from_code(code: &str) -> String {
+    format!("{DESKTOP_PREFIX}{code}")
+}
+
+/// 每 app 模型配置里的引用发布给 Desktop 的模型 id（`claude-fable-ccs-<数字>`）。
+///
+/// Desktop 的选择器只收 `claude-<角色>-*` 形状的 id：`供应商/模型` 这种引用名会被当成
+/// 非 Anthropic 模型丢掉，所以引用出站前按 [`desktop_code`] 编码；请求回来时用同样的散列
+/// 反查配置里的引用（`get_app_model_config`），见 `services::gateway_route`。
+pub fn desktop_config_id(reference: &str) -> String {
+    encode(
+        &AppType::ClaudeDesktop,
+        DESKTOP_CONFIG_HASH_KEY,
+        reference,
+        false,
     )
 }
 

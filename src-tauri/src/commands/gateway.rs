@@ -294,11 +294,21 @@ pub fn clear_model_override(
 }
 
 /// 把旧的 Stack（聚合）配置一次性翻译成每 app 模型配置。幂等：已配过的 app 不覆盖。
+/// 迁移完（或本来就已经配过）让配置接管客户端：Claude Desktop 的旧聚合名单不再发布。
 #[tauri::command(async)]
-pub fn migrate_gateway_from_stack(
+pub async fn migrate_gateway_from_stack(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<AppMigration>, String> {
-    gateway_migration::migrate_all(&state.db).map_err(|error| error.to_string())
+    let migrations =
+        gateway_migration::migrate_all(&state.db).map_err(|error| error.to_string())?;
+    for migration in &migrations {
+        if let Ok(app) = migration.app.parse::<AppType>() {
+            crate::mode::controller::retire_stack_for_app_config(state.inner(), &app)
+                .await
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(migrations)
 }
 
 /// 读某 app 的模型配置；没配过返回 `null`。
@@ -331,6 +341,10 @@ pub async fn set_app_model_config(
         .map_err(|error| error.to_string())?;
     if let Ok(app) = app_type.parse::<AppType>() {
         if crate::mode::controller::PROXY_APPS.contains(&app) {
+            // 配置是权威：还在旧聚合模式的应用先退出聚合，再按新配置重写客户端。
+            crate::mode::controller::retire_stack_for_app_config(state.inner(), &app)
+                .await
+                .map_err(|error| format!("配置已保存，但退出聚合模式失败: {error}"))?;
             crate::mode::controller::resync_route(state.inner(), &app)
                 .await
                 .map_err(|error| format!("配置已保存，但重写客户端失败: {error}"))?;

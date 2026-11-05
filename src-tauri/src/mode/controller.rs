@@ -259,6 +259,10 @@ impl OwnedModelConfigSlots {
 
 /// Claude Desktop 的模型配置要发布给 Desktop 的模型：默认 + 允许列表里的引用，去重保序。
 /// 没配返回 `None`（沿用原来的发布：只有路由那家的模型 + Stack 名单）。
+///
+/// 引用是 `供应商/模型` 形状，Desktop 的选择器不收（当成非 Anthropic 模型丢掉），所以 id 要
+/// 编码成 `claude-fable-ccs-<数字>`；请求回来时按同一个散列反查到引用，见
+/// `services::gateway_route::resolve_desktop_config_target`。
 fn desktop_model_config_publications(state: &AppState) -> Option<Vec<stack::DesktopStackModel>> {
     let config = state
         .db
@@ -282,6 +286,7 @@ fn desktop_model_config_publications(state: &AppState) -> Option<Vec<stack::Desk
     let published = references
         .into_iter()
         .map(|reference| {
+            let id = stack::desktop_config_id(&reference);
             match crate::services::gateway_catalog::resolve_reference(&catalog, &reference) {
                 Some(entry) => {
                     let display = entry
@@ -289,17 +294,17 @@ fn desktop_model_config_publications(state: &AppState) -> Option<Vec<stack::Desk
                         .clone()
                         .unwrap_or_else(|| entry.model_id.clone());
                     stack::DesktopStackModel {
-                        id: reference,
+                        id,
                         upstream: entry.model_id.clone(),
                         // Desktop 的选择器里显示「供应商 / 模型」，和聚合模式一致。
-                        label: format!("{} / {display}", entry.upstream_name),
+                        label: desktop_config_label(&entry.upstream_name, &display),
                         provider_name: entry.upstream_name.clone(),
                         supports_1m: entry.one_m,
                     }
                 }
                 None => stack::DesktopStackModel {
                     label: reference.clone(),
-                    id: reference.clone(),
+                    id,
                     upstream: reference,
                     provider_name: String::new(),
                     supports_1m: false,
@@ -308,6 +313,17 @@ fn desktop_model_config_publications(state: &AppState) -> Option<Vec<stack::Desk
         })
         .collect();
     Some(published)
+}
+
+/// 选择器里的名字：`<供应商> / <模型>`。目录里的显示名有时自己就带着供应商前缀
+/// （如 `Codex / gpt-6.1-terra`），不要再拼一次。
+fn desktop_config_label(upstream_name: &str, display: &str) -> String {
+    let prefix = format!("{upstream_name} / ");
+    if display.starts_with(&prefix) {
+        display.to_string()
+    } else {
+        format!("{upstream_name} / {display}")
+    }
 }
 
 /// 读 Claude 的模型配置并映射成客户端槽位；没配或全空返回 `None`（沿用原写法）。
@@ -520,10 +536,23 @@ async fn write_proxy(
     let (proxy_url, codex_base_url) = state.proxy_service.build_proxy_urls().await?;
     // 改用 CC Switch 的目录时契约可能没变（指针只在 live 里），也要重写。
     let force = op_name == op::ATTACH || op_name == op::CATALOG;
-    let stack = match &next_stack {
+    let mut stack = match &next_stack {
         Some(next) => next.clone(),
         None => settled_stack(app)?,
     };
+    // Claude Desktop：每 app 模型配置是权威。配了模型配置后，旧的聚合名单不再发布，聚合
+    // 开关也落定成关（名单留着，客户端只按配置里点名的引用出模型）。
+    let desktop_config = if matches!(app, AppType::ClaudeDesktop) {
+        desktop_model_config_publications(state)
+    } else {
+        None
+    };
+    let mut next_stack = next_stack;
+    if desktop_config.is_some() && stack.enabled {
+        stack.enabled = false;
+        next_stack = Some(stack.clone());
+        log::info!("[MODE] claude-desktop 已有模型配置，旧聚合模式让位（不再发布聚合模型）");
+    }
     // 各应用把 `contract` 填进 `target` 之后，模式状态和新名单一起落定。
     let pending = |target: ModeState| PendingTarget {
         state: Some(target),
@@ -639,14 +668,9 @@ async fn write_proxy(
         AppType::ClaudeDesktop => {
             let members = published_members(state, app, &stack, route)?;
             let from_stack = stack::desktop_published(&members);
-            // 没有 Stack 名单、但有每 app 模型配置时，发布配置里点名的模型引用。
-            // 有发布 Stack 模型时按名单来；否则看每 app 模型配置（没有就沿用原写法）。
-            let configured = if from_stack.is_empty() {
-                desktop_model_config_publications(state)
-            } else {
-                None
-            };
-            let published = configured.as_deref().unwrap_or(&from_stack);
+            // 每 app 模型配置是权威：配了就只发布配置里点名的模型引用（默认 + 允许列表），
+            // 不再看聚合名单；没配过才沿用原来的聚合发布。
+            let published = desktop_config.as_deref().unwrap_or(&from_stack);
             let profile =
                 claude_desktop_config::route_profile(&state.db, route, &proxy_url, published)
                     .map_err(err)?;
@@ -966,7 +990,6 @@ async fn enter_locked(
     };
     // 只给日志用，读不到不拦着进入。
     let was_stack = settled_stack(app).is_ok_and(|stack| stack.enabled);
-    let stack_on = stack_mode.unwrap_or(was_stack);
     let live_now = LiveNow::of(state, app, &mode)?;
     let rewritten = write_proxy(
         state,
@@ -983,11 +1006,14 @@ async fn enter_locked(
         next_stack,
     )
     .await?;
+    // 按写完后的落定状态记日志：配了模型配置的 Claude Desktop 会在 write_proxy 里让位，
+    // 请求的 stack_mode 是聚合、实际已经切到路由，不能按请求前的状态写。
+    let now_stack = settled_stack(app).is_ok_and(|stack| stack.enabled);
     log::info!(
         "[MODE] {} {op_name}：{} → {}，路由 {}，客户端配置{}",
         app.as_str(),
         mode_label(mode.is_proxy(), was_stack),
-        mode_label(true, stack_on),
+        mode_label(true, now_stack),
         route.id,
         rewrite_label(rewritten)
     );
@@ -1510,6 +1536,28 @@ async fn publish_stack(state: &AppState, app: &AppType, next: StackState) -> Res
             },
         ),
     }
+}
+
+/// 每 app 模型配置接管 Claude Desktop：保存配置（或从聚合迁移）之后调用。
+///
+/// 旧版的聚合名单只会从 UI 上看不到的 `live-state.json` 里生效，一旦用户给 Claude Desktop
+/// 配了模型配置，配置就是权威：聚合开关落定成关，已接管时顺手按配置重写 profile（名单本身
+/// 留着，以后要回到聚合还能用）。其余 app 暂不变——它们的 Stack 还承担 `/model` 的语义。
+pub async fn retire_stack_for_app_config(state: &AppState, app: &AppType) -> Result<(), String> {
+    if !matches!(app, AppType::ClaudeDesktop) {
+        return Ok(());
+    }
+    if desktop_model_config_publications(state).is_none() {
+        return Ok(());
+    }
+    let _guard = lock_settled(state, app).await.map_err(err)?;
+    let current = settled_stack(app)?;
+    if !current.enabled {
+        return Ok(());
+    }
+    let mut next = current;
+    next.enabled = false;
+    publish_stack(state, app, next).await
 }
 
 /// 拖动排序后让 Stack 名单跟界面顺序一致：名单顺序就是客户端看到的聚合模型顺序（Codex 的
@@ -6668,16 +6716,180 @@ model_provider = "c"
                     .to_string(),
             })
             .collect::<Vec<_>>();
+        // 引用本身（`供应商/模型`）Desktop 会当成非 Anthropic 模型丢掉，发布前要编码成
+        // `claude-fable-ccs-<数字>`；标签照旧显示供应商 / 模型。
         assert!(
-            models.contains(&"MAP/kimi-k3".to_string()),
-            "配置里的引用要发布给 Desktop: {models:?}"
+            models.contains(&stack::desktop_config_id("MAP/kimi-k3")),
+            "配置里的引用编码后要发布给 Desktop: {models:?}"
         );
         assert!(
-            models.contains(&"Gone/removed-model".to_string()),
+            models.contains(&stack::desktop_config_id("Gone/removed-model")),
             "目录外的引用照样发布，请求时网关报错: {models:?}"
+        );
+        assert!(
+            !models.contains(&"MAP/kimi-k3".to_string()),
+            "引用名不能再原样发布给 Desktop: {models:?}"
+        );
+        assert!(
+            models
+                .iter()
+                .all(|id| crate::claude_desktop_config::is_claude_safe_model_id(id)),
+            "发布的 id 必须是 Desktop 认的 claude-* 形状: {models:?}"
         );
 
         exit(&state, &desktop).await.expect("exit desktop");
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_desktop_model_config_retires_the_legacy_stack_on_save() {
+        let home = Home::new();
+        let _dirs = DesktopDirs::under(&home);
+        seed_settings(USER_SETTINGS);
+        let state = state_with(
+            AppType::Claude,
+            &[claude("a", "https://a.example", json!({}))],
+            "a",
+        )
+        .await;
+        let desktop = AppType::ClaudeDesktop;
+        let mut other = desktop_card("other", true);
+        if let Some(meta) = other.meta.as_mut() {
+            for route in meta.claude_desktop_model_routes.values_mut() {
+                route.model = "glm-5.2".to_string();
+            }
+        }
+        for card in [
+            desktop_card("direct", false),
+            desktop_card("map", true),
+            other,
+        ] {
+            state
+                .db
+                .save_provider(desktop.as_str(), &card)
+                .expect("save desktop card");
+        }
+        crate::settings::set_current_provider(&desktop, Some("direct")).expect("desktop current");
+
+        // 旧状态：聚合模式，路由那家 map + 成员 other。
+        enter_with_route(&state, &desktop, true, Some("map"))
+            .await
+            .expect("enter desktop stack");
+        set_stack_member(&state, &desktop, "other", true)
+            .await
+            .expect("add other");
+        assert!(settled_stack(&desktop).unwrap().enabled);
+        let models_before = desktop_profile()["inferenceModels"]
+            .as_array()
+            .expect("models")
+            .clone();
+        assert_eq!(models_before.len(), 2);
+        // 聚合成员那条（路由那家的角色不算）
+        let retired_model = models_before
+            .iter()
+            .filter_map(|item| item["name"].as_str())
+            .find(|id| *id != "claude-sonnet-5")
+            .expect("stack member model")
+            .to_string();
+
+        // 保存 1+4+N：配置接管，旧聚合名单让位。
+        state
+            .db
+            .set_app_model_config(
+                desktop.as_str(),
+                &crate::services::gateway_config::AppModelConfig {
+                    default: Some("MAP/kimi-k3".to_string()),
+                    slots: Default::default(),
+                    allowed: vec!["MAP/kimi-k3".to_string()],
+                    routing: None,
+                },
+            )
+            .expect("save desktop model config");
+        retire_stack_for_app_config(&state, &desktop)
+            .await
+            .expect("retire legacy stack");
+
+        let stack = settled_stack(&desktop).unwrap();
+        assert!(!stack.enabled, "配了模型配置后旧聚合模式要关掉");
+        assert!(stack.is_member("other"), "名单留着，以后还能回到聚合");
+        assert_eq!(app_mode_view(&state, &desktop).unwrap().mode, "route");
+        let models = desktop_profile()["inferenceModels"]
+            .as_array()
+            .expect("models")
+            .clone();
+        assert!(
+            models
+                .iter()
+                .any(|item| item["name"] == json!(stack::desktop_config_id("MAP/kimi-k3"))),
+            "配置里的引用要编码后发布给 Desktop: {models:?}"
+        );
+        assert!(
+            !models
+                .iter()
+                .any(|item| item["name"] == json!(retired_model)),
+            "旧聚合模型 {retired_model} 不能再出现在菜单里: {models:?}"
+        );
+    }
+
+    #[tokio::test]
+    #[serial]
+    async fn claude_desktop_stack_entry_yields_to_the_model_config() {
+        let home = Home::new();
+        let _dirs = DesktopDirs::under(&home);
+        seed_settings(USER_SETTINGS);
+        let state = state_with(
+            AppType::Claude,
+            &[claude("a", "https://a.example", json!({}))],
+            "a",
+        )
+        .await;
+        let desktop = AppType::ClaudeDesktop;
+        for card in [desktop_card("direct", false), desktop_card("map", true)] {
+            state
+                .db
+                .save_provider(desktop.as_str(), &card)
+                .expect("save desktop card");
+        }
+        crate::settings::set_current_provider(&desktop, Some("direct")).expect("desktop current");
+        state
+            .db
+            .set_app_model_config(
+                desktop.as_str(),
+                &crate::services::gateway_config::AppModelConfig {
+                    default: Some("MAP/kimi-k3".to_string()),
+                    slots: Default::default(),
+                    allowed: vec!["MAP/kimi-k3".to_string()],
+                    routing: None,
+                },
+            )
+            .expect("save desktop model config");
+
+        // 旧调用方（或残留状态）再要求进入聚合模式：配置优先，聚合被关掉。
+        enter_with_route(&state, &desktop, true, Some("map"))
+            .await
+            .expect("enter desktop");
+
+        assert!(
+            !settled_stack(&desktop).unwrap().enabled,
+            "有模型配置时不能回到聚合模式"
+        );
+        assert_eq!(app_mode_view(&state, &desktop).unwrap().mode, "route");
+        let models = desktop_profile()["inferenceModels"]
+            .as_array()
+            .expect("models")
+            .clone();
+        assert!(
+            models
+                .iter()
+                .any(|item| item["name"] == json!(stack::desktop_config_id("MAP/kimi-k3"))),
+            "客户端发布应以配置为准: {models:?}"
+        );
+        // 编码后的配置引用也是 claude-fable-ccs-*，这里不能按前缀判断；只认配置里那条。
+        assert_eq!(
+            models.len(),
+            2,
+            "只会发布路由那家的角色和配置里默认那条: {models:?}"
+        );
     }
 
     #[tokio::test]
