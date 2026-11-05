@@ -12,7 +12,7 @@ cd "$REPO_ROOT"
 PROFILE="${CC_SWITCH_CLI_PROFILE:-release}"
 DEST="${1:-$HOME/.local/bin}"
 
-echo "[install-cli] 构建 ccswitch（$PROFILE）..."
+echo "[install-cli] 构建 ccswitch（${PROFILE}）..."
 if [[ "$PROFILE" == "debug" ]]; then
   cargo build --manifest-path src-tauri/Cargo.toml --bin ccswitch
   BIN="$REPO_ROOT/src-tauri/target/debug/ccswitch"
