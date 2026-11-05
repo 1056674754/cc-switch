@@ -27,6 +27,14 @@ export default defineConfig(({ command }) => ({
   server: {
     port: 3000,
     strictPort: true,
+    // 浏览器开发模式：把 IPC 转发给 headless core（ws: true 让 /ipc/events 的 WebSocket 也能代理）
+    proxy: {
+      "/ipc": {
+        target: `http://127.0.0.1:${process.env.CC_DEV_IPC_PORT ?? "3999"}`,
+        changeOrigin: true,
+        ws: true,
+      },
+    },
   },
   resolve: {
     alias: {

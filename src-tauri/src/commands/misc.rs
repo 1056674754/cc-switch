@@ -12075,3 +12075,11 @@ mod tests {
         assert_eq!(unc_env.as_deref(), Some(r"\\server\共享\repo"));
     }
 }
+
+// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
+#[cfg(feature = "dev-ipc")]
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod dev_ipc_adapters {
+    include!("../dev_ipc/adapters/misc.rs");
+}
+// <<< dev-ipc adapters

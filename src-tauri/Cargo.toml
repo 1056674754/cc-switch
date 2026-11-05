@@ -19,6 +19,9 @@ doctest = false
 [features]
 default = []
 test-hooks = []
+# 浏览器开发模式：把 IPC 命令面开成 loopback HTTP/WS（配合 `--headless` 使用）。
+# 正式构建不打开，桥接代码与桥接适配层都不编进去。
+dev-ipc = ["axum/ws"]
 
 [build-dependencies]
 tauri-build = { version = "2.4.0", features = [] }

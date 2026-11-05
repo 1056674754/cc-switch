@@ -15,6 +15,8 @@ mod commands;
 mod config;
 mod database;
 mod deeplink;
+#[cfg(feature = "dev-ipc")]
+pub mod dev_ipc;
 mod dsh_config;
 mod error;
 mod gemini_config;
@@ -476,6 +478,21 @@ fn handle_second_instance(app: &tauri::AppHandle, args: Vec<String>) {
     }
 }
 
+/// 是否运行在「浏览器开发模式」的 headless core 里（`--headless` + `dev-ipc` feature）。
+///
+/// 正式构建里 `dev_ipc` 模块不编译，恒为 false；所有分支都只是常量折叠。
+#[inline]
+fn headless_dev_ipc() -> bool {
+    #[cfg(feature = "dev-ipc")]
+    {
+        return crate::dev_ipc::is_headless();
+    }
+    #[cfg(not(feature = "dev-ipc"))]
+    {
+        false
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // 设置 panic hook，在应用崩溃时记录日志到 <app_config_dir>/crash.log（默认 ~/.cc-switch/crash.log）
@@ -496,8 +513,10 @@ pub fn run() {
         );
     }
 
+    // headless 开发核心不注册单实例：它会和生产版抢 /tmp/<identifier>_si.sock，
+    // 抢输的一方直接 exit(0)（见 tauri-plugin-single-instance 的 macOS 实现）。
     #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
-    {
+    if !headless_dev_ipc() {
         builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
             log::info!("=== Single Instance Callback Triggered ===");
             // Windows 上这个回调跑在主线程处理 WM_COPYDATA 的窗口过程里，第二个实例的
@@ -1203,7 +1222,8 @@ pub fn run() {
                         .map(|d| !d.join("applications/cc-switch-handler.desktop").exists())
                         .unwrap_or(true);
 
-                    if should_register {
+                    // headless 开发核心不抢系统 URL scheme，免得把生产版的 ccswitch:// 抢走。
+                    if should_register && !headless_dev_ipc() {
                         if let Err(e) = app.deep_link().register_all() {
                             log::error!("✗ Failed to register deep link schemes: {}", e);
                         } else {
@@ -1216,10 +1236,12 @@ pub fn run() {
 
                 #[cfg(all(debug_assertions, windows))]
                 {
-                    if let Err(e) = app.deep_link().register_all() {
-                        log::error!("✗ Failed to register deep link schemes: {}", e);
-                    } else {
-                        log::info!("✓ Deep link schemes registered (Windows debug)");
+                    if !headless_dev_ipc() {
+                        if let Err(e) = app.deep_link().register_all() {
+                            log::error!("✗ Failed to register deep link schemes: {}", e);
+                        } else {
+                            log::info!("✓ Deep link schemes registered (Windows debug)");
+                        }
                     }
                 }
             }
@@ -1267,38 +1289,41 @@ pub fn run() {
                 Err(e) => log::warn!("读取启动时的深链接失败: {e}"),
             }
 
-            // 构建托盘：Windows 左键打开主界面，右键默认弹出面板；macOS 左右键默认都弹出面板。
-            // 设置里打开「原生托盘菜单」就挂原生菜单（`tray::apply_tray_style` 运行时切换）。
-            // Linux（AppIndicator）不派发点击事件，只能出原生菜单，菜单里有一项打开面板。
-            let native_menu = tray_panel::uses_native_menu();
-            let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
-                .tooltip("CC Switch") // 鼠标悬停提示
-                .on_tray_icon_event(tray::handle_tray_icon_event)
-                .on_menu_event(|app, event| {
-                    tray::handle_tray_menu_event(app, &event.id.0);
-                })
-                .show_menu_on_left_click(tray::native_menu_on_left_click(native_menu));
-            if native_menu {
-                let menu = tray::create_tray_menu(app.handle(), &app_state)?;
-                tray_builder = tray_builder.menu(&menu);
-            }
+            // headless 开发核心不建托盘：它在菜单栏多出一个图标，还会让生产版和 dev 版抢同一套托盘状态。
+            if !headless_dev_ipc() {
+                // 构建托盘：Windows 左键打开主界面，右键默认弹出面板；macOS 左右键默认都弹出面板。
+                // 设置里打开「原生托盘菜单」就挂原生菜单（`tray::apply_tray_style` 运行时切换）。
+                // Linux（AppIndicator）不派发点击事件，只能出原生菜单，菜单里有一项打开面板。
+                let native_menu = tray_panel::uses_native_menu();
+                let mut tray_builder = TrayIconBuilder::with_id(tray::TRAY_ID)
+                    .tooltip("CC Switch") // 鼠标悬停提示
+                    .on_tray_icon_event(tray::handle_tray_icon_event)
+                    .on_menu_event(|app, event| {
+                        tray::handle_tray_menu_event(app, &event.id.0);
+                    })
+                    .show_menu_on_left_click(tray::native_menu_on_left_click(native_menu));
+                if native_menu {
+                    let menu = tray::create_tray_menu(app.handle(), &app_state)?;
+                    tray_builder = tray_builder.menu(&menu);
+                }
 
-            // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）；出问题时 tray.rs 换成带圆点的那张
-            if let Some((icon, template)) = tray::base_tray_icon(app.handle()) {
-                tray_builder = tray_builder.icon(icon).icon_as_template(template);
-            }
+                // 使用平台对应的托盘图标（macOS 使用模板图标适配深浅色）；出问题时 tray.rs 换成带圆点的那张
+                if let Some((icon, template)) = tray::base_tray_icon(app.handle()) {
+                    tray_builder = tray_builder.icon(icon).icon_as_template(template);
+                }
 
-            // Linux 托盘需要把图标写入磁盘。WSL 的 XDG_RUNTIME_DIR 可能指向
-            // 不存在或不可写的目录，使用应用缓存目录避免因此中止启动。
-            #[cfg(target_os = "linux")]
-            {
-                tray_builder =
-                    tray_builder.temp_dir_path(app.path().app_cache_dir()?.join("tray-icon"));
-            }
+                // Linux 托盘需要把图标写入磁盘。WSL 的 XDG_RUNTIME_DIR 可能指向
+                // 不存在或不可写的目录，使用应用缓存目录避免因此中止启动。
+                #[cfg(target_os = "linux")]
+                {
+                    tray_builder =
+                        tray_builder.temp_dir_path(app.path().app_cache_dir()?.join("tray-icon"));
+                }
 
-            let _tray = tray_builder.build(app)?;
-            #[cfg(target_os = "windows")]
-            tray_compat::install(app.handle());
+                let _tray = tray_builder.build(app)?;
+                #[cfg(target_os = "windows")]
+                tray_compat::install(app.handle());
+            }
             crate::services::webdav_auto_sync::start_worker(
                 app_state.db.clone(),
                 app.handle().clone(),
@@ -1573,6 +1598,11 @@ pub fn run() {
                 }
             }
 
+            // 浏览器开发模式：所有 state / service 都已就绪，把命令面开在 loopback 上。
+            #[cfg(feature = "dev-ipc")]
+            if crate::dev_ipc::is_headless() {
+                crate::dev_ipc::start(app.handle().clone());
+            }
 
             Ok(())
         })
@@ -2034,8 +2064,17 @@ pub fn run() {
             commands::is_lightweight_mode,
         ]);
 
+    // headless 开发核心不建窗口：清掉 tauri.conf.json 里的窗口定义，setup 里所有
+    // `get_webview_window("main")` 分支自然跳过，进程只留 DB / gateway / IPC 桥。
+    let mut context = tauri::generate_context!();
+    if headless_dev_ipc() {
+        let removed = context.config_mut().app.windows.len();
+        context.config_mut().app.windows.clear();
+        log::info!("[dev-ipc] headless 模式：已跳过 {removed} 个窗口");
+    }
+
     let app = builder
-        .build(tauri::generate_context!())
+        .build(context)
         .expect("error while running tauri application");
 
     app.run(|app_handle, event| {
@@ -2680,3 +2719,11 @@ mod tests {
         );
     }
 }
+
+// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
+#[cfg(feature = "dev-ipc")]
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod dev_ipc_adapters {
+    include!("dev_ipc/adapters/lib.rs");
+}
+// <<< dev-ipc adapters

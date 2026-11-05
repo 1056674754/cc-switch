@@ -96,3 +96,7 @@ pub use workspace::*;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) use misc::{login_shell_path, merge_path_segments, CommandDeadline};
+
+// 浏览器开发模式的命令分发表（生成物，见 scripts/gen_dev_ipc_adapters.py）
+#[cfg(feature = "dev-ipc")]
+pub(crate) mod dev_ipc_table;

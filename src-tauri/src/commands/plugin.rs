@@ -46,3 +46,11 @@ pub async fn apply_claude_onboarding_skip() -> Result<bool, String> {
 pub async fn clear_claude_onboarding_skip() -> Result<bool, String> {
     crate::claude_mcp::clear_has_completed_onboarding().map_err(|e| e.to_string())
 }
+
+// >>> dev-ipc adapters（生成物：scripts/gen_dev_ipc_adapters.py，勿手改）
+#[cfg(feature = "dev-ipc")]
+#[allow(clippy::all, dead_code, non_snake_case, unused_imports)]
+pub(crate) mod dev_ipc_adapters {
+    include!("../dev_ipc/adapters/plugin.rs");
+}
+// <<< dev-ipc adapters

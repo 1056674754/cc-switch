@@ -1,3 +1,5 @@
+// 浏览器开发模式：在普通浏览器里把 invoke 转成 HTTP（必须在所有 @tauri-apps/api 之前加载）
+import "./dev/webBridge";
 import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
