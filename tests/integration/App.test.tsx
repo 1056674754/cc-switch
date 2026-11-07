@@ -591,6 +591,15 @@ describe("App integration with MSW", () => {
     expect(await screen.findByText("编辑配置")).toBeInTheDocument();
     expect(screen.queryByTestId("provider-list")).not.toBeInTheDocument();
 
+    // 正文是编辑配置时，顶栏不能再漏出供应商列表的「添加供应商」
+    const header = document.querySelector("header") as HTMLElement;
+    expect(
+      within(header).queryByRole("button", {
+        name: /provider.addProvider/,
+        hidden: true,
+      }),
+    ).not.toBeInTheDocument();
+
     expect(() => {
       emitTauriEvent("webdav-sync-status-updated", null);
     }).not.toThrow();

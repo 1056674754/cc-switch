@@ -118,7 +118,7 @@ describe("ClaudeOfficialSection", () => {
       screen.getByRole("button", { name: "me@example.com · Acme 的更多操作" }),
     );
     expect(
-      await screen.findByRole("menuitem", { name: "删除账号…" }),
+      await screen.findByRole("menuitem", { name: /退出登录/ }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("menuitem", { name: "设为默认" }),

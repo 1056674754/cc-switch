@@ -2,8 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { ChevronDown } from "lucide-react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { useProxyTakeoverStatus } from "@/lib/query/proxy";
-import { proxyKeys } from "@/lib/query/proxy";
+import { proxyKeys, useProxyTakeoverStatus } from "@/lib/query/proxy";
 import { toast } from "@/lib/toast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,7 +12,11 @@ import { gatewayApi } from "@/lib/api/gateway";
 import type { AppModelConfig, GatewayCatalogEntry } from "@/types/gateway";
 import { ModelPicker } from "./ModelPicker";
 import { ClientGatewayBar, type GatewayClientBarApp } from "./ClientGatewayBar";
-import { applySlotChange, slotDefinitions, validateDraft } from "./appModelConfig";
+import {
+  applySlotChange,
+  slotDefinitions,
+  validateDraft,
+} from "./appModelConfig";
 import { gatewayKeys } from "./AppEditorPage";
 
 /** 表单里非模型字段（作用范围 / 入口模式 / 两个路由开关 / 档案名）原样存进 routing。 */
@@ -33,9 +36,7 @@ const DEFAULT_META: FormMeta = {
   configLevelRouting: false,
 };
 
-function metaFromConfig(
-  config: AppModelConfig | null | undefined,
-): FormMeta {
+function metaFromConfig(config: AppModelConfig | null | undefined): FormMeta {
   const saved = (config?.routing ?? {}) as Partial<FormMeta>;
   return { ...DEFAULT_META, ...saved };
 }
@@ -77,9 +78,7 @@ export function AppConfigPage({
   const { data: takeoverStatus } = useProxyTakeoverStatus(false);
   const adopted =
     !clientApp &&
-    Boolean(
-      (takeoverStatus as Record<string, boolean> | undefined)?.[appType],
-    );
+    Boolean((takeoverStatus as Record<string, boolean> | undefined)?.[appType]);
 
   useEffect(() => {
     setDraft(configQuery.data ?? {});
@@ -105,9 +104,10 @@ export function AppConfigPage({
   // 上方选过的模型（默认 + 槽位）永远算「已允许」：列表里勾上并禁用，
   // 不允许在下面取消，避免出现「默认模型不在允许列表里」这种自相矛盾的配置。
   const pinned = useMemo(() => {
-    const references = [draft.default, ...Object.values(draft.slots ?? {})].filter(
-      (reference): reference is string => Boolean(reference),
-    );
+    const references = [
+      draft.default,
+      ...Object.values(draft.slots ?? {}),
+    ].filter((reference): reference is string => Boolean(reference));
     return [...new Set(references)];
   }, [draft.default, draft.slots]);
   const isPinned = (reference: string) => pinned.includes(reference);
@@ -118,7 +118,9 @@ export function AppConfigPage({
 
   const errors = useMemo(() => {
     if (!draft.default) {
-      return [t("gateway.form.defaultRequired", { defaultValue: "默认模型必填" })];
+      return [
+        t("gateway.form.defaultRequired", { defaultValue: "默认模型必填" }),
+      ];
     }
     return validateDraft({ ...draft, allowed: effectiveAllowed }, entries);
   }, [draft, entries, t, effectiveAllowed]);
@@ -172,11 +174,15 @@ export function AppConfigPage({
       } else {
         await gatewayApi.adopt(appType);
       }
-      await queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus });
-      await queryClient.invalidateQueries({ queryKey: proxyKeys.status });
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: proxyKeys.takeoverStatus }),
+        queryClient.invalidateQueries({ queryKey: proxyKeys.status }),
+      ]);
       toast.success(
         adopted
-          ? t("gateway.form.released", { defaultValue: "已释放，客户端配置已还原" })
+          ? t("gateway.form.released", {
+              defaultValue: "已释放，客户端配置已还原",
+            })
           : t("gateway.form.adopted", {
               defaultValue: "已接管，客户端指向网关",
             }),
@@ -208,7 +214,9 @@ export function AppConfigPage({
         queryKey: gatewayKeys.appConfig(appType),
       });
       toast.success(
-        t("gateway.form.saved", { defaultValue: "已保存，已接管的客户端立即生效" }),
+        t("gateway.form.saved", {
+          defaultValue: "已保存，已接管的客户端立即生效",
+        }),
       );
     } catch (error) {
       toast.error(
@@ -250,7 +258,13 @@ export function AppConfigPage({
           </h2>
           {clientApp ? null : (
             <div className="flex items-center gap-2">
-              <span className={adopted ? "text-caption text-success" : "text-caption text-fg-3"}>
+              <span
+                className={
+                  adopted
+                    ? "text-caption text-success"
+                    : "text-caption text-fg-3"
+                }
+              >
                 {adopted
                   ? t("gateway.form.adoptedBadge", { defaultValue: "已接管" })
                   : t("gateway.form.directBadge", { defaultValue: "未接管" })}
@@ -262,7 +276,9 @@ export function AppConfigPage({
                 onClick={() => void toggleRoute()}
               >
                 {switchingRoute
-                  ? t("gateway.form.routeSwitching", { defaultValue: "处理中…" })
+                  ? t("gateway.form.routeSwitching", {
+                      defaultValue: "处理中…",
+                    })
                   : adopted
                     ? t("gateway.form.release", { defaultValue: "释放" })
                     : t("gateway.form.adopt", { defaultValue: "接管" })}
@@ -274,13 +290,18 @@ export function AppConfigPage({
         {clientApp ? <ClientGatewayBar app={clientApp} /> : null}
 
         <div className="grid grid-cols-2 gap-4">
-          <Field label={t("gateway.form.agent", { defaultValue: "Agent" })} required>
+          <Field
+            label={t("gateway.form.agent", { defaultValue: "Agent" })}
+            required
+          >
             <div className="flex h-10 items-center gap-2 rounded-md border border-border bg-muted px-3 text-sm">
               {appLabel}
             </div>
           </Field>
           <Field
-            label={t("gateway.form.profileName", { defaultValue: "配置档案名称" })}
+            label={t("gateway.form.profileName", {
+              defaultValue: "配置档案名称",
+            })}
             required
           >
             <Input
@@ -290,11 +311,16 @@ export function AppConfigPage({
               }
             />
           </Field>
-          <Field label={t("gateway.form.scope", { defaultValue: "作用范围" })} required>
+          <Field
+            label={t("gateway.form.scope", { defaultValue: "作用范围" })}
+            required
+          >
             <select
               className="h-10 w-full rounded-md border border-border bg-input px-3 text-sm"
               value={meta.scope}
-              onChange={(event) => setMeta({ ...meta, scope: event.target.value })}
+              onChange={(event) =>
+                setMeta({ ...meta, scope: event.target.value })
+              }
             >
               <option value="system">
                 {t("gateway.form.scopeSystem", { defaultValue: "系统默认" })}
@@ -304,14 +330,21 @@ export function AppConfigPage({
               </option>
             </select>
           </Field>
-          <Field label={t("gateway.form.entryMode", { defaultValue: "入口模式" })} required>
+          <Field
+            label={t("gateway.form.entryMode", { defaultValue: "入口模式" })}
+            required
+          >
             <select
               className="h-10 w-full rounded-md border border-border bg-input px-3 text-sm"
               value={meta.entryMode}
-              onChange={(event) => setMeta({ ...meta, entryMode: event.target.value })}
+              onChange={(event) =>
+                setMeta({ ...meta, entryMode: event.target.value })
+              }
             >
               <option value="cli-and-app">
-                {t("gateway.form.entryCliAndApp", { defaultValue: "CLI 和 APP" })}
+                {t("gateway.form.entryCliAndApp", {
+                  defaultValue: "CLI 和 APP",
+                })}
               </option>
               <option value="cli">
                 {t("gateway.form.entryCli", { defaultValue: "仅 CLI" })}
@@ -323,7 +356,10 @@ export function AppConfigPage({
           </Field>
         </div>
 
-        <Field label={t("gateway.form.defaultModel", { defaultValue: "默认模型" })} required>
+        <Field
+          label={t("gateway.form.defaultModel", { defaultValue: "默认模型" })}
+          required
+        >
           <ModelPicker
             entries={entries}
             value={draft.default}
@@ -350,7 +386,11 @@ export function AppConfigPage({
                     onChange={(reference) =>
                       setDraft({
                         ...draft,
-                        slots: applySlotChange(draft.slots, slot.key, reference),
+                        slots: applySlotChange(
+                          draft.slots,
+                          slot.key,
+                          reference,
+                        ),
                       })
                     }
                   />
@@ -381,7 +421,9 @@ export function AppConfigPage({
             <div className="flex flex-col gap-4 border-t border-border p-4">
               <div className="flex items-center justify-between gap-4">
                 <span className="text-sm">
-                  {t("gateway.form.enhancedRouting", { defaultValue: "增强路由" })}
+                  {t("gateway.form.enhancedRouting", {
+                    defaultValue: "增强路由",
+                  })}
                 </span>
                 <Switch
                   checked={meta.enhancedRouting}
@@ -447,7 +489,10 @@ export function AppConfigPage({
                 />
                 <div className="flex max-h-80 flex-col gap-3 overflow-y-auto pr-1">
                   {allowedGroups.map((group) => (
-                    <div key={group.upstreamName} className="flex flex-col gap-1.5">
+                    <div
+                      key={group.upstreamName}
+                      className="flex flex-col gap-1.5"
+                    >
                       {/* 供应商横栏：名字 + 这一栏的模型数 */}
                       <div className="flex items-center justify-between gap-2 border-b border-border pb-1">
                         <span className="truncate text-caption font-medium text-fg-2">
@@ -470,11 +515,15 @@ export function AppConfigPage({
                             >
                               <Checkbox
                                 checked={
-                                  pinnedHere || allowed.includes(entry.reference)
+                                  pinnedHere ||
+                                  allowed.includes(entry.reference)
                                 }
                                 disabled={pinnedHere}
                                 onCheckedChange={(checked) =>
-                                  toggleAllowed(entry.reference, checked === true)
+                                  toggleAllowed(
+                                    entry.reference,
+                                    checked === true,
+                                  )
                                 }
                               />
                               <span className="truncate">

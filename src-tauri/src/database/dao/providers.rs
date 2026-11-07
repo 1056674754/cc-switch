@@ -56,9 +56,12 @@ fn is_credential_field(name: &str) -> bool {
 ///
 /// 同一把 key 在不同 app 下可能分别叫 `ANTHROPIC_AUTH_TOKEN` / `OPENAI_API_KEY` /
 /// `options.apiKey`，它们是同一个凭证，不该因为字段名不同而被拆开。
+///
+/// `auth` 是 Codex 系的存放位置（`{"auth":{"OPENAI_API_KEY":"..."}}`），漏了它会让
+/// 自定义网关的 Codex 供应商被当成「没有密钥」，供应商卡片和上游刷新都拿不到 key。
 pub(crate) fn credential_values(config: &serde_json::Value) -> Vec<String> {
     let mut parts: Vec<String> = Vec::new();
-    for scope in ["env", "options"] {
+    for scope in ["env", "options", "auth"] {
         let Some(object) = config.get(scope).and_then(|value| value.as_object()) else {
             continue;
         };

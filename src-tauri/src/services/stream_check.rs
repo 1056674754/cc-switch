@@ -19,6 +19,7 @@
 use reqwest::header::HeaderValue;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::time::Instant;
 
 use crate::app_config::AppType;
@@ -75,6 +76,17 @@ pub struct StreamCheckResult {
     pub retry_count: u32,
 }
 
+/// 一次真实模型探测的结果（CCR 式：实际发 1 token 请求）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ModelCheckResult {
+    pub model: String,
+    pub success: bool,
+    pub message: String,
+    pub response_time_ms: Option<u64>,
+    pub http_status: Option<u16>,
+}
+
 /// 连通性检查服务
 pub struct StreamCheckService;
 
@@ -123,6 +135,156 @@ impl StreamCheckService {
             tested_at: chrono::Utc::now().timestamp(),
             retry_count: config.max_retries,
         }))
+    }
+
+    /// CCR 式真实模型检查：对每个模型发一次最小请求（1 token），按模型返回结果。
+    ///
+    /// 只对普通 API key 供应商开放；托管账号/Official 没有可直接使用的 key，由界面隐藏。
+    pub async fn check_models(
+        app_type: &AppType,
+        provider: &Provider,
+        models: &[String],
+    ) -> Vec<ModelCheckResult> {
+        let mut results = Vec::new();
+        for model in models {
+            let started = Instant::now();
+            let result = Self::check_one_model(app_type, provider, model).await;
+            let response_time_ms = Some(started.elapsed().as_millis() as u64);
+            results.push(match result {
+                Ok((status, message)) => ModelCheckResult {
+                    model: model.clone(),
+                    success: true,
+                    message,
+                    response_time_ms,
+                    http_status: Some(status),
+                },
+                Err(error) => ModelCheckResult {
+                    model: model.clone(),
+                    success: false,
+                    message: error.to_string(),
+                    response_time_ms,
+                    http_status: None,
+                },
+            });
+        }
+        results
+    }
+
+    async fn check_one_model(
+        app_type: &AppType,
+        provider: &Provider,
+        model: &str,
+    ) -> Result<(u16, String), AppError> {
+        if provider.category.as_deref() == Some("official") {
+            return Err(AppError::Message(
+                "托管登录/Official 供应商不适用真实模型检测".to_string(),
+            ));
+        }
+        let model = model.trim();
+        if model.is_empty() {
+            return Err(AppError::Message("模型不能为空".to_string()));
+        }
+
+        let adapter = get_adapter(app_type).ok_or_else(|| {
+            AppError::InvalidInput(format!("{} 不支持连通性检测", app_type.as_str()))
+        })?;
+        let auth = adapter
+            .extract_auth(provider)
+            .ok_or_else(|| AppError::Message("这条接入没有可用的 API Key".to_string()))?;
+        if auth.api_key.contains("placeholder") {
+            return Err(AppError::Message(
+                "托管登录/OAuth 接入不适用真实模型检测".to_string(),
+            ));
+        }
+        let base_url = adapter
+            .extract_base_url(provider)
+            .map_err(|error| AppError::Message(format!("读取 base_url 失败: {error}")))?;
+        if base_url.trim().is_empty() {
+            return Err(AppError::Message("base_url 为空".to_string()));
+        }
+
+        let protocol = provider
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.api_format.clone())
+            .or_else(|| {
+                provider
+                    .settings_config
+                    .get("api_format")
+                    .or_else(|| provider.settings_config.get("apiFormat"))
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| match app_type {
+                AppType::Codex => "openai_responses".to_string(),
+                AppType::Gemini | AppType::Agy => "gemini_native".to_string(),
+                _ => "anthropic".to_string(),
+            });
+        let protocol = normalize_protocol(&protocol);
+
+        let (url, body) = build_probe_request(&base_url, &protocol, model)?;
+        let client = crate::proxy::http_client::get_for_url(&url);
+        let mut request = client
+            .post(&url)
+            .timeout(std::time::Duration::from_secs(30))
+            .header("content-type", "application/json")
+            .header("accept", "application/json")
+            .json(&body);
+
+        match protocol.as_str() {
+            "anthropic" => {
+                for (name, value) in adapter
+                    .get_auth_headers(&auth)
+                    .map_err(|error| AppError::Message(error.to_string()))?
+                {
+                    request = request.header(name, value);
+                }
+                request = request.header("anthropic-version", "2023-06-01");
+            }
+            "openai_chat" | "openai_responses" => {
+                request = request.bearer_auth(&auth.api_key);
+            }
+            "gemini_native" => {
+                request = request.header("x-goog-api-key", &auth.api_key);
+            }
+            _ => {
+                return Err(AppError::Message(format!(
+                    "暂不支持检测 {protocol} 协议的模型"
+                )))
+            }
+        }
+
+        let response = request
+            .send()
+            .await
+            .map_err(|error| Self::map_request_error(error))?;
+        let status = response.status().as_u16();
+        let text = response.text().await.unwrap_or_default();
+        if (200..300).contains(&status) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+                if let Some(error) = json.get("error") {
+                    return Err(AppError::Message(format!(
+                        "上游返回错误: {}",
+                        truncate_error(&error.to_string())
+                    )));
+                }
+            }
+            Ok((status, "可用".to_string()))
+        } else {
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|json| {
+                    json.pointer("/error/message")
+                        .or_else(|| json.get("message"))
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| text.trim().to_string());
+            Err(AppError::Message(format!(
+                "HTTP {status}: {}",
+                truncate_error(&message)
+            )))
+        }
     }
 
     /// 单次连通性探测。
@@ -395,6 +557,101 @@ impl StreamCheckService {
     }
 }
 
+fn normalize_protocol(raw: &str) -> String {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai_chat" | "chat" | "chat_completions" => "openai_chat".to_string(),
+        "openai_responses" | "responses" => "openai_responses".to_string(),
+        "anthropic" | "anthropic_messages" | "messages" => "anthropic".to_string(),
+        "gemini" | "gemini_native" | "google" => "gemini_native".to_string(),
+        other => other.to_string(),
+    }
+}
+
+fn join_api_path(base_url: &str, suffix: &str) -> String {
+    let base = base_url.trim().trim_end_matches('/');
+    let suffix = suffix.trim_start_matches('/');
+    // 有些接入填的是完整 endpoint（meta.isFullUrl），不要再拼一层路径。
+    let full_markers = [
+        "/v1/messages",
+        "/v1/chat/completions",
+        "/v1/responses",
+        "/chat/completions",
+        "/responses",
+        "/messages",
+    ];
+    if full_markers.iter().any(|marker| base.ends_with(marker)) {
+        return base.to_string();
+    }
+    if base.ends_with("/v1") || base.ends_with("/v1beta") {
+        format!("{base}/{suffix}")
+    } else {
+        format!("{base}/v1/{suffix}")
+    }
+}
+
+fn build_probe_request(
+    base_url: &str,
+    protocol: &str,
+    model: &str,
+) -> Result<(String, serde_json::Value), AppError> {
+    let (url, body) = match protocol {
+        "anthropic" => (
+            join_api_path(base_url, "messages"),
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        ),
+        "openai_chat" => (
+            join_api_path(base_url, "chat/completions"),
+            json!({
+                "model": model,
+                "max_tokens": 1,
+                "messages": [{"role": "user", "content": "ping"}]
+            }),
+        ),
+        "openai_responses" => (
+            join_api_path(base_url, "responses"),
+            json!({
+                "model": model,
+                "max_output_tokens": 1,
+                "input": "ping"
+            }),
+        ),
+        "gemini_native" => {
+            let base = base_url.trim().trim_end_matches('/');
+            let path = if base.contains(":generateContent") {
+                base.to_string()
+            } else if base.ends_with("/v1beta") {
+                format!("{base}/models/{model}:generateContent")
+            } else {
+                format!("{base}/v1beta/models/{model}:generateContent")
+            };
+            (
+                path,
+                json!({
+                    "contents": [{"role": "user", "parts": [{"text": "ping"}]}],
+                    "generationConfig": {"maxOutputTokens": 1}
+                }),
+            )
+        }
+        other => return Err(AppError::Message(format!("暂不支持检测 {other} 协议"))),
+    };
+    Ok((url, body))
+}
+
+fn truncate_error(message: &str) -> String {
+    let trimmed = message.trim();
+    let mut chars = trimmed.chars();
+    let truncated: String = chars.by_ref().take(240).collect();
+    if chars.next().is_some() {
+        format!("{truncated}…")
+    } else {
+        truncated
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,6 +663,39 @@ mod tests {
             settings_config,
             None,
         )
+    }
+
+    #[test]
+    fn test_probe_request_targets_protocol_endpoints() {
+        let (url, body) =
+            build_probe_request("https://api.example.com/v1", "anthropic", "claude-sonnet")
+                .expect("anthropic request");
+        assert_eq!(url, "https://api.example.com/v1/messages");
+        assert_eq!(body["max_tokens"], 1);
+        assert_eq!(body["model"], "claude-sonnet");
+
+        let (url, body) = build_probe_request("https://api.example.com", "openai_chat", "gpt-test")
+            .expect("chat request");
+        assert_eq!(url, "https://api.example.com/v1/chat/completions");
+        assert_eq!(body["max_tokens"], 1);
+
+        let (url, body) =
+            build_probe_request("https://api.example.com/v1", "openai_responses", "gpt-test")
+                .expect("responses request");
+        assert_eq!(url, "https://api.example.com/v1/responses");
+        assert_eq!(body["max_output_tokens"], 1);
+
+        let (url, body) = build_probe_request(
+            "https://generativelanguage.googleapis.com",
+            "gemini_native",
+            "gemini-test",
+        )
+        .expect("gemini request");
+        assert_eq!(
+            url,
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-test:generateContent"
+        );
+        assert_eq!(body["generationConfig"]["maxOutputTokens"], 1);
     }
 
     #[test]

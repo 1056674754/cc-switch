@@ -14,6 +14,7 @@ pub mod exchange_rates;
 pub mod gateway_catalog;
 pub mod gateway_config;
 pub mod gateway_migration;
+pub mod gateway_model_sync;
 pub mod gateway_route;
 pub mod hermes_gateway;
 pub mod kimi_oauth;

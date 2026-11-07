@@ -6,7 +6,9 @@
 use crate::app_config::AppType;
 use crate::commands::copilot::CopilotAuthState;
 use crate::error::AppError;
-use crate::services::stream_check::{StreamCheckConfig, StreamCheckResult, StreamCheckService};
+use crate::services::stream_check::{
+    ModelCheckResult, StreamCheckConfig, StreamCheckResult, StreamCheckService,
+};
 use crate::store::AppState;
 use tauri::State;
 
@@ -33,6 +35,27 @@ pub async fn stream_check_provider(
         base_url_override,
     )
     .await
+}
+
+/// CCR 式真实模型检查：对选中的模型各发一次 1 token 请求。
+///
+/// 会消耗供应商额度，调用方必须先弹确认；托管/Official 供应商在界面层隐藏入口，
+/// 这里也会拒绝没有可用 API key 的接入。
+#[tauri::command]
+pub async fn check_provider_models(
+    state: State<'_, AppState>,
+    app_type: AppType,
+    provider_id: String,
+    models: Vec<String>,
+) -> Result<Vec<ModelCheckResult>, AppError> {
+    if models.is_empty() {
+        return Err(AppError::Message("请至少选择一个模型".to_string()));
+    }
+    let providers = state.db.get_all_providers(app_type.as_str())?;
+    let provider = providers
+        .get(&provider_id)
+        .ok_or_else(|| AppError::Message(format!("供应商 {provider_id} 不存在")))?;
+    Ok(StreamCheckService::check_models(&app_type, provider, &models).await)
 }
 
 /// Copilot 供应商的 base_url 需要从 OAuth 管理器动态解析（按账号或默认端点）。

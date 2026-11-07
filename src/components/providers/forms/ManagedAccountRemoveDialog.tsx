@@ -109,11 +109,11 @@ export function ManagedAccountRemoveDialog({
             <DialogTitle className="text-title text-fg-1 [overflow-wrap:anywhere]">
               {target.kind === "one"
                 ? t("managedAuth.remove.titleOne", {
-                    defaultValue: "删除账号「{{login}}」？",
+                    defaultValue: "退出登录「{{login}}」？",
                     login: target.login,
                   })
                 : t("managedAuth.remove.titleAll", {
-                    defaultValue: "删除全部 {{service}} 账号？",
+                    defaultValue: "让 {{service}} 的全部账号退出登录？",
                     service: serviceName,
                   })}
             </DialogTitle>
@@ -121,11 +121,11 @@ export function ManagedAccountRemoveDialog({
               {one
                 ? t("managedAuth.remove.leadOne", {
                     defaultValue:
-                      "会删除这个账号保存在 CC Switch 里的登录凭据，无法撤销。",
+                      "会删除这个账号保存在 CC Switch 里的登录凭据（等于退出登录），无法撤销。",
                   })
                 : t("managedAuth.remove.leadAll", {
                     defaultValue:
-                      "会删除这 {{count}} 个账号保存在 CC Switch 里的登录凭据，无法撤销。",
+                      "会删除这 {{count}} 个账号保存在 CC Switch 里的登录凭据（等于退出登录），无法撤销。",
                     count,
                   })}
               {note && <> {note}</>}
@@ -160,7 +160,7 @@ export function ManagedAccountRemoveDialog({
                 renderList(
                   t("managedAuth.remove.moved", {
                     defaultValue:
-                      "这些供应商用的是默认账号，删除后改用新的默认账号：",
+                      "这些供应商用的是默认账号，退出后改用新的默认账号：",
                   }),
                   moved,
                 )}
@@ -187,7 +187,7 @@ export function ManagedAccountRemoveDialog({
             >
               {one
                 ? t("managedAuth.remove.confirmOne", {
-                    defaultValue: "删除账号",
+                    defaultValue: "退出登录",
                   })
                 : t("managedAuth.remove.confirmAll", {
                     defaultValue: "删除 {{count}} 个账号",

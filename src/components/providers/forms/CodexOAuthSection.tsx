@@ -66,6 +66,23 @@ interface CodexOAuthSectionProps {
   onFastModeChange?: (enabled: boolean) => void;
   /** 授权中心里最后一组的「?」向上弹 */
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 嵌进 provider 卡片时替换「ChatGPT」标题（如「凭据」） */
+  headerLabel?: string;
+  /**
+   * 供应商卡片接管「设为默认」：托管账号是这家供应商的凭据，点哪个号就让这家供应商
+   * 改用哪个号。不传时是授权中心的语义（只改账号池的全局默认账号）。
+   */
+  onSetDefaultAccount?: (accountId: string) => void;
+  settingDefaultAccount?: boolean;
+  /** 「?」里补一句：这里的「设为默认」是让这家供应商改用该账号 */
+  helpNote?: React.ReactNode;
+  /** 供应商页：账号是否参与使用（返回 undefined 就不显示停用/启用） */
+  accountEnabled?: (accountId: string) => boolean | undefined;
+  /** 供应商页：停用/启用这个账号（保留账号，只是不参与使用） */
+  onToggleAccountEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingAccountEnabled?: boolean;
 }
 
 /**
@@ -93,6 +110,14 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
   fastModeEnabled = false,
   onFastModeChange,
   helpSide,
+  embedded = false,
+  headerLabel,
+  onSetDefaultAccount,
+  settingDefaultAccount,
+  helpNote,
+  accountEnabled,
+  onToggleAccountEnabled,
+  togglingAccountEnabled,
 }) => {
   const { t, i18n } = useTranslation();
   const [loginMethod, setLoginMethod] =
@@ -430,6 +455,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           ? [t("authCenter.signedInOn", { defaultValue: "{{date}}登录", date })]
           : [],
       isDefault: defaultAccountId === account.id,
+      enabled: accountEnabled?.(account.id),
       needsReauth,
       users: accountUsers([account.id]),
       quota:
@@ -444,6 +470,8 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
+      headerLabel={headerLabel}
       slug="chatgpt"
       name="ChatGPT"
       iconName="openai"
@@ -452,6 +480,7 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
           "用于 Claude Code、Claude Desktop 的 ChatGPT 预设，以及 Codex 官方登录绑定。没指定账号的供应商用「默认」账号。",
       })}
       helpSide={helpSide}
+      helpNote={helpNote}
       accounts={rows}
       status={isStatusError ? "error" : isStatusSuccess ? "ready" : "loading"}
       statusErrorText={t("codexOauth.statusLoadFailed", {
@@ -462,33 +491,33 @@ export const CodexOAuthSection: React.FC<CodexOAuthSectionProps> = ({
         defaultValue: "还没有登录 {{service}} 账号。",
         service: "ChatGPT",
       })}
-      onAdd={addAccount}
-      loginControl={
-        <Select
-          value={loginMethod}
-          onValueChange={(value) => setLoginMethod(value as CodexLoginMethod)}
-          disabled={isAddingAccount}
-        >
-          <SelectTrigger
-            aria-label={t("codexOauth.loginMethod")}
-            className="h-7 w-[136px]"
-          >
-            <SelectValue />
-          </SelectTrigger>
-          <SelectContent align="end">
-            <SelectItem value="browser">
-              {t("codexOauth.browserLogin")}
-            </SelectItem>
-            <SelectItem value="device_code">
-              {t("codexOauth.deviceCodeLogin")}
-            </SelectItem>
-          </SelectContent>
-        </Select>
-      }
+      onAdd={() => addAccount(loginMethod)}
+      addOptions={[
+        {
+          key: "browser",
+          label: t("codexOauth.browserLogin"),
+          checked: loginMethod === "browser",
+          onSelect: () => {
+            setLoginMethod("browser");
+            addAccount("browser");
+          },
+        },
+        {
+          key: "device_code",
+          label: t("codexOauth.deviceCodeLogin"),
+          checked: loginMethod === "device_code",
+          onSelect: () => {
+            setLoginMethod("device_code");
+            addAccount("device_code");
+          },
+        },
+      ]}
       canReauth
       onReauth={reauthAccount}
-      onSetDefault={setDefaultAccount}
-      settingDefault={isSettingDefaultAccount}
+      onSetDefault={onSetDefaultAccount ?? setDefaultAccount}
+      settingDefault={settingDefaultAccount ?? isSettingDefaultAccount}
+      onToggleEnabled={onToggleAccountEnabled}
+      togglingEnabled={togglingAccountEnabled}
       onRemove={(accountId, login) =>
         setRemoveTarget({ kind: "one", accountId, login })
       }

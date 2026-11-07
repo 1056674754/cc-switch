@@ -149,6 +149,15 @@ function ClaudePasteCode({ flowId }: { flowId: string }) {
 
 interface ClaudeOfficialSectionProps {
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 嵌进 provider 卡片时替换服务名标题（如「凭据」） */
+  headerLabel?: string;
+  /** 供应商页：账号是否参与使用（返回 undefined 就不显示停用/启用） */
+  accountEnabled?: (accountId: string) => boolean | undefined;
+  /** 供应商页：停用/启用这个账号（保留账号，只是不参与使用） */
+  onToggleAccountEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingAccountEnabled?: boolean;
 }
 
 /**
@@ -158,6 +167,11 @@ interface ClaudeOfficialSectionProps {
  */
 export const ClaudeOfficialSection: React.FC<ClaudeOfficialSectionProps> = ({
   helpSide,
+  embedded = false,
+  headerLabel,
+  accountEnabled,
+  onToggleAccountEnabled,
+  togglingAccountEnabled,
 }) => {
   const { t, i18n } = useTranslation();
   const blocked = useClaudeLoginBlocked();
@@ -238,6 +252,7 @@ export const ClaudeOfficialSection: React.FC<ClaudeOfficialSectionProps> = ({
       avatarUrl: account.avatar_url,
       details,
       isDefault: false,
+      enabled: accountEnabled?.(account.id),
       needsReauth,
       users: accountUsers([account.id]),
       quota: needsReauth ? undefined : (
@@ -248,6 +263,8 @@ export const ClaudeOfficialSection: React.FC<ClaudeOfficialSectionProps> = ({
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
+      headerLabel={headerLabel}
       slug="claude-official"
       name={SERVICE_NAME}
       iconName="claude"
@@ -295,6 +312,8 @@ export const ClaudeOfficialSection: React.FC<ClaudeOfficialSectionProps> = ({
       onRemove={(accountId, login) =>
         setRemoveTarget({ kind: "one", accountId, login })
       }
+      onToggleEnabled={onToggleAccountEnabled}
+      togglingEnabled={togglingAccountEnabled}
       removing={isRemovingAccount}
       login={{
         starting: isAddingAccount && !isPolling,

@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
@@ -7,6 +7,8 @@ import type { GatewayCatalogEntry } from "@/types/gateway";
 const getCatalog = vi.fn();
 const getAppModelConfig = vi.fn();
 const setAppModelConfig = vi.fn();
+const adoptApp = vi.fn();
+const releaseApp = vi.fn();
 
 vi.mock("@/lib/api/gateway", () => ({
   gatewayApi: {
@@ -14,6 +16,8 @@ vi.mock("@/lib/api/gateway", () => ({
     getAppModelConfig: (app: string) => getAppModelConfig(app),
     setAppModelConfig: (app: string, config: unknown) =>
       setAppModelConfig(app, config),
+    adopt: (app: string) => adoptApp(app),
+    release: (app: string) => releaseApp(app),
   },
 }));
 
@@ -30,8 +34,13 @@ vi.mock("react-i18next", () => ({
   }),
 }));
 
+const toastSuccess = vi.fn();
+const toastError = vi.fn();
 vi.mock("@/lib/toast", () => ({
-  toast: { success: vi.fn(), error: vi.fn() },
+  toast: {
+    success: (...args: unknown[]) => toastSuccess(...args),
+    error: (...args: unknown[]) => toastError(...args),
+  },
 }));
 
 vi.mock("@/lib/query/proxy", () => ({
@@ -68,6 +77,12 @@ beforeAll(() => {
   Element.prototype.scrollIntoView = vi.fn();
 });
 
+beforeEach(() => {
+  vi.clearAllMocks();
+  adoptApp.mockResolvedValue(undefined);
+  releaseApp.mockResolvedValue(undefined);
+});
+
 function renderPage(appType = "claude", appLabel = "Claude Code") {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -82,7 +97,9 @@ function renderPage(appType = "claude", appLabel = "Claude Code") {
 /** Claude Desktop 的目录条目：来源是 claude-desktop:<供应商>。 */
 const desktopEntries: GatewayCatalogEntry[] = entries.map((entry) => ({
   ...entry,
-  sources: entry.sources.map((source) => source.replace("claude", "claude-desktop")),
+  sources: entry.sources.map((source) =>
+    source.replace("claude", "claude-desktop"),
+  ),
 }));
 
 describe("AppConfigPage", () => {
@@ -110,7 +127,12 @@ describe("AppConfigPage", () => {
     const user = userEvent.setup();
     renderPage("claude-desktop", "Claude Desktop");
 
-    for (const label of ["Fable 模型", "Opus 模型", "Sonnet 模型", "Haiku 模型"]) {
+    for (const label of [
+      "Fable 模型",
+      "Opus 模型",
+      "Sonnet 模型",
+      "Haiku 模型",
+    ]) {
       expect(await screen.findByText(label)).toBeTruthy();
     }
 
@@ -202,6 +224,18 @@ describe("AppConfigPage", () => {
       "CTYun/qwen3.8-max",
       "Kimi/kimi-k3",
     ]);
+  });
+
+  it("不再在应用配置页提供供应商选择", async () => {
+    getCatalog.mockResolvedValue(entries);
+    getAppModelConfig.mockResolvedValue({ default: "CTYun/gpt-5.6-sol" });
+
+    renderPage();
+
+    expect(await screen.findByText("编辑配置")).toBeTruthy();
+    expect(screen.queryByText("供应商")).toBeNull();
+    expect(screen.queryByText(/默认供应商/)).toBeNull();
+    expect(screen.queryByRole("radio")).toBeNull();
   });
 
   it("opens advanced settings with the allowed-model checklist and saves", async () => {

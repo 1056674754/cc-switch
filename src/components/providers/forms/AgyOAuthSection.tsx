@@ -26,6 +26,18 @@ import { AgyAccountQuota } from "@/components/settings/auth/AccountQuota";
 interface AgyOAuthSectionProps {
   /** 授权中心里最后一组的「?」向上弹 */
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 供应商卡片接管「切换」：让这家供应商改用该账号（见 CodexOAuthSection 同名参数） */
+  onSetDefaultAccount?: (accountId: string) => void;
+  settingDefaultAccount?: boolean;
+  /** 「?」里补一句：这里的「设为默认」是让这家供应商改用该账号 */
+  helpNote?: React.ReactNode;
+  /** 供应商页：账号是否参与使用（返回 undefined 就不显示停用/启用） */
+  accountEnabled?: (accountId: string) => boolean | undefined;
+  /** 供应商页：停用/启用这个账号（保留账号，只是不参与使用） */
+  onToggleAccountEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingAccountEnabled?: boolean;
 }
 
 /**
@@ -34,6 +46,13 @@ interface AgyOAuthSectionProps {
  */
 export const AgyOAuthSection: React.FC<AgyOAuthSectionProps> = ({
   helpSide,
+  embedded = false,
+  onSetDefaultAccount,
+  settingDefaultAccount,
+  helpNote,
+  accountEnabled,
+  onToggleAccountEnabled,
+  togglingAccountEnabled,
 }) => {
   const { t, i18n } = useTranslation();
   const {
@@ -86,6 +105,7 @@ export const AgyOAuthSection: React.FC<AgyOAuthSectionProps> = ({
             ]
           : [],
       isDefault: defaultAccountId === account.id,
+      enabled: accountEnabled?.(account.id),
       needsReauth: account.requires_reauth,
       users: accountUsers([account.id]),
       quota: account.requires_reauth ? undefined : (
@@ -96,6 +116,7 @@ export const AgyOAuthSection: React.FC<AgyOAuthSectionProps> = ({
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
       slug="agy"
       name="Antigravity"
       iconName="antigravity"
@@ -104,6 +125,7 @@ export const AgyOAuthSection: React.FC<AgyOAuthSectionProps> = ({
           "Antigravity CLI（agy）的官方登录。agy 同时只能登录一个号，「切换」会把 agy 的登录换成选中的账号，之后新开的 agy 都用它。agy 里原来登着的号会自动收进这里，切走也不会丢。",
       })}
       helpSide={helpSide}
+      helpNote={helpNote}
       accounts={rows}
       status={isStatusError ? "error" : isStatusSuccess ? "ready" : "loading"}
       statusErrorText={t("authCenter.agy.statusLoadFailed", {
@@ -124,11 +146,13 @@ export const AgyOAuthSection: React.FC<AgyOAuthSectionProps> = ({
       canReauth
       // 用同一个 Google 账号再登录一次就会替换掉旧凭据
       onReauth={() => addAccount()}
-      onSetDefault={setDefaultAccount}
-      settingDefault={isSettingDefaultAccount}
+      onSetDefault={onSetDefaultAccount ?? setDefaultAccount}
+      settingDefault={settingDefaultAccount ?? isSettingDefaultAccount}
       onRemove={(accountId, login) =>
         setRemoveTarget({ kind: "one", accountId, login })
       }
+      onToggleEnabled={onToggleAccountEnabled}
+      togglingEnabled={togglingAccountEnabled}
       removing={isRemovingAccount}
       login={{
         starting: isAddingAccount && !isPolling,

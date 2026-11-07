@@ -346,7 +346,7 @@ export function useManagedAuth(
   });
 
   const beginLogin = useCallback(
-    (targetAccountId?: string) => {
+    (targetAccountId?: string, methodOverride?: ManagedLoginMethod) => {
       const previousDeviceCode = activeDeviceCodeRef.current;
       activeDeviceCodeRef.current = null;
       const generation = flowGenerationRef.current + 1;
@@ -362,7 +362,7 @@ export function useManagedAuth(
         const method: ManagedLoginMethod | undefined =
           authProvider === "claude_official" && !readAuthOpenBrowser()
             ? "copy_link"
-            : loginMethod;
+            : (methodOverride ?? loginMethod);
         startLoginMutation.mutate({
           targetAccountId,
           generation,
@@ -379,7 +379,12 @@ export function useManagedAuth(
     ],
   );
 
-  const startAuth = useCallback(() => beginLogin(), [beginLogin]);
+  // 「添加账号」可显式指定这一次的登录方式（浏览器 / 设备代码），用于
+  // 标题行里「添加账号 ▾」的下拉；不传就沿用当前设置（重新登录也走这里）。
+  const startAuth = useCallback(
+    (method?: ManagedLoginMethod) => beginLogin(undefined, method),
+    [beginLogin],
+  );
 
   const reauthAccount = useCallback(
     (accountId: string) => {

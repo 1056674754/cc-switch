@@ -45,6 +45,13 @@ pub(crate) struct P1Lift {
     pub(crate) secret_kind: &'static str,
     /// 该接入的模型映射（JSON），取自配置里的 ANTHROPIC_DEFAULT_*_MODEL
     pub(crate) model_map: Option<String>,
+    /// 托管服务身份（`codex_oauth` / `claude_official` …）。
+    ///
+    /// 托管登录没有自己的 base_url，同一份订阅会从不同 app 各派生一条 provider 行
+    /// （Codex 官方 + Claude Desktop 的 Codex 代理）。以前按「有 URL 按 host、没 URL 按
+    /// provider id」会把同一份订阅拆成两三家供应商，模型目录也跟着发现两遍。
+    /// 有它就按服务身份归并成一家上游。
+    pub(crate) managed: Option<String>,
 }
 
 /// 单元格按值取证：缺列时由 SQL 填字面量，脏类型（BLOB/REAL）也不 panic。
@@ -131,7 +138,11 @@ impl Database {
         Ok(mapped.collect::<Result<Vec<_>, _>>()?)
     }
 
-    /// 由 provider 行派生上游归属（纯函数，不碰库）
+    /// 由 provider 行派生上游归属（纯函数，不碰库）。
+    ///
+    /// 身份优先级：**托管服务身份 > 有 URL 的 host > provider id**。
+    /// 托管登录（官方订阅 / OAuth）没有自己的服务根：同一份订阅在不同 app 里各有一条
+    /// provider 行，按 host 或 provider id 会拆成多家供应商（模型发现也跟着跑两遍）。
     pub(crate) fn p1_derive(row: &P1Row) -> P1Lift {
         let config: serde_json::Value =
             serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
@@ -139,43 +150,83 @@ impl Database {
         let secret = super::dao::providers::primary_credential_value(&config);
         let secret_kind = Self::p1_secret_kind(&config, &row.meta, &row.id, secret.is_some());
         let model_map = Self::p1_model_map(&config);
-        match Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw)) {
-            Some((host, url)) => {
-                let upstream_id = format!("up-{host}");
-                let endpoint_id = format!(
-                    "ep-{}",
-                    Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
-                );
-                P1Lift {
-                    upstream_id,
-                    endpoint_id,
-                    protocol,
-                    host,
-                    url,
-                    secret,
-                    secret_kind,
-                    model_map,
-                }
+        let base = Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw));
+        let managed = Self::p1_managed_identity(row, base.as_ref().map(|(host, _)| host.as_str()));
+
+        let (upstream_id, host, url) = match (&managed, &base) {
+            (Some(provider), _) => (
+                format!("up-managed-{provider}"),
+                String::new(),
+                base.as_ref()
+                    .map(|(_, url)| url.clone())
+                    .unwrap_or_default(),
+            ),
+            (None, Some((host, url))) => (format!("up-{host}"), host.clone(), url.clone()),
+            // 官方托管 / 无显式 URL：每个 provider 自成上游，保证一行都不丢
+            (None, None) => (
+                format!("up-provider-{}", row.id),
+                String::new(),
+                String::new(),
+            ),
+        };
+        let endpoint_id = format!(
+            "ep-{}",
+            Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
+        );
+        P1Lift {
+            upstream_id,
+            endpoint_id,
+            protocol,
+            host,
+            url,
+            secret,
+            secret_kind,
+            model_map,
+            managed,
+        }
+    }
+
+    /// 托管服务身份：同一份订阅在各个 app 里派生的行必须归到同一家上游。
+    ///
+    /// 三个证据按可靠度排序：
+    /// 1. `meta.authBinding.authProvider`（托管账号绑定，最准）；
+    /// 2. 已知的官方订阅服务根（Codex 的 chatgpt.com/backend-api/codex 之类）；
+    /// 3. 官方占位行的 id（`codex-official` / `claude-official` …；老库没有 authBinding）。
+    fn p1_managed_identity(row: &P1Row, host: Option<&str>) -> Option<String> {
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&row.meta) {
+            if let Some(provider) = meta
+                .get("authBinding")
+                .and_then(|binding| binding.get("authProvider"))
+                .and_then(|value| value.as_str())
+                .filter(|value| !value.trim().is_empty())
+            {
+                return Some(provider.to_string());
             }
-            None => {
-                // 官方托管 / 无显式 URL：每个 provider 自成上游，保证一行都不丢
-                let upstream_id = format!("up-provider-{}", row.id);
-                let endpoint_id = format!(
-                    "ep-{}",
-                    Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|"))
-                );
-                P1Lift {
-                    upstream_id,
-                    endpoint_id,
-                    protocol,
-                    host: String::new(),
-                    secret,
-                    secret_kind,
-                    model_map,
-                    url: String::new(),
-                }
+            // Claude Desktop 的 Codex 代理：没有 authBinding，但走的是 Codex 订阅
+            if meta
+                .get("claudeDesktopMode")
+                .and_then(|value| value.as_str())
+                == Some("proxy")
+                && host == Some("chatgpt.com")
+            {
+                return Some("codex_oauth".to_string());
             }
         }
+        if host == Some("chatgpt.com") && row.id.contains("codex") {
+            return Some("codex_oauth".to_string());
+        }
+        if row.id.ends_with("-official") {
+            return Some(
+                match row.id.trim_end_matches("-official") {
+                    "claude" | "claude-desktop" => "claude_official",
+                    "codex" => "codex_oauth",
+                    "gemini" => "gemini_official",
+                    other => other,
+                }
+                .to_string(),
+            );
+        }
+        None
     }
 
     /// 每个 host 的规范显示名（current 行优先，否则按 app_type,name 排序取首个）。
@@ -185,8 +236,16 @@ impl Database {
         conn: &Connection,
     ) -> Result<std::collections::BTreeMap<String, String>, AppError> {
         let mut canonical: std::collections::BTreeMap<String, String> = Default::default();
-        for row in &Self::p1_read_rows(conn, None)? {
+        // 托管身份的名字：优先官方占位行（`-official`）的名字，其次按 app/name 排序取首个；
+        // current 行仍然最优先。键加 `managed:` 前缀，避免和 host 撞。
+        let all_rows = Self::p1_read_rows(conn, None)?;
+        let mut managed_rows: std::collections::BTreeMap<String, Vec<&P1Row>> = Default::default();
+        for row in &all_rows {
             let lift = Self::p1_derive(row);
+            if let Some(provider) = &lift.managed {
+                managed_rows.entry(provider.clone()).or_default().push(row);
+                continue;
+            }
             if lift.host.is_empty() {
                 continue;
             }
@@ -195,6 +254,26 @@ impl Database {
                 .or_insert_with(|| row.name.clone());
             if row.is_current != 0 {
                 *entry = row.name.clone();
+            }
+        }
+        for (provider, rows) in managed_rows {
+            // 官方占位行的名字最像「服务名」：`codex-official` = OpenAI Official、
+            // `claude-official` = Claude Official（别被 claude-desktop 的同名行顶掉）。
+            let primary_id =
+                Self::p1_managed_primary_app(&provider).map(|app| format!("{app}-official"));
+            let picked = primary_id
+                .as_deref()
+                .and_then(|id| rows.iter().find(|row| row.id == id))
+                .or_else(|| {
+                    rows.iter()
+                        .find(|row| row.is_current != 0 && row.id.ends_with("-official"))
+                })
+                .or_else(|| rows.iter().find(|row| row.is_current != 0))
+                .or_else(|| rows.iter().find(|row| row.id.ends_with("-official")))
+                .or_else(|| rows.first())
+                .copied();
+            if let Some(row) = picked {
+                canonical.insert(format!("managed:{provider}"), row.name.clone());
             }
         }
         Ok(canonical)
@@ -211,8 +290,13 @@ impl Database {
         now: i64,
     ) -> Result<(), AppError> {
         // 已有上游不被改写：显示名只在首次创建时落库（canonical 只是首选名）
+        let canonical_key = lift
+            .managed
+            .as_ref()
+            .map(|provider| format!("managed:{provider}"))
+            .unwrap_or_else(|| lift.host.clone());
         let display_name = canonical
-            .get(&lift.host)
+            .get(&canonical_key)
             .cloned()
             .unwrap_or_else(|| row.name.clone());
         conn.execute(
@@ -277,16 +361,25 @@ impl Database {
         Ok(())
     }
 
-    /// 清理再没有任何绑定引用的凭证 / 端点 / 上游
+    /// 清理再没有任何绑定引用的凭证 / 端点 / 上游。
+    ///
+    /// `origin='manual'` 的上游是供应商页直接建的（可能还没接入任何 app），
+    /// 它们不受引用数约束：清掉它们等于把用户刚建好的供应商吞了。
     pub(crate) fn cleanup_orphan_upstreams(conn: &Connection) -> Result<(), AppError> {
         conn.execute(
             "DELETE FROM upstream_credentials
-             WHERE endpoint_id NOT IN (SELECT endpoint_id FROM provider_bindings)",
+             WHERE endpoint_id NOT IN (SELECT endpoint_id FROM provider_bindings)
+               AND endpoint_id NOT IN (
+                   SELECT e.id FROM upstream_endpoints e
+                   JOIN upstreams u ON u.id = e.upstream_id
+                   WHERE u.origin = 'manual'
+               )",
             [],
         )?;
         conn.execute(
             "DELETE FROM upstream_endpoints
-             WHERE id NOT IN (SELECT endpoint_id FROM provider_bindings)",
+             WHERE id NOT IN (SELECT endpoint_id FROM provider_bindings)
+               AND upstream_id NOT IN (SELECT id FROM upstreams WHERE origin = 'manual')",
             [],
         )?;
         conn.execute(
@@ -294,7 +387,106 @@ impl Database {
              WHERE id NOT IN (SELECT upstream_id FROM upstream_endpoints)",
             [],
         )?;
+        // 发现结果跟着上游一起走，否则同一 host 被重新接进来时会复活一批已不存在的模型。
+        conn.execute(
+            "DELETE FROM gateway_upstream_models
+             WHERE upstream_id NOT IN (SELECT id FROM upstreams)",
+            [],
+        )?;
         Ok(())
+    }
+
+    /// 供应商页「导入本机登录态」：落一家**托管服务**上游（`up-managed-<authProvider>`）。
+    ///
+    /// 托管订阅没有 base_url、也没有可贴的密钥：凭据是账号池里的 OAuth 账号，所以这里只建
+    /// 上游 + 端点（协议由服务决定），不写 `upstream_credentials`。id 与 provider 派生路径
+    /// 完全一致，之后从任一 app 接入官方登录态仍会落到这一家，不会多出第二张卡。
+    pub(crate) fn ensure_managed_upstream(
+        conn: &Connection,
+        name: &str,
+        auth_provider: &str,
+        protocol: &str,
+        now: i64,
+    ) -> Result<(String, String), AppError> {
+        let upstream_id = format!("up-managed-{auth_provider}");
+        let endpoint_id = format!(
+            "ep-{}",
+            Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|"))
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO upstreams (id, name, host, created_at, origin)
+             VALUES (?1, ?2, '', ?3, 'manual')",
+            params![upstream_id, name, now],
+        )?;
+        // 手动建过 = 即使暂时没有接入也不该被孤儿清理删掉
+        conn.execute(
+            "UPDATE upstreams SET origin = 'manual' WHERE id = ?1",
+            params![upstream_id],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO upstream_endpoints
+             (id, upstream_id, protocol, base_url, enabled, created_at)
+             VALUES (?1, ?2, ?3, '', 1, ?4)",
+            params![endpoint_id, upstream_id, protocol, now],
+        )?;
+        Ok((upstream_id, endpoint_id))
+    }
+
+    /// 供应商页「新建供应商」：直接落一条上游 + 端点（+ 可选密钥），不依赖任何 app 的接入行。
+    ///
+    /// 与 provider 派生路径共用同一套 id 规则（`up-<host>` / `ep-<hash>`），所以之后给
+    /// app 加接入时，派生逻辑会复用这行上游和端点，而不是另起一份。
+    pub(crate) fn create_manual_upstream(
+        conn: &Connection,
+        name: &str,
+        base_url: &str,
+        protocol: &str,
+        secret: Option<&str>,
+        now: i64,
+    ) -> Result<(String, String), AppError> {
+        let (host, url) = Self::p1_normalize_url(base_url).ok_or_else(|| {
+            AppError::InvalidInput("base_url 格式无效（需要完整的 http(s) 地址）".to_string())
+        })?;
+        let upstream_id = format!("up-{host}");
+        let endpoint_id = format!(
+            "ep-{}",
+            Self::p1_fnv1a_hex(&format!("{upstream_id}|{protocol}|{url}"))
+        );
+        conn.execute(
+            "INSERT OR IGNORE INTO upstreams (id, name, host, created_at, origin)
+             VALUES (?1, ?2, ?3, ?4, 'manual')",
+            params![upstream_id, name, host, now],
+        )?;
+        // 已存在的上游（可能先被某个 app 接进来过）也标记成手动建：用户在供应商页建过
+        // 一次，就不该因为暂时没有接入而被清理掉。
+        conn.execute(
+            "UPDATE upstreams SET origin = 'manual' WHERE id = ?1",
+            params![upstream_id],
+        )?;
+        conn.execute(
+            "INSERT OR IGNORE INTO upstream_endpoints
+             (id, upstream_id, protocol, base_url, enabled, created_at)
+             VALUES (?1, ?2, ?3, ?4, 1, ?5)",
+            params![endpoint_id, upstream_id, protocol, url, now],
+        )?;
+        if let Some(secret) = secret.map(str::trim).filter(|value| !value.is_empty()) {
+            conn.execute(
+                "INSERT INTO upstream_credentials
+                 (id, endpoint_id, app_type, provider_id, secret, secret_kind, limits_json, cooldown_until, created_at)
+                 VALUES (?1, ?2, '', '', ?3, 'literal', NULL, NULL, ?4)
+                 ON CONFLICT(id) DO UPDATE SET
+                     endpoint_id = excluded.endpoint_id,
+                     secret = excluded.secret,
+                     secret_kind = 'literal'",
+                params![
+                    format!("cred-manual-{}", Self::p1_fnv1a_hex(&endpoint_id)),
+                    endpoint_id,
+                    secret,
+                    now
+                ],
+            )?;
+        }
+        Ok((upstream_id, endpoint_id))
     }
 }
 
@@ -962,6 +1154,21 @@ impl Database {
                         log::info!("迁移数据库从 v27 到 v28（供应商启停开关）");
                         Self::migrate_v27_to_v28(conn)?;
                         Self::set_user_version(conn, 28)?;
+                    }
+                    28 => {
+                        log::info!("迁移数据库从 v28 到 v29（上游 /v1/models 发现结果）");
+                        Self::migrate_v28_to_v29(conn)?;
+                        Self::set_user_version(conn, 29)?;
+                    }
+                    29 => {
+                        log::info!("迁移数据库从 v29 到 v30（供应商可脱离 app 直接创建）");
+                        Self::migrate_v29_to_v30(conn)?;
+                        Self::set_user_version(conn, 30)?;
+                    }
+                    30 => {
+                        log::info!("迁移数据库从 v30 到 v31（托管登录按服务身份归并上游）");
+                        Self::migrate_v30_to_v31(conn)?;
+                        Self::set_user_version(conn, 31)?;
                     }
                     _ => {
                         return Err(AppError::Database(format!(
@@ -2043,7 +2250,8 @@ impl Database {
                  notes TEXT,
                  icon TEXT,
                  icon_color TEXT,
-                 created_at INTEGER NOT NULL
+                 created_at INTEGER NOT NULL,
+                 origin TEXT NOT NULL DEFAULT 'derived'
              );
              CREATE UNIQUE INDEX IF NOT EXISTS idx_upstreams_host
                  ON upstreams(host) WHERE host <> '';
@@ -2115,6 +2323,15 @@ impl Database {
                  app_type TEXT PRIMARY KEY,
                  payload TEXT NOT NULL,
                  updated_at INTEGER NOT NULL
+             );
+             -- 上游 /v1/models 的发现结果：目录的第三个来源（前两个是 provider 行与人工覆盖）。
+             -- 只缓存列表不写 provider 行：拉到的模型默认 hidden，用户点「加入」才进目录。
+             CREATE TABLE IF NOT EXISTS gateway_upstream_models (
+                 upstream_id TEXT NOT NULL,
+                 model_id TEXT NOT NULL,
+                 display_name TEXT,
+                 fetched_at INTEGER NOT NULL,
+                 PRIMARY KEY (upstream_id, model_id)
              );",
         )
         .map_err(|e| AppError::Database(format!("创建网关目录表失败: {e}")))?;
@@ -2123,6 +2340,188 @@ impl Database {
 
     fn migrate_v26_to_v27(conn: &Connection) -> Result<(), AppError> {
         Self::create_gateway_tables(conn)
+    }
+
+    /// v28 -> v29：上游模型发现结果表（`gateway_upstream_models`）。
+    ///
+    /// 与 v26 -> v27 同一手法：DDL 全 `IF NOT EXISTS`，老库跑完只是多一张空表，
+    /// 目录派生行为不变（没有发现结果时目录与之前完全一致）。
+    fn migrate_v28_to_v29(conn: &Connection) -> Result<(), AppError> {
+        Self::create_gateway_tables(conn)
+    }
+
+    /// v29 -> v30：供应商可以脱离 app 直接创建（`upstreams.origin`）。
+    ///
+    /// 之前每家上游都是 provider 派生出来的，孤儿清理会删掉「没有任何接入引用」的行。
+    /// 供应商页要支持「先建供应商、暂不接入 app」，必须能区分「手动建的」与「派生的」：
+    /// 手动建的即使零接入也保留（`origin='manual'`），派生行默认 `derived` 行为不变。
+    fn migrate_v29_to_v30(conn: &Connection) -> Result<(), AppError> {
+        if Self::table_exists(conn, "upstreams")? {
+            Self::add_column_if_missing(
+                conn,
+                "upstreams",
+                "origin",
+                "TEXT NOT NULL DEFAULT 'derived'",
+            )?;
+        }
+        Ok(())
+    }
+
+    /// v30 -> v31：托管登录的上游身份按服务归并（`up-managed-<authProvider>`）。
+    ///
+    /// 同一份订阅在不同 app 里各派生一条 provider 行（Codex 官方 + Claude Desktop 的
+    /// Codex 代理），老规则会把它拆成两家上游：模型发现跑两遍、目录里同一个模型出现两次、
+    /// 覆盖和凭据各存一份（「16 个模型」就是这么来的）。迁移把老上游的端点 / 凭证 / 绑定 /
+    /// 模型目录 / 覆盖搬到新的服务身份上，再删掉老行。找不到老行就跳过，可重复执行。
+    fn migrate_v30_to_v31(conn: &Connection) -> Result<(), AppError> {
+        if !Self::table_exists(conn, "upstreams")? {
+            return Ok(());
+        }
+        let rows = Self::p1_read_rows(conn, None)?;
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let canonical = Self::p1_canonical_names(conn)?;
+        // 老 id → 新身份（同一目标可能从多条 provider 行指向）
+        let mut merges: std::collections::BTreeMap<String, (String, String)> = Default::default();
+        for row in &rows {
+            let lift = Self::p1_derive(row);
+            let Some(provider) = &lift.managed else {
+                continue;
+            };
+            let legacy = Self::p1_legacy_upstream_id(row);
+            if legacy == lift.upstream_id {
+                continue;
+            }
+            let name = canonical
+                .get(&format!("managed:{provider}"))
+                .cloned()
+                .unwrap_or_else(|| row.name.clone());
+            merges.insert(legacy, (lift.upstream_id.clone(), name));
+        }
+        if merges.is_empty() {
+            return Ok(());
+        }
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis() as i64)
+            .unwrap_or(0);
+
+        for (legacy, (target, name)) in merges {
+            let legacy_exists = conn
+                .query_row(
+                    "SELECT 1 FROM upstreams WHERE id = ?1",
+                    params![legacy],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            if !legacy_exists {
+                continue;
+            }
+            conn.execute(
+                "INSERT OR IGNORE INTO upstreams (id, name, host, created_at)
+                 VALUES (?1, ?2, '', ?3)",
+                params![target, name, now],
+            )?;
+
+            // 端点：id 里含上游 id，换身份就得换 id；引用它的凭证 / 绑定一起改
+            let endpoints: Vec<(String, String, String, i64, i64)> = {
+                let mut statement = conn.prepare(
+                    "SELECT id, protocol, base_url, enabled, created_at
+                     FROM upstream_endpoints WHERE upstream_id = ?1",
+                )?;
+                let mapped = statement.query_map(params![legacy], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                })?;
+                mapped.collect::<Result<Vec<_>, _>>()?
+            };
+            for (old_endpoint, protocol, base_url, enabled, created_at) in endpoints {
+                let new_endpoint = format!(
+                    "ep-{}",
+                    Self::p1_fnv1a_hex(&format!("{target}|{protocol}|{base_url}"))
+                );
+                conn.execute(
+                    "INSERT OR IGNORE INTO upstream_endpoints
+                     (id, upstream_id, protocol, base_url, enabled, created_at)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                    params![
+                        new_endpoint,
+                        target,
+                        protocol,
+                        base_url,
+                        enabled,
+                        created_at
+                    ],
+                )?;
+                if new_endpoint != old_endpoint {
+                    conn.execute(
+                        "UPDATE provider_bindings SET endpoint_id = ?1 WHERE endpoint_id = ?2",
+                        params![new_endpoint, old_endpoint],
+                    )?;
+                    conn.execute(
+                        "UPDATE upstream_credentials SET endpoint_id = ?1 WHERE endpoint_id = ?2",
+                        params![new_endpoint, old_endpoint],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM upstream_endpoints WHERE id = ?1",
+                        params![old_endpoint],
+                    )?;
+                }
+            }
+
+            // 模型发现结果与人工覆盖：搬到新身份，冲突时保留已有的一份
+            conn.execute(
+                "INSERT OR IGNORE INTO gateway_upstream_models
+                 (upstream_id, model_id, display_name, fetched_at)
+                 SELECT ?1, model_id, display_name, fetched_at
+                 FROM gateway_upstream_models WHERE upstream_id = ?2",
+                params![target, legacy],
+            )?;
+            conn.execute(
+                "DELETE FROM gateway_upstream_models WHERE upstream_id = ?1",
+                params![legacy],
+            )?;
+            // 人工覆盖：id 是主键，不能照着老行复制一份（会撞自己的 id），
+            // 直接改挂到新身份；同一模型在新身份已有覆盖时丢弃老行（保留已有的一份）。
+            conn.execute(
+                "UPDATE OR IGNORE gateway_model_overrides SET upstream_id = ?1 WHERE upstream_id = ?2",
+                params![target, legacy],
+            )?;
+            conn.execute(
+                "DELETE FROM gateway_model_overrides WHERE upstream_id = ?1",
+                params![legacy],
+            )?;
+
+            conn.execute("DELETE FROM upstreams WHERE id = ?1", params![legacy])?;
+        }
+        Ok(())
+    }
+
+    /// 托管服务身份对应的「主 app」：官方占位行通常落在它下面（claude / codex / gemini）。
+    fn p1_managed_primary_app(provider: &str) -> Option<&'static str> {
+        match provider {
+            "claude_official" => Some("claude"),
+            "codex_oauth" => Some("codex"),
+            "gemini_official" => Some("gemini"),
+            _ => None,
+        }
+    }
+
+    /// 老规则下的上游 id：有 URL 按 host，没有按 provider id。
+    /// 只给迁移用（新规则见 `p1_derive`）。
+    fn p1_legacy_upstream_id(row: &P1Row) -> String {
+        let config: serde_json::Value =
+            serde_json::from_str(&row.config).unwrap_or(serde_json::Value::Null);
+        match Self::p1_extract_base_url(&config).and_then(|raw| Self::p1_normalize_url(&raw)) {
+            Some((host, _)) => format!("up-{host}"),
+            None => format!("up-provider-{}", row.id),
+        }
     }
 
     /// v27 -> v28：供应商（= 一家上游 API）的启停开关。
@@ -4819,6 +5218,210 @@ impl Database {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Codex 把网关 key 放在 `settingsConfig.auth.OPENAI_API_KEY` 里（不是 env）。
+    /// 漏读这层会让自定义网关的 Codex 供应商被当成「没有密钥」：供应商卡片拿不到 key，
+    /// 上游模型刷新也会报「没有明文密钥」。
+    #[test]
+    fn p1_derive_lifts_the_codex_auth_key_as_a_literal_secret() {
+        let row = P1Row {
+            id: "universal-codex-1".to_string(),
+            app_type: "codex".to_string(),
+            name: "自定义网关".to_string(),
+            config: serde_json::json!({
+                "auth": {"OPENAI_API_KEY": "sk-codex-gateway"},
+                "config": "model = \"kimi-k3\"\nbase_url = \"https://ai.example/v1\"\n",
+            })
+            .to_string(),
+            meta: "{}".to_string(),
+            is_current: 1,
+            in_failover: 0,
+            sort_index: Some(0),
+        };
+
+        let lift = Database::p1_derive(&row);
+        assert_eq!(lift.secret.as_deref(), Some("sk-codex-gateway"));
+        assert_eq!(lift.secret_kind, "literal");
+    }
+
+    /// P3：同一个托管服务（Codex 官方订阅）在多 app 下派生的行必须归并到一家上游。
+    /// 以前一条有 URL（up-chatgpt.com）、一条没 URL（up-provider-codex-official），
+    /// 供应商页于是出现两张卡、模型各发现一遍（目录里 16 个）。
+    #[test]
+    fn p1_derive_merges_managed_rows_into_one_upstream() {
+        let proxy = P1Row {
+            id: "9a07b5f3".to_string(),
+            app_type: "claude-desktop".to_string(),
+            name: "Codex".to_string(),
+            config: serde_json::json!({
+                "env": { "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex" }
+            })
+            .to_string(),
+            meta: serde_json::json!({ "claudeDesktopMode": "proxy" }).to_string(),
+            is_current: 1,
+            in_failover: 0,
+            sort_index: Some(0),
+        };
+        let official = P1Row {
+            id: "codex-official".to_string(),
+            app_type: "codex".to_string(),
+            name: "OpenAI Official".to_string(),
+            config: "{}".to_string(),
+            meta: serde_json::json!({
+                "authBinding": { "source": "managed_account", "authProvider": "codex_oauth" }
+            })
+            .to_string(),
+            is_current: 1,
+            in_failover: 0,
+            sort_index: Some(0),
+        };
+
+        let a = Database::p1_derive(&proxy);
+        let b = Database::p1_derive(&official);
+        assert_eq!(a.managed.as_deref(), Some("codex_oauth"));
+        assert_eq!(b.managed.as_deref(), Some("codex_oauth"));
+        assert_eq!(a.upstream_id, "up-managed-codex_oauth");
+        assert_eq!(a.upstream_id, b.upstream_id, "同一订阅只能是同一家上游");
+        // 两个接入（anthropic 代理 + openai_responses）仍各有端点
+        assert_ne!(a.endpoint_id, b.endpoint_id);
+        assert_eq!(a.protocol, "anthropic");
+        assert_eq!(b.protocol, "openai_responses");
+    }
+
+    #[test]
+    fn migrate_v30_to_v31_merges_managed_upstreams() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        Database::create_tables_on_conn(&conn)?;
+        // 一份 Codex 订阅，老库里被拆成两家上游：
+        //  - claude-desktop 的 Codex 代理（有 URL，id = up-chatgpt.com）
+        //  - codex 的官方占位行（无 URL，id = up-provider-codex-official）
+        let proxy_config = serde_json::json!({
+            "env": { "ANTHROPIC_BASE_URL": "https://chatgpt.com/backend-api/codex" }
+        });
+        let official_meta = serde_json::json!({
+            "authBinding": {
+                "source": "managed_account",
+                "authProvider": "codex_oauth",
+                "accountId": "acc-1"
+            }
+        });
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta, is_current)
+             VALUES (?1, 'claude-desktop', 'Codex', ?2, ?3, 1)",
+            params![
+                "9a07b5f3",
+                proxy_config.to_string(),
+                serde_json::json!({ "claudeDesktopMode": "proxy" }).to_string()
+            ],
+        )?;
+        conn.execute(
+            "INSERT INTO providers (id, app_type, name, settings_config, meta, is_current)
+             VALUES (?1, 'codex', 'OpenAI Official', '{}', ?2, 1)",
+            params!["codex-official", official_meta.to_string()],
+        )?;
+
+        // 老库的上游行：两家 + 各自的端点 / 凭证 / 绑定 / 模型 / 覆盖
+        conn.execute_batch(
+            "INSERT INTO upstreams (id, name, host, created_at) VALUES ('up-chatgpt.com', 'Codex', 'chatgpt.com', 1);
+             INSERT INTO upstreams (id, name, host, created_at) VALUES ('up-provider-codex-official', 'OpenAI Official', '', 1);
+             INSERT INTO upstream_endpoints (id, upstream_id, protocol, base_url, created_at)
+               VALUES ('ep-anthropic', 'up-chatgpt.com', 'anthropic', 'https://chatgpt.com/backend-api/codex', 1),
+                      ('ep-responses', 'up-provider-codex-official', 'openai_responses', '', 1);
+             INSERT INTO upstream_credentials (id, endpoint_id, app_type, provider_id, secret_kind, created_at)
+               VALUES ('cred-claude-desktop-9a07b5f3', 'ep-anthropic', 'claude-desktop', '9a07b5f3', 'managed', 1),
+                      ('cred-codex-codex-official', 'ep-responses', 'codex', 'codex-official', 'managed', 1);
+             INSERT INTO provider_bindings (app_type, provider_id, endpoint_id, is_current, in_failover_queue, sort_index, created_at)
+               VALUES ('claude-desktop', '9a07b5f3', 'ep-anthropic', 1, 0, 0, 1),
+                      ('codex', 'codex-official', 'ep-responses', 1, 1, 0, 1);
+             INSERT INTO gateway_upstream_models (upstream_id, model_id, display_name, fetched_at)
+               VALUES ('up-chatgpt.com', 'gpt-6-astra', NULL, 1),
+                      ('up-provider-codex-official', 'gpt-6-astra', NULL, 2),
+                      ('up-provider-codex-official', 'gpt-6.1-sol', NULL, 2);
+             INSERT INTO gateway_model_overrides (id, upstream_id, model_id, display_name, hidden, created_at)
+               VALUES ('ov-astra', 'up-chatgpt.com', 'gpt-6-astra', 'Astra', 0, 1);",
+        )?;
+        Database::set_user_version(&conn, 30)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        // 只剩一家上游：身份归到 codex_oauth
+        let upstreams: Vec<String> = {
+            let mut statement = conn.prepare("SELECT id FROM upstreams ORDER BY id")?;
+            let mapped = statement.query_map([], |row| row.get::<_, String>(0))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        assert_eq!(upstreams, vec!["up-managed-codex_oauth".to_string()]);
+        // 端点、凭证、绑定都搬过去了
+        let endpoints: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_endpoints WHERE upstream_id = 'up-managed-codex_oauth'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(endpoints, 2);
+        let orphan_credentials: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM upstream_credentials c
+             LEFT JOIN upstream_endpoints e ON e.id = c.endpoint_id
+             WHERE e.id IS NULL",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(orphan_credentials, 0);
+        let bindings: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM provider_bindings b
+             JOIN upstream_endpoints e ON e.id = b.endpoint_id
+             WHERE e.upstream_id = 'up-managed-codex_oauth'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(bindings, 2);
+        // 模型目录合并后同一模型只有一行；覆盖跟着搬
+        let models: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM gateway_upstream_models
+             WHERE upstream_id = 'up-managed-codex_oauth'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(models, 2, "gpt-6-astra 只应剩一份");
+        let overrides: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM gateway_model_overrides
+             WHERE upstream_id = 'up-managed-codex_oauth'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(overrides, 1);
+        Ok(())
+    }
+
+    #[test]
+    fn migrate_v29_to_v30_adds_upstream_origin() -> Result<(), AppError> {
+        let conn = Connection::open_in_memory()?;
+        // 老库（v29）的 upstreams 没有 origin 列：迁移只加列，已有的行默认 derived。
+        conn.execute_batch(
+            "CREATE TABLE upstreams (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 host TEXT NOT NULL DEFAULT '',
+                 website_url TEXT,
+                 notes TEXT,
+                 icon TEXT,
+                 icon_color TEXT,
+                 created_at INTEGER NOT NULL
+             );
+             INSERT INTO upstreams (id, name, host, created_at)
+             VALUES ('up-acme.dev', 'Acme', 'acme.dev', 1);",
+        )?;
+        Database::set_user_version(&conn, 29)?;
+        Database::apply_schema_migrations_on_conn(&conn)?;
+
+        assert_eq!(Database::get_user_version(&conn)?, SCHEMA_VERSION);
+        let origin: String = conn.query_row(
+            "SELECT origin FROM upstreams WHERE id = 'up-acme.dev'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(origin, "derived", "老行迁移后必须是派生来源");
+        Ok(())
+    }
 
     #[test]
     fn migrate_v23_to_v24_preserves_existing_session_cursors() -> Result<(), AppError> {

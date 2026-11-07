@@ -7,6 +7,7 @@ use tauri::AppHandle;
 pub(crate) const COMMANDS: &[&str] = &[
     "get_providers",
     "get_gateway_catalog",
+    "fetch_supplier_models",
     "get_app_model_config",
     "get_model_overrides",
     "set_model_override",
@@ -33,11 +34,22 @@ pub(crate) const COMMANDS: &[&str] = &[
     "migrate_gateway_from_stack",
     "get_suppliers_overview",
     "update_supplier_base_url",
+    "update_supplier_name",
     "adopt_supplier",
     "create_supplier",
+    "ensure_managed_supplier",
     "update_supplier_secret",
+    "update_supplier_credential",
+    "add_supplier_credential",
+    "delete_supplier_credential",
+    "set_supplier_credential_enabled",
+    "add_supplier_account",
+    "delete_supplier_account",
+    "set_supplier_account_enabled",
+    "set_supplier_current_account",
     "update_binding_model_map",
     "set_supplier_enabled",
+    "set_supplier_managed_account",
     "delete_supplier",
     "get_current_provider",
     "add_provider",
@@ -302,6 +314,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "get_usage_data_sources",
     "fetch_exchange_rates",
     "stream_check_provider",
+    "check_provider_models",
     "list_sessions",
     "get_session_messages",
     "stream_session_messages",
@@ -423,7 +436,7 @@ pub(crate) const COMMANDS: &[&str] = &[
 ];
 
 /// 已桥接的命令数量。
-pub(crate) const COMMAND_COUNT: usize = 415;
+pub(crate) const COMMAND_COUNT: usize = 428;
 
 /// 命令名 → 所属源文件（模块）名。控制服务用它标注改动归属的界面域。
 pub(crate) fn module_of(command: &str) -> Option<&'static str> {
@@ -496,6 +509,7 @@ pub(crate) fn module_of(command: &str) -> Option<&'static str> {
         | "get_auto_failover_enabled"
         | "set_auto_failover_enabled" => "failover",
         "get_gateway_catalog"
+        | "fetch_supplier_models"
         | "get_app_model_config"
         | "get_model_overrides"
         | "set_model_override"
@@ -778,15 +792,26 @@ pub(crate) fn module_of(command: &str) -> Option<&'static str> {
         | "add_skill_repo"
         | "remove_skill_repo"
         | "install_skills_from_zip" => "skill",
-        "stream_check_provider" => "stream_check",
+        "stream_check_provider" | "check_provider_models" => "stream_check",
         "get_subscription_quota" => "subscription",
         "get_suppliers_overview"
         | "update_supplier_base_url"
+        | "update_supplier_name"
         | "adopt_supplier"
         | "create_supplier"
+        | "ensure_managed_supplier"
         | "update_supplier_secret"
+        | "update_supplier_credential"
+        | "add_supplier_credential"
+        | "delete_supplier_credential"
+        | "set_supplier_credential_enabled"
+        | "add_supplier_account"
+        | "delete_supplier_account"
+        | "set_supplier_account_enabled"
+        | "set_supplier_current_account"
         | "update_binding_model_map"
         | "set_supplier_enabled"
+        | "set_supplier_managed_account"
         | "delete_supplier" => "suppliers",
         "take_tray_navigation" | "tray_app_page_seen" => "tray",
         "tray_panel_state"
@@ -846,6 +871,7 @@ pub(crate) async fn dispatch(
     match command {
         "get_providers" => crate::commands::provider::ipc_adapters::__ipc_get_providers(__app, &mut __args).await,
         "get_gateway_catalog" => crate::commands::gateway::ipc_adapters::__ipc_get_gateway_catalog(__app, &mut __args).await,
+        "fetch_supplier_models" => crate::commands::gateway::ipc_adapters::__ipc_fetch_supplier_models(__app, &mut __args).await,
         "get_app_model_config" => crate::commands::gateway::ipc_adapters::__ipc_get_app_model_config(__app, &mut __args).await,
         "get_model_overrides" => crate::commands::gateway::ipc_adapters::__ipc_get_model_overrides(__app, &mut __args).await,
         "set_model_override" => crate::commands::gateway::ipc_adapters::__ipc_set_model_override(__app, &mut __args).await,
@@ -872,11 +898,22 @@ pub(crate) async fn dispatch(
         "migrate_gateway_from_stack" => crate::commands::gateway::ipc_adapters::__ipc_migrate_gateway_from_stack(__app, &mut __args).await,
         "get_suppliers_overview" => crate::commands::suppliers::ipc_adapters::__ipc_get_suppliers_overview(__app, &mut __args).await,
         "update_supplier_base_url" => crate::commands::suppliers::ipc_adapters::__ipc_update_supplier_base_url(__app, &mut __args).await,
+        "update_supplier_name" => crate::commands::suppliers::ipc_adapters::__ipc_update_supplier_name(__app, &mut __args).await,
         "adopt_supplier" => crate::commands::suppliers::ipc_adapters::__ipc_adopt_supplier(__app, &mut __args).await,
         "create_supplier" => crate::commands::suppliers::ipc_adapters::__ipc_create_supplier(__app, &mut __args).await,
+        "ensure_managed_supplier" => crate::commands::suppliers::ipc_adapters::__ipc_ensure_managed_supplier(__app, &mut __args).await,
         "update_supplier_secret" => crate::commands::suppliers::ipc_adapters::__ipc_update_supplier_secret(__app, &mut __args).await,
+        "update_supplier_credential" => crate::commands::suppliers::ipc_adapters::__ipc_update_supplier_credential(__app, &mut __args).await,
+        "add_supplier_credential" => crate::commands::suppliers::ipc_adapters::__ipc_add_supplier_credential(__app, &mut __args).await,
+        "delete_supplier_credential" => crate::commands::suppliers::ipc_adapters::__ipc_delete_supplier_credential(__app, &mut __args).await,
+        "set_supplier_credential_enabled" => crate::commands::suppliers::ipc_adapters::__ipc_set_supplier_credential_enabled(__app, &mut __args).await,
+        "add_supplier_account" => crate::commands::suppliers::ipc_adapters::__ipc_add_supplier_account(__app, &mut __args).await,
+        "delete_supplier_account" => crate::commands::suppliers::ipc_adapters::__ipc_delete_supplier_account(__app, &mut __args).await,
+        "set_supplier_account_enabled" => crate::commands::suppliers::ipc_adapters::__ipc_set_supplier_account_enabled(__app, &mut __args).await,
+        "set_supplier_current_account" => crate::commands::suppliers::ipc_adapters::__ipc_set_supplier_current_account(__app, &mut __args).await,
         "update_binding_model_map" => crate::commands::suppliers::ipc_adapters::__ipc_update_binding_model_map(__app, &mut __args).await,
         "set_supplier_enabled" => crate::commands::suppliers::ipc_adapters::__ipc_set_supplier_enabled(__app, &mut __args).await,
+        "set_supplier_managed_account" => crate::commands::suppliers::ipc_adapters::__ipc_set_supplier_managed_account(__app, &mut __args).await,
         "delete_supplier" => crate::commands::suppliers::ipc_adapters::__ipc_delete_supplier(__app, &mut __args).await,
         "get_current_provider" => crate::commands::provider::ipc_adapters::__ipc_get_current_provider(__app, &mut __args).await,
         "add_provider" => crate::commands::provider::ipc_adapters::__ipc_add_provider(__app, &mut __args).await,
@@ -1141,6 +1178,7 @@ pub(crate) async fn dispatch(
         "get_usage_data_sources" => crate::commands::usage::ipc_adapters::__ipc_get_usage_data_sources(__app, &mut __args).await,
         "fetch_exchange_rates" => crate::commands::usage::ipc_adapters::__ipc_fetch_exchange_rates(__app, &mut __args).await,
         "stream_check_provider" => crate::commands::stream_check::ipc_adapters::__ipc_stream_check_provider(__app, &mut __args).await,
+        "check_provider_models" => crate::commands::stream_check::ipc_adapters::__ipc_check_provider_models(__app, &mut __args).await,
         "list_sessions" => crate::commands::session_manager::ipc_adapters::__ipc_list_sessions(__app, &mut __args).await,
         "get_session_messages" => crate::commands::session_manager::ipc_adapters::__ipc_get_session_messages(__app, &mut __args).await,
         "stream_session_messages" => crate::commands::session_manager::ipc_adapters::__ipc_stream_session_messages(__app, &mut __args).await,

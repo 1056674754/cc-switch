@@ -187,6 +187,10 @@ function useDshLogin(onSignedIn: () => void) {
 
 interface DshAccountLoginProps {
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 嵌进供应商卡片时替换「DeepSeek Harness」标题（如「凭据」） */
+  headerLabel?: string;
 }
 
 /**
@@ -194,7 +198,11 @@ interface DshAccountLoginProps {
  * `$DSH_HOME/.credentials.yaml`，Web 与 Desktop 共用（运行中的 DeepSeek Harness 会自动重新读取）；
  * 这里显示账号和余额，可以退出（两端同时退出）。
  */
-export function DshAccountLogin({ helpSide }: DshAccountLoginProps) {
+export function DshAccountLogin({
+  helpSide,
+  embedded = false,
+  headerLabel,
+}: DshAccountLoginProps) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
   const status = useDshAccountStatus();
@@ -251,6 +259,8 @@ export function DshAccountLogin({ helpSide }: DshAccountLoginProps) {
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
+      headerLabel={headerLabel}
       slug="dsh"
       name="DeepSeek Harness"
       iconName="deepseek"

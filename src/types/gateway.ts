@@ -27,6 +27,19 @@ export interface AppModelConfig {
   routing?: unknown;
 }
 
+/**
+ * 「从上游拉模型」的结果。
+ *
+ * `fetched` 是这次从 /v1/models 拿到的条数，`added` 是其中新写进目录的条数 ——
+ * 新条目默认写成 hidden 覆盖，也就是「拿回来了但还没启用」。
+ */
+/** 刷新供应商模型的结果：计数按真实上游算（同一家上游只请求一次）。 */
+export interface SupplierModelFetch {
+  upstreamIds: string[];
+  fetched: number;
+  added: number;
+}
+
 /** 目录里的一条人工覆盖：改名或隐藏（目录本身仍由 provider 行派生）。 */
 export interface ModelOverride {
   upstreamId: string;
@@ -38,7 +51,12 @@ export interface ModelOverride {
 /** Stack 配置迁移结果。 */
 export interface AppMigration {
   app: string;
-  status: "migrated" | "noStack" | "alreadyConfigured" | "unsupported" | "nothingToMigrate";
+  status:
+    | "migrated"
+    | "noStack"
+    | "alreadyConfigured"
+    | "unsupported"
+    | "nothingToMigrate";
   default?: string | null;
   models: number;
 }

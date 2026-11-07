@@ -11,7 +11,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { useQueryClient } from "@tanstack/react-query";
 import {
   ExternalLink,
-  KeyRound,
   MoreHorizontal,
   Plus,
   Search,
@@ -89,8 +88,6 @@ import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { OpenTerminalDialog } from "@/components/providers/OpenTerminalDialog";
 import { discardUnsavedChanges, hasUnsavedChanges } from "@/lib/unsavedChanges";
 import { SettingsPage } from "@/components/settings/SettingsPage";
-import { AuthCenterPanel } from "@/components/settings/AuthCenterPanel";
-import { RefreshAllQuotaButton } from "@/components/settings/auth/RefreshAllQuotaButton";
 import { AppsPage } from "@/components/apps/AppsPage";
 import { SupplierPage } from "@/components/suppliers/SupplierPage";
 import { BindingsPage } from "@/components/bindings/BindingsPage";
@@ -111,10 +108,8 @@ import UnifiedSkillsPanel from "@/components/skills/UnifiedSkillsPanel";
 import { DeepLinkImportDialog } from "@/components/DeepLinkImportDialog";
 import { FirstRunNoticeDialog } from "@/components/FirstRunNoticeDialog";
 import { WhatsNewNotice } from "@/components/WhatsNewDialog";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { HoverTip } from "@/components/ui/hover-tip";
-import { HelpTip } from "@/components/ui/help-tip";
 import { PageTabs } from "@/components/ui/page-tabs";
 import {
   DropdownMenu,
@@ -307,6 +302,13 @@ function App() {
     : null;
   const INLINE_CONFIG_APP_IDS: readonly string[] = ["opencode", "pi", "omp", "dsh"];
   const inlineConfigApp = INLINE_CONFIG_APP_IDS.includes(activeApp);
+  // 顶栏的搜索 / 「添加供应商」只属于供应商列表。模式应用的正文固定是编辑配置；
+  // 累加式应用有「编辑配置 | 供应商」两个页签，只有第二个页签才显示这组操作。
+  const providerListVisible = modeAppId
+    ? false
+    : clientApp && inlineConfigApp
+      ? clientPageView === "providers"
+      : currentView === "providers";
   // 模式（直连 / 路由 / 聚合）已取消：新增供应商表单不再按它选布局。
   const currentModeView: AppMode | undefined = undefined;
   const openAddProvider = (modeView: AppMode | undefined) => {
@@ -1357,17 +1359,17 @@ function App() {
       variant="app"
       icon={<AppGlyph app={activeApp} size={20} badgeClassName="bg-app" />}
       title={APP_DISPLAY_NAME[activeApp]}
-      truncateTitle={currentView === "providers" && Boolean(modeAppId)}
+      truncateTitle={providerListVisible && Boolean(modeAppId)}
       subtitle={
         activeApp === "openclaw" ||
         activeApp === "hermes" ||
-        (currentView === "providers" && modeAppId)
+        (providerListVisible && modeAppId)
           ? undefined
           : appPageName
       }
       actions={
         <>
-          {currentView === "providers" &&
+          {providerListVisible &&
             activeApp !== "mcode" &&
             activeApp !== "dsh" &&
             activeApp !== "kimi" &&
@@ -1384,7 +1386,7 @@ function App() {
               <ExternalLink className="h-3.5 w-3.5" />
             </Button>
           )}
-          {currentView === "providers" &&
+          {providerListVisible &&
             (settingsData?.showProviderSearch ?? true) && (
               <HoverTip
                 content={t("provider.searchButtonTip", {
@@ -1403,7 +1405,7 @@ function App() {
                 </Button>
               </HoverTip>
             )}
-          {currentView === "providers" && (
+          {providerListVisible && (
             <Button
               variant="solid"
               size="regular"
@@ -1683,37 +1685,6 @@ function App() {
             onOpenRoutingSettings={() => openSettings("routing")}
           />
         );
-      case "auth":
-        return (
-          <>
-            <AppPageHeader
-              icon={<KeyRound className="h-5 w-5" strokeWidth={1.5} />}
-              title={t("nav.auth")}
-              titleExtra={
-                <>
-                  <HelpTip title={t("authCenter.helpTitle")}>
-                    {t("settings.authCenter.description")}
-                  </HelpTip>
-                  <Badge
-                    variant="outline"
-                    className="ms-1 h-5 px-1.5 text-badge font-medium"
-                  >
-                    {t("settings.authCenter.beta", { defaultValue: "Beta" })}
-                  </Badge>
-                </>
-              }
-              actions={<RefreshAllQuotaButton />}
-            />
-            <div
-              id="main-content"
-              className="min-h-0 flex-1 overflow-y-auto scroll-stable"
-            >
-              <div className="px-6 pb-10 pt-4">
-                <AuthCenterPanel showIntro={false} />
-              </div>
-            </div>
-          </>
-        );
       case "mcp":
         return (
           <UnifiedMcpPanel onInteractionBlockedChange={setMcpManagementBusy} />
@@ -1758,7 +1729,7 @@ function App() {
       case "apps":
         return <AppsPage />;
       case "suppliers":
-        return <SupplierPage onOpenAuthCenter={() => openPage("auth")} />;
+        return <SupplierPage />;
       case "bindings":
         return <BindingsPage />;
       default:

@@ -17,12 +17,15 @@ export const supplierModelKeys = {
 /** 供应商卡片里的模型表：目录按上游过滤，改名 / 隐藏走人工覆盖，改完目录立刻失效。 */
 export function SupplierModelsPanel({
   upstreamIds,
+  defaultOpen = false,
 }: {
   upstreamIds: string[];
+  /** 放进编辑弹窗时直接展开 */
+  defaultOpen?: boolean;
 }) {
   const { t } = useTranslation();
   const queryClient = useQueryClient();
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(defaultOpen);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [savingKey, setSavingKey] = useState<string | null>(null);
 
@@ -61,7 +64,9 @@ export function SupplierModelsPanel({
   }, [catalogQuery.dataUpdatedAt]);
 
   const refresh = async () => {
-    await queryClient.invalidateQueries({ queryKey: supplierModelKeys.catalog });
+    await queryClient.invalidateQueries({
+      queryKey: supplierModelKeys.catalog,
+    });
     await queryClient.invalidateQueries({
       queryKey: supplierModelKeys.overrides,
     });
@@ -123,9 +128,7 @@ export function SupplierModelsPanel({
       >
         <span>{t("suppliers.models", { defaultValue: "模型" })}</span>
         <span className="flex items-center gap-2 text-fg-3">
-          <span>
-            {catalogQuery.isLoading ? "…" : entries.length}
-          </span>
+          <span>{catalogQuery.isLoading ? "…" : entries.length}</span>
           <ChevronDown
             className={`size-3.5 transition-transform ${open ? "rotate-180" : ""}`}
           />
@@ -136,7 +139,8 @@ export function SupplierModelsPanel({
           {entries.length === 0 ? (
             <p className="py-2 text-caption text-fg-3">
               {t("suppliers.noModels", {
-                defaultValue: "目录里没有这家供应商的模型（先跑一次请求或同步配置）",
+                defaultValue:
+                  "目录里没有这家供应商的模型（先跑一次请求或同步配置）",
               })}
             </p>
           ) : (
@@ -147,7 +151,9 @@ export function SupplierModelsPanel({
                     {t("suppliers.modelId", { defaultValue: "模型 id" })}
                   </th>
                   <th className="py-1 text-left font-normal">
-                    {t("suppliers.modelDisplayName", { defaultValue: "显示名" })}
+                    {t("suppliers.modelDisplayName", {
+                      defaultValue: "显示名",
+                    })}
                   </th>
                   <th className="py-1 text-right font-normal">
                     {t("suppliers.modelHidden", { defaultValue: "隐藏" })}
@@ -181,7 +187,10 @@ export function SupplierModelsPanel({
                               event.preventDefault();
                               void save(entry, override?.hidden ?? false);
                             } else if (event.key === "Escape") {
-                              setDrafts({ ...drafts, [key]: override?.displayName ?? "" });
+                              setDrafts({
+                                ...drafts,
+                                [key]: override?.displayName ?? "",
+                              });
                             }
                           }}
                         />

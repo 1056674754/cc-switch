@@ -303,7 +303,7 @@ describe("credential failures", () => {
       </I18nextProvider>,
     );
     expect(
-      screen.getByText("请在授权中心重新登录这个账号"),
+      screen.getByText("请在供应商卡片的凭据区重新登录这个账号"),
     ).toBeInTheDocument();
     expect(screen.queryByText(/codex_oauth/)).not.toBeInTheDocument();
   });

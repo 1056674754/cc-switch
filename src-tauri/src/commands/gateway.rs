@@ -7,14 +7,132 @@ use crate::app_config::AppType;
 use crate::services::gateway_catalog::{self, CatalogViewEntry};
 use crate::services::gateway_config::{self, AppModelConfig};
 use crate::services::gateway_migration::{self, AppMigration};
+use crate::services::gateway_model_sync::{self, SupplierModelFetch};
 use crate::store::AppState;
 
 /// 整份目录：每条 = 模型引用（`<供应商名>/<模型 id>`）+ 展示信息 + 能承载它的端点 + 来源。
+///
+/// `refresh` 为真时先清掉进程内的目录缓存再派生：界面的「刷新」用它把外部写入
+/// （`ccswitch` 命令行、另一个实例、备份恢复）之后仍然命中的旧缓存顶掉。缓存本身
+/// 还要留给 Claude Code 的模型发现请求，所以不能直接把这条命令的读路径改成每次重算。
+///
+/// `includeHidden` 为真时把「人工隐藏」的条目也返回：供应商编辑弹窗的左栏要展示上游
+/// 有、但还没启用的模型，才能点「加入」。普通读路径（应用页选模型、路由、发布）必须
+/// 保持只看到可见目录，所以默认仍是过滤。
 #[tauri::command(async)]
 pub fn get_gateway_catalog(
     state: tauri::State<'_, AppState>,
+    refresh: Option<bool>,
+    include_hidden: Option<bool>,
 ) -> Result<Vec<CatalogViewEntry>, String> {
-    gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())
+    if refresh.unwrap_or(false) {
+        gateway_catalog::invalidate_catalog_cache();
+    }
+    let read = if include_hidden.unwrap_or(false) {
+        gateway_catalog::catalog_view_including_hidden(&state.db)
+    } else {
+        gateway_catalog::catalog_view_cached(&state.db)
+    };
+    read.map_err(|error| error.to_string())
+}
+
+/// 从上游拉模型列表，写进目录的「发现」表。
+///
+/// 这是供应商弹窗里模型区那个刷新按钮的实现：目录原本只能从 provider 行派生，
+/// 用户看不到上游「其实还有哪些模型」。拉到的候选默认隐藏（未启用），点「加入」才放开。
+///
+/// **供应商就是上游**：同一个上游在库里可能被按 app 派生成多行（Codex 订阅同时有
+/// `chatgpt.com` 与官方托管上游行），这里先按真实上游归并，一家只发一次请求，再把结果
+/// 写进它对应的每一行——否则就是对着同一家上游重复拉，还各存一套。
+#[tauri::command(async)]
+pub async fn fetch_supplier_models(
+    state: tauri::State<'_, AppState>,
+    oauth_state: tauri::State<'_, crate::commands::CodexOAuthState>,
+    upstream_ids: Vec<String>,
+) -> Result<SupplierModelFetch, String> {
+    let (plans, mut errors) = gateway_model_sync::plan_refresh(&state.db, &upstream_ids)
+        .map_err(|error| error.to_string())?;
+    if plans.is_empty() {
+        return Err(errors
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| "没有可刷新的上游".to_string()));
+    }
+
+    let mut fetched: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut added: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut refreshed: Vec<String> = Vec::new();
+    for plan in plans {
+        let models = match fetch_service_models(&plan.source, &oauth_state).await {
+            Ok(models) => models,
+            Err(error) => {
+                errors.push(error);
+                continue;
+            }
+        };
+        fetched.extend(models.iter().cloned());
+        for upstream_id in &plan.upstream_ids {
+            let (_, added_models) =
+                gateway_model_sync::store_discovered_models(&state.db, upstream_id, &models)
+                    .map_err(|error| error.to_string())?;
+            added.extend(added_models);
+            refreshed.push(upstream_id.clone());
+        }
+    }
+    if refreshed.is_empty() {
+        return Err(errors.join("；"));
+    }
+    Ok(SupplierModelFetch {
+        upstream_ids: refreshed,
+        fetched: fetched.len(),
+        added: added.len(),
+    })
+}
+
+/// 按上游凭证形态发请求：自定义网关走 OpenAI 兼容 `/v1/models`，托管 Codex 账号走
+/// `chatgpt.com/backend-api/codex/models`（不是兼容端点，要用 OAuth token）。
+async fn fetch_service_models(
+    source: &gateway_model_sync::FetchSource,
+    oauth_state: &tauri::State<'_, crate::commands::CodexOAuthState>,
+) -> Result<Vec<String>, String> {
+    use crate::services::gateway_model_sync::FetchSource;
+
+    let models = match source {
+        FetchSource::Literal(target) => {
+            crate::services::model_fetch::fetch_models(
+                &target.base_url,
+                &target.secret,
+                target.is_full_url,
+                None,
+                None,
+                target.api_format,
+                None,
+            )
+            .await?
+        }
+        FetchSource::CodexOAuth { account_id } => {
+            let manager = &oauth_state.0;
+            let token = manager
+                .get_valid_token_for_account(account_id)
+                .await
+                .map_err(|error| {
+                    format!("Codex OAuth 账号 {account_id} 的 token 不可用：{error}")
+                })?;
+            let chatgpt_account_id = manager
+                .chatgpt_account_id_for_account(account_id)
+                .await
+                .map_err(|error| {
+                    format!("Codex OAuth 账号 {account_id} 缺少工作区信息：{error}")
+                })?;
+            crate::services::codex_oauth_models::fetch_models_with_token(
+                &token,
+                &chatgpt_account_id,
+            )
+            .await
+            .map_err(|error| format!("从 ChatGPT Codex 获取模型失败：{error}"))?
+        }
+    };
+    Ok(models.into_iter().map(|model| model.id).collect())
 }
 
 /// P4-A：把 OpenCode 指到网关 —— 写一条 `cc-switch` provider，模型用当前配置里的引用。

@@ -151,7 +151,7 @@ describe("Auth Center account groups", () => {
       screen.getByRole("button", { name: "octocat 的更多操作" }),
     );
     expect(
-      await screen.findByRole("menuitem", { name: "删除账号…" }),
+      await screen.findByRole("menuitem", { name: "退出登录…" }),
     ).toBeInTheDocument();
     expect(
       screen.queryByRole("menuitem", { name: "重新登录" }),

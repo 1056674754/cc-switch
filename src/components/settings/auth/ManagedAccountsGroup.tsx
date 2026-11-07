@@ -2,6 +2,8 @@ import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { toast } from "@/lib/toast";
 import {
+  Check,
+  ChevronDown,
   CircleAlert,
   Copy,
   ExternalLink,
@@ -42,6 +44,11 @@ export interface GroupAccountRow {
   users: ManagedAccountUser[];
   /** 右侧的额度（AccountQuotaColumn）；需要重新登录的账号不传 */
   quota?: React.ReactNode;
+  /**
+   * 供应商页：这个账号是否参与使用（没传就没有「停用/启用」这一项）。
+   * 与「退出登录」不同：停用只是保留账号、别用它。
+   */
+  enabled?: boolean;
   /** ⋯ 里删除项的文案（Kimi Code 自己的登录是「移出列表」） */
   removeLabel?: string;
   /** 删除项不能点的原因（Kimi 正在用的号要先切走），照常列出、原因写在下面 */
@@ -72,7 +79,12 @@ interface ManagedAccountsGroupProps {
   /** ProviderIcon 的图标名（githubcopilot / openai / xai） */
   iconName: string;
   /** 「?」里的说明：这个服务的账号用在哪些预设上、没指定账号时用哪个 */
-  help: string;
+  help: React.ReactNode;
+  /**
+   * 「?」里再补一句：嵌进供应商卡片时，「设为默认」是让这家供应商改用该账号，
+   * 和授权中心里改全局默认账号不是一回事。
+   */
+  helpNote?: React.ReactNode;
   helpSide?: "top" | "bottom";
   accounts: GroupAccountRow[];
   status: "loading" | "error" | "ready";
@@ -87,8 +99,18 @@ interface ManagedAccountsGroupProps {
   onAdd: () => void;
   /** Copilot 选部署类型的那块；有它时不显示空状态那行 */
   chooser?: React.ReactNode;
-  /** 放在「添加账号」左边的控件（ChatGPT 的登录方式） */
-  loginControl?: React.ReactNode;
+  /**
+   * 「添加账号」旁边的登录方式：传了就把「添加账号」做成一个整体控件——
+   * 左边点击按默认方式登录，右边 ▾ 选「浏览器登录 / 设备代码登录」。
+   * 不再单独摆一个下拉框，避免看起来像两个入口。
+   */
+  addOptions?: {
+    key: string;
+    label: React.ReactNode;
+    hint?: React.ReactNode;
+    checked?: boolean;
+    onSelect: () => void;
+  }[];
   /** 「默认」徽标和 ⋯ 里「设为默认」的文案（Antigravity 是「agy 在用」「切换 agy 到这个账号」） */
   defaultLabel?: string;
   setDefaultLabel?: string;
@@ -102,7 +124,14 @@ interface ManagedAccountsGroupProps {
   settingDefault: boolean;
   onRemove: (accountId: string, login: string) => void;
   removing: boolean;
+  /** 传了才显示 ⋯ 里的「停用/启用」；供应商页用它表达「保留但不参与使用」 */
+  onToggleEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingEnabled?: boolean;
   login: GroupLoginFlow;
+  /** 嵌进别的卡片（供应商卡片）时去掉自己的外框，只留一条上分隔线 */
+  embedded?: boolean;
+  /** 嵌进 provider 卡片时把「服务名 + 图标」换成一段自己的标题（如「凭据」），账号操作保留 */
+  headerLabel?: string;
   /** 确认框等 */
   children?: React.ReactNode;
 }
@@ -120,6 +149,7 @@ export function ManagedAccountsGroup({
   name,
   iconName,
   help,
+  helpNote,
   helpSide,
   accounts,
   status,
@@ -130,7 +160,7 @@ export function ManagedAccountsGroup({
   emptyText,
   onAdd,
   chooser,
-  loginControl,
+  addOptions,
   defaultLabel,
   setDefaultLabel,
   canReauth,
@@ -140,7 +170,11 @@ export function ManagedAccountsGroup({
   settingDefault,
   onRemove,
   removing,
+  onToggleEnabled,
+  togglingEnabled = false,
   login,
+  embedded = false,
+  headerLabel,
   children,
 }: ManagedAccountsGroupProps) {
   const { t } = useTranslation();
@@ -243,31 +277,118 @@ export function ManagedAccountsGroup({
   return (
     <section
       aria-label={name}
-      className="auth-group shrink-0 rounded-panel border border-border bg-surface"
+      className={cn(
+        "auth-group shrink-0",
+        embedded
+          ? "border-t border-border"
+          : "rounded-panel border border-border bg-surface",
+      )}
     >
-      <div className="flex h-[52px] items-center gap-3 pe-2.5 ps-4">
-        <span
-          aria-hidden="true"
-          className="flex h-7 w-7 shrink-0 items-center justify-center text-fg-1"
-        >
-          <ProviderIcon icon={iconName} name={name} size={20} />
-        </span>
+      <div
+        className={cn(
+          "flex items-center gap-3 pe-2.5 ps-4",
+          headerLabel ? "h-[44px]" : "h-[52px]",
+        )}
+      >
+        {headerLabel ? null : (
+          <span
+            aria-hidden="true"
+            className="flex h-7 w-7 shrink-0 items-center justify-center text-fg-1"
+          >
+            <ProviderIcon icon={iconName} name={name} size={20} />
+          </span>
+        )}
         <div className="flex min-w-0 flex-1 items-center gap-0.5">
           <h2 className="m-0 truncate text-strong font-semibold text-fg-1">
-            {name}
+            {headerLabel ?? name}
           </h2>
           <HelpTip
-            title={t("authCenter.group.helpTitle", {
-              defaultValue: "{{service}} 账号怎么用",
-              service: name,
-            })}
+            title={
+              headerLabel
+                ? t("suppliers.credentialsHelpTitle", {
+                    defaultValue: "这些账号怎么用",
+                  })
+                : t("authCenter.group.helpTitle", {
+                    defaultValue: "{{service}} 账号怎么用",
+                    service: name,
+                  })
+            }
             side={helpSide}
           >
             {help}
+            {helpNote ? (
+              <span className="mt-1 block text-fg-2">{helpNote}</span>
+            ) : null}
           </HelpTip>
         </div>
-        {ready && loginControl}
-        {ready && (
+        {ready && addOptions?.length ? (
+          <div className="flex items-stretch">
+            <Button
+              type="button"
+              id={`auth-add-${slug}`}
+              variant="neutral"
+              size="compact"
+              className="gap-1.5 rounded-e-none pe-3 ps-2.5"
+              aria-disabled={busy || loginBlocked || undefined}
+              aria-describedby={
+                busy ? pendingId : loginBlocked ? blockedId : undefined
+              }
+              onClick={add}
+            >
+              <Plus className="h-3.5 w-3.5" strokeWidth={2} />
+              {t("authCenter.addAccount", { defaultValue: "添加账号" })}
+            </Button>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  type="button"
+                  variant="neutral"
+                  size="compact"
+                  className="rounded-s-none border-s-0 px-1.5"
+                  aria-label={t("authCenter.addAccountMethod", {
+                    defaultValue: "选择添加账号的方式",
+                  })}
+                  aria-disabled={busy || loginBlocked || undefined}
+                >
+                  <ChevronDown
+                    className="h-3.5 w-3.5"
+                    strokeWidth={2}
+                    aria-hidden="true"
+                  />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                {addOptions.map((option) => (
+                  <DropdownMenuItem
+                    key={option.key}
+                    disabled={busy || loginBlocked}
+                    onSelect={() => {
+                      if (busy || loginBlocked) return;
+                      setReauthTarget(null);
+                      option.onSelect();
+                    }}
+                  >
+                    <Check
+                      aria-hidden="true"
+                      className={cn(
+                        "h-3.5 w-3.5",
+                        option.checked ? "opacity-100" : "opacity-0",
+                      )}
+                    />
+                    <span className="flex flex-col">
+                      <span>{option.label}</span>
+                      {option.hint ? (
+                        <span className="text-caption text-fg-3">
+                          {option.hint}
+                        </span>
+                      ) : null}
+                    </span>
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
+        ) : ready ? (
           <Button
             type="button"
             id={`auth-add-${slug}`}
@@ -283,7 +404,7 @@ export function ManagedAccountsGroup({
             <Plus className="h-3.5 w-3.5" strokeWidth={2} />
             {t("authCenter.addAccount", { defaultValue: "添加账号" })}
           </Button>
-        )}
+        ) : null}
       </div>
 
       {notice && <div className="px-3 pb-3">{notice}</div>}
@@ -340,6 +461,8 @@ export function ManagedAccountsGroup({
             onReauth={reauth}
             onSetDefault={onSetDefault}
             onRemove={onRemove}
+            onToggleEnabled={onToggleEnabled}
+            togglingEnabled={togglingEnabled}
           />
         ))}
 
@@ -584,6 +707,9 @@ interface AccountRowProps {
   onReauth: (accountId: string) => void;
   onSetDefault?: (accountId: string) => void;
   onRemove: (accountId: string, login: string) => void;
+  /** 供应商页：账号是否参与使用（undefined 就不显示停用/启用） */
+  onToggleEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingEnabled: boolean;
 }
 
 function AccountRow({
@@ -599,6 +725,8 @@ function AccountRow({
   onReauth,
   onSetDefault,
   onRemove,
+  onToggleEnabled,
+  togglingEnabled,
 }: AccountRowProps) {
   const { t } = useTranslation();
   const subId = useId();
@@ -711,6 +839,17 @@ function AccountRow({
               )}
             </DropdownMenuItem>
           )}
+          {onToggleEnabled && account.enabled !== undefined && (
+            <DropdownMenuItem
+              disabled={togglingEnabled || busy}
+              onSelect={() => onToggleEnabled(account.id, !account.enabled)}
+              className="h-[30px] rounded-control px-2.5 text-body"
+            >
+              {account.enabled
+                ? t("authCenter.disableAccount", { defaultValue: "停用账号" })
+                : t("authCenter.enableAccount", { defaultValue: "启用账号" })}
+            </DropdownMenuItem>
+          )}
           <DropdownMenuItem
             disabled={removing || Boolean(account.removeDisabledReason)}
             onSelect={() => onRemove(account.id, account.login)}
@@ -721,7 +860,7 @@ function AccountRow({
           >
             <span className={cn(account.removeDisabledReason && "text-fg-3")}>
               {account.removeLabel ??
-                t("authCenter.removeAccount", { defaultValue: "删除账号…" })}
+                t("authCenter.removeAccount", { defaultValue: "退出登录…" })}
             </span>
             {account.removeDisabledReason && (
               <span className="text-caption text-fg-3">

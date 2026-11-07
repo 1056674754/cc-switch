@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { CodexOAuthSection } from "@/components/providers/forms/CodexOAuthSection";
@@ -188,24 +188,22 @@ describe("CodexOAuthSection", () => {
     await user.click(
       screen.getByRole("button", { name: "user@example.com 的更多操作" }),
     );
-    await user.click(
-      await screen.findByRole("menuitem", { name: "删除账号…" }),
-    );
+    await user.click(await screen.findByRole("menuitem", { name: /退出登录/ }));
     expect(authResult.removeAccount).not.toHaveBeenCalled();
 
     const dialog = await screen.findByRole("alertdialog");
-    expect(dialog).toHaveTextContent("删除账号「user@example.com」？");
+    expect(dialog).toHaveTextContent("退出登录「user@example.com」？");
     // 指定了这个账号的会坏；跟着默认账号的（还有别的账号）改用新的默认账号
     expect(dialog).toHaveTextContent(
       "这些供应商会无法使用，直到重新登录或改选别的账号：",
     );
     expect(dialog).toHaveTextContent("Claude Code：ChatGPT A");
     expect(dialog).toHaveTextContent(
-      "这些供应商用的是默认账号，删除后改用新的默认账号：",
+      "这些供应商用的是默认账号，退出后改用新的默认账号：",
     );
     expect(dialog).toHaveTextContent("Claude Desktop：ChatGPT Desktop");
 
-    const confirm = screen.getByRole("button", { name: "删除账号" });
+    const confirm = screen.getByRole("button", { name: "退出登录" });
     expect(confirm.className).toContain("bg-danger");
     await user.click(confirm);
     expect(authResult.removeAccount).toHaveBeenCalledWith("account-1");
@@ -216,7 +214,7 @@ describe("CodexOAuthSection", () => {
 
     // 标题行只有「添加账号」，删账号只走每一行自己的 ⋯
     expect(
-      screen.queryByRole("button", { name: /注销所有账号|删除全部/ }),
+      screen.queryByRole("button", { name: /注销所有账号|退出全部|删除全部/ }),
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: "ChatGPT 的更多操作" }),
@@ -224,6 +222,38 @@ describe("CodexOAuthSection", () => {
     expect(
       screen.getByRole("button", { name: "添加账号" }),
     ).toBeInTheDocument();
+  });
+
+  it("offers the login method inside 添加账号 instead of a second control", async () => {
+    const user = userEvent.setup();
+    const authResult = mocks.useCodexOauth();
+    const addAccount = vi.fn();
+    mocks.useCodexOauth.mockReturnValue({ ...authResult, addAccount });
+
+    render(<CodexOAuthSection />);
+
+    // 旧版标题行里还有一个「浏览器登录」下拉框，看起来像两个入口；现在只剩「添加账号」+ ▾
+    expect(
+      screen.queryByRole("combobox", { name: "codexOauth.loginMethod" }),
+    ).toBeNull();
+    const add = screen.getByRole("button", { name: "添加账号" });
+    expect(add).toBeInTheDocument();
+
+    await user.click(
+      screen.getByRole("button", { name: "选择添加账号的方式" }),
+    );
+    // 两种登录方式都收在「添加账号」旁边
+    expect(
+      await screen.findByRole("menuitem", { name: "codexOauth.browserLogin" }),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("menuitem", { name: "codexOauth.deviceCodeLogin" }),
+    );
+    expect(addAccount).toHaveBeenCalledWith("device_code");
+
+    // 直接点「添加账号」仍然按上次选的方式登录，不用每次先选
+    await user.click(add);
+    expect(addAccount).toHaveBeenLastCalledWith("device_code");
   });
 
   it("reauthenticates the selected legacy account in place", async () => {
@@ -293,6 +323,43 @@ describe("CodexOAuthSection", () => {
     );
     await user.click(await screen.findByRole("menuitem", { name: "设为默认" }));
     expect(authResult.setDefaultAccount).toHaveBeenCalledWith("account-2");
+  });
+
+  it("offers enable/disable only when the supplier page provides it", async () => {
+    const user = userEvent.setup();
+    const authResult = mocks.useCodexOauth();
+    const onToggleAccountEnabled = vi.fn();
+
+    // 授权中心自己不知道「参与不参与使用」：不传回调就没有这一项
+    render(<CodexOAuthSection />);
+    await user.click(
+      screen.getByRole("button", { name: "user@example.com 的更多操作" }),
+    );
+    expect(
+      screen.queryByRole("menuitem", { name: "停用账号" }),
+    ).not.toBeInTheDocument();
+    await user.keyboard("{Escape}");
+    cleanup();
+
+    // 供应商卡片/弹窗里：默认账号在队列里（启用），第二个没在（可启用）
+    render(
+      <CodexOAuthSection
+        accountEnabled={(accountId) => accountId === "account-1"}
+        onToggleAccountEnabled={onToggleAccountEnabled}
+      />,
+    );
+    await user.click(
+      screen.getByRole("button", { name: "user@example.com 的更多操作" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "停用账号" }));
+    expect(onToggleAccountEnabled).toHaveBeenCalledWith("account-1", false);
+
+    await user.click(
+      screen.getByRole("button", { name: "second@example.com 的更多操作" }),
+    );
+    await user.click(await screen.findByRole("menuitem", { name: "启用账号" }));
+    expect(onToggleAccountEnabled).toHaveBeenCalledWith("account-2", true);
+    expect(authResult.accounts.length).toBeGreaterThan(1);
   });
 
   it("shows the device code while waiting for authorization", () => {

@@ -46,6 +46,18 @@ interface CopilotAuthSectionProps {
   onManageAccounts?: () => void;
   /** 授权中心里最后一组的「?」向上弹 */
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 供应商卡片接管「设为默认」：让这家供应商改用该账号（见 CodexOAuthSection 同名参数） */
+  onSetDefaultAccount?: (accountId: string) => void;
+  settingDefaultAccount?: boolean;
+  /** 「?」里补一句：这里的「设为默认」是让这家供应商改用该账号 */
+  helpNote?: React.ReactNode;
+  /** 供应商页：账号是否参与使用（返回 undefined 就不显示停用/启用） */
+  accountEnabled?: (accountId: string) => boolean | undefined;
+  /** 供应商页：停用/启用这个账号（保留账号，只是不参与使用） */
+  onToggleAccountEnabled?: (accountId: string, enabled: boolean) => void;
+  togglingAccountEnabled?: boolean;
 }
 
 type DeploymentType = "github.com" | "enterprise";
@@ -64,11 +76,18 @@ const cleanDomain = (value: string) =>
  */
 export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
   className,
+  embedded = false,
   mode = "manage",
   selectedAccountId,
   onAccountSelect,
   onManageAccounts,
   helpSide,
+  onSetDefaultAccount,
+  settingDefaultAccount,
+  helpNote,
+  accountEnabled,
+  onToggleAccountEnabled,
+  togglingAccountEnabled,
 }) => {
   const { t, i18n } = useTranslation();
   const [deploymentType, setDeploymentType] =
@@ -283,6 +302,7 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
           : null,
       ].filter(Boolean),
       isDefault: defaultAccountId === account.id,
+      enabled: accountEnabled?.(account.id),
       // 后端从不把 Copilot 账号标成需要重新登录（reauth_required 恒 false）
       needsReauth: false,
       users: accountUsers([account.id]),
@@ -400,6 +420,7 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
       slug="copilot"
       name="GitHub Copilot"
       iconName="githubcopilot"
@@ -408,6 +429,7 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
           "用于 Claude Code、Claude Desktop 的 GitHub Copilot 预设。没指定账号的供应商用「默认」账号。",
       })}
       helpSide={helpSide}
+      helpNote={helpNote}
       accounts={rows}
       status={isStatusError ? "error" : isStatusSuccess ? "ready" : "loading"}
       statusErrorText={t("copilot.statusLoadFailed", {
@@ -433,11 +455,13 @@ export const CopilotAuthSection: React.FC<CopilotAuthSectionProps> = ({
       chooser={chooser || undefined}
       canReauth={false}
       onReauth={() => undefined}
-      onSetDefault={setDefaultAccount}
-      settingDefault={isSettingDefaultAccount}
+      onSetDefault={onSetDefaultAccount ?? setDefaultAccount}
+      settingDefault={settingDefaultAccount ?? isSettingDefaultAccount}
       onRemove={(accountId, login) =>
         setRemoveTarget({ kind: "one", accountId, login })
       }
+      onToggleEnabled={onToggleAccountEnabled}
+      togglingEnabled={togglingAccountEnabled}
       removing={isRemovingAccount}
       login={{
         starting: isAddingAccount && !isPolling,

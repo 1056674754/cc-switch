@@ -7,7 +7,7 @@
 //! 目录的键是（端点, 规范模型名）：同一个上游被多个 app 引用时只出现一次，
 //! `sources` 记下是哪些 app 的行贡献的。
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -359,8 +359,21 @@ pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
         (apps, bindings, endpoints)
     };
 
+    // 一家上游可能有多条端点（协议不同）；发现结果没有 provider 行可依，按整家上游的
+    // 全部端点记，路由时再按协议挑。
+    let mut endpoints_by_upstream: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (endpoint_id, upstream_id) in &endpoint_upstream {
+        endpoints_by_upstream
+            .entry(upstream_id.clone())
+            .or_default()
+            .push(endpoint_id.clone());
+    }
+
     // 2. 逐 app 读 provider 行，用现有推导函数取模型，按（端点, 模型）合并。
     let mut entries: BTreeMap<(String, String), CatalogEntry> = BTreeMap::new();
+    // 上游 → 接进来的 app（`app:providerName`）。上游发现的模型没有 provider 行，
+    // 但路由 / 发布都是按这个来源反查 provider 的，所以要记下这家上游已绑定的 app。
+    let mut sources_by_upstream: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
     for app in &apps {
         let Ok(app) = AppType::from_str(app) else {
             continue;
@@ -381,17 +394,88 @@ pub fn derive_entries(db: &Database) -> Result<Vec<CatalogEntry>, AppError> {
                 continue;
             };
             let source = format!("{}:{}", app.as_str(), provider.name);
+            sources_by_upstream
+                .entry(upstream_id.clone())
+                .or_default()
+                .insert(source.clone());
             for raw in raw_models(&app, &provider) {
                 merge(&mut entries, upstream_id, endpoint_id, &source, raw);
             }
         }
     }
 
+    // 3. 合并 `/v1/models` 的发现结果：provider 行里没有的模型也进目录（默认被 hidden
+    //    覆盖挡住，用户点「加入」才可见）。provider 行已经贡献过的模型以派生值为准。
+    for (upstream_id, model_id, display_name) in discovered_models(db)? {
+        let key = (upstream_id.clone(), model_id.clone());
+        if entries.contains_key(&key) {
+            continue;
+        }
+        let Some(endpoint_ids) = endpoints_by_upstream.get(&upstream_id) else {
+            // 没有端点就没法路由；只保留一张孤立的发现表没有意义。
+            continue;
+        };
+        entries.insert(
+            key,
+            CatalogEntry {
+                upstream_id: upstream_id.clone(),
+                endpoint_ids: endpoint_ids.clone(),
+                model_id,
+                display_name,
+                one_m: false,
+                window: None,
+                sources: sources_by_upstream
+                    .get(&upstream_id)
+                    .map(|sources| sources.iter().cloned().collect())
+                    .unwrap_or_default(),
+            },
+        );
+    }
+
     Ok(entries.into_values().collect())
 }
 
+/// `/v1/models` 的发现结果：`(上游, 模型, 显示名)`。
+///
+/// 表不存在时（老库还没跑到 v29）当作没有发现结果：目录派生是热路径，不能因为一张
+/// 辅助表把整份目录读挂。
+fn discovered_models(db: &Database) -> Result<Vec<(String, String, Option<String>)>, AppError> {
+    let conn = crate::database::lock_conn!(db.conn);
+    let mut stmt = match conn
+        .prepare("SELECT upstream_id, model_id, display_name FROM gateway_upstream_models")
+    {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            log::warn!("读取上游模型发现表失败（按空处理）: {error}");
+            return Ok(Vec::new());
+        }
+    };
+    let rows = stmt.query_map([], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, String>(1)?,
+            row.get(2)?,
+        ))
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
 /// 目录 + 每条的上游显示名与模型引用。上游名来自 `upstreams.name`，重名按出现顺序加序号。
+///
+/// 被人工覆盖隐藏的条目不返回（`catalog_view_including_hidden` 才会）。
 pub fn catalog_view(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
+    catalog_view_with(db, false)
+}
+
+/// 带隐藏条目的目录：供应商编辑弹窗的左栏要看「上游有、但还没启用」的模型。
+pub fn catalog_view_including_hidden(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
+    catalog_view_with(db, true)
+}
+
+fn catalog_view_with(
+    db: &Database,
+    include_hidden: bool,
+) -> Result<Vec<CatalogViewEntry>, AppError> {
     let entries = derive_entries(db)?;
     let mut upstream_names: Vec<(String, String)> = {
         let connected = crate::database::lock_conn!(db.conn);
@@ -412,10 +496,11 @@ pub fn catalog_view(db: &Database) -> Result<Vec<CatalogViewEntry>, AppError> {
     Ok(entries
         .into_iter()
         .filter(|entry| {
-            !overrides
-                .get(&(entry.upstream_id.clone(), entry.model_id.clone()))
-                .map(|over| over.hidden)
-                .unwrap_or(false)
+            include_hidden
+                || !overrides
+                    .get(&(entry.upstream_id.clone(), entry.model_id.clone()))
+                    .map(|over| over.hidden)
+                    .unwrap_or(false)
         })
         .map(|entry| {
             let upstream_name = names
@@ -462,6 +547,7 @@ mod tests {
         provider
     }
 
+    #[test]
     #[test]
     fn claude_stack_models_are_the_source() {
         let meta = ProviderMeta {
@@ -665,6 +751,89 @@ mod tests {
             let after = catalog_view_cached(&db).expect("after");
             assert_eq!(after.len(), 2, "写 provider 后缓存要失效");
         }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    fn temp_catalog_db(tag: &str) -> (std::path::PathBuf, Database) {
+        let path = std::env::temp_dir().join(format!(
+            "ccs-catalog-{tag}-{}-{}.db",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        let db = Database::open_and_migrate_for_test(&path).expect("open");
+        (path, db)
+    }
+
+    /// 上游 `/v1/models` 拉到的候选要进目录（带这家上游已绑定 app 的来源），
+    /// 且默认被隐藏挡住；「加入」后可见。
+    #[test]
+    fn discovered_models_join_the_catalog_behind_a_hidden_override() {
+        let (path, db) = temp_catalog_db("discovered");
+        let p = provider(
+            "CTYun",
+            json!({"env": {
+                "ANTHROPIC_BASE_URL": "https://ctyun.example/v1",
+                "ANTHROPIC_MODEL": "m1"
+            }}),
+            None,
+        );
+        db.save_provider("claude", &p).expect("save");
+        let upstream_id = derive_entries(&db).expect("derive")[0].upstream_id.clone();
+
+        let (fetched, added) = crate::services::gateway_model_sync::store_discovered_models(
+            &db,
+            &upstream_id,
+            &["m1".to_string(), "m2".to_string()],
+        )
+        .expect("store");
+        assert_eq!(fetched, 2);
+        assert_eq!(
+            added,
+            vec!["m2".to_string()],
+            "m1 已经在 provider 行里，只有 m2 算新候选"
+        );
+
+        let visible = catalog_view(&db).expect("view");
+        assert_eq!(
+            visible
+                .iter()
+                .map(|entry| entry.model_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["m1"],
+            "候选默认隐藏，不进可见目录"
+        );
+
+        let all = catalog_view_including_hidden(&db).expect("view all");
+        let candidate = all
+            .iter()
+            .find(|entry| entry.model_id == "m2")
+            .expect("m2 应该在含隐藏条目的目录里");
+        assert_eq!(candidate.sources, vec!["claude:CTYun".to_string()]);
+        assert!(!candidate.endpoint_ids.is_empty(), "候选要能路由");
+
+        // 加入 = 写 hidden=false 的覆盖 → 可见；再刷一次不能把状态打回未启用
+        db.set_model_override(&upstream_id, "m2", None, false)
+            .expect("enable");
+        assert!(catalog_view(&db)
+            .expect("view")
+            .iter()
+            .any(|entry| entry.model_id == "m2"));
+        let (_, added) = crate::services::gateway_model_sync::store_discovered_models(
+            &db,
+            &upstream_id,
+            &["m1".to_string(), "m2".to_string()],
+        )
+        .expect("store again");
+        assert!(added.is_empty(), "已有候选不重复算新增");
+        assert!(catalog_view(&db)
+            .expect("view")
+            .iter()
+            .any(|entry| entry.model_id == "m2"));
+
+        drop(db);
         let _ = std::fs::remove_file(&path);
     }
 

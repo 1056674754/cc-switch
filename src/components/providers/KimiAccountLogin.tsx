@@ -13,6 +13,10 @@ import { useKimiOAuth } from "./forms/hooks/useKimiOAuth";
 
 interface KimiAccountLoginProps {
   helpSide?: "top" | "bottom";
+  /** 嵌进供应商卡片：去掉外层卡片边框 */
+  embedded?: boolean;
+  /** 嵌进 provider 卡片时替换「Kimi Code」标题（如「凭据」） */
+  headerLabel?: string;
 }
 
 /**
@@ -20,7 +24,11 @@ interface KimiAccountLoginProps {
  * 和模型，「在用」就是 default_model 指向的那个号；添加账号先选登录区域。Kimi Code 自己的
  * 登录删除时只移出列表，不替它登出。
  */
-export function KimiAccountLogin({ helpSide }: KimiAccountLoginProps) {
+export function KimiAccountLogin({
+  helpSide,
+  embedded = false,
+  headerLabel,
+}: KimiAccountLoginProps) {
   const { t } = useTranslation();
   const auth = useKimiOAuth();
   const [choosing, setChoosing] = useState(false);
@@ -115,6 +123,8 @@ export function KimiAccountLogin({ helpSide }: KimiAccountLoginProps) {
 
   return (
     <ManagedAccountsGroup
+      embedded={embedded}
+      headerLabel={headerLabel}
       slug="kimi"
       name="Kimi Code"
       iconName="kimi"

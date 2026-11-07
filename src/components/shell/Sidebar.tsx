@@ -14,7 +14,6 @@ import {
   Globe,
   History,
   Info,
-  KeyRound,
   Layers,
   LayoutGrid,
   Plug,
@@ -269,8 +268,19 @@ function MainDirectory({
   const todayTrailing = todayValues.length > 1 ? todayValues : todayText;
 
   // 侧栏最前面的「网关」：供应商是上游，接入端是各 agent 的选用入口
-  const gateway: { page: GlobalPage; label: string; icon: IconComponent }[] = [
-    { page: "suppliers", label: t("nav.suppliers"), icon: Boxes },
+  const gateway: {
+    page: GlobalPage;
+    label: string;
+    icon: IconComponent;
+    alert?: string;
+  }[] = [
+    {
+      page: "suppliers",
+      label: t("nav.suppliers"),
+      icon: Boxes,
+      // 账号要重新登录的提醒跟着账号入口走（授权中心页已并入供应商页）
+      alert: authNeedsAttention ? t("nav.authNeedsReauth") : undefined,
+    },
     { page: "bindings", label: t("nav.bindings"), icon: Plug },
   ];
 
@@ -286,12 +296,6 @@ function MainDirectory({
     { page: "skills", label: "Skills", icon: SkillsIcon },
     { page: "prompts", label: t("nav.prompts"), icon: BookOpen },
     { page: "sessions", label: t("nav.sessions"), icon: History },
-    {
-      page: "auth",
-      label: t("nav.auth"),
-      icon: KeyRound,
-      alert: authNeedsAttention ? t("nav.authNeedsReauth") : undefined,
-    },
     {
       page: "usage",
       label: t("nav.usage"),
@@ -334,6 +338,7 @@ function MainDirectory({
               selected={isGlobalSelected(item.page)}
               icon={item.icon}
               label={item.label}
+              alert={item.alert}
               onClick={() => onSelectPage(item.page)}
             />
           ))}

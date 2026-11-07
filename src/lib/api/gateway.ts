@@ -4,13 +4,45 @@ import type {
   AppModelConfig,
   GatewayCatalogEntry,
   ModelOverride,
+  SupplierModelFetch,
 } from "@/types/gateway";
 
 /** 网关模型目录与每 app 模型配置（P1）。 */
 export const gatewayApi = {
-  /** 整份目录：每条 = 模型引用 + 展示信息 + 端点 + 来源。 */
-  async getCatalog(): Promise<GatewayCatalogEntry[]> {
-    return invoke("get_gateway_catalog");
+  /**
+   * 整份目录：每条 = 模型引用 + 展示信息 + 端点 + 来源。
+   *
+   * `refresh` 让后端先丢掉进程内的目录缓存再派生 —— 只给界面上的「刷新」用；
+   * 普通读取继续吃缓存。
+   *
+   * `includeHidden` 为真时把被隐藏覆盖挡掉的条目也带回来：供应商编辑弹窗的「左栏」
+   * 要能重新「加入」这些模型，否则隐藏之后在界面上就再也找不到了。共享缓存必须
+   * 保持可见目录，所以这个参数只给单独的查询 key 用。
+   */
+  async getCatalog(options?: {
+    refresh?: boolean;
+    includeHidden?: boolean;
+  }): Promise<GatewayCatalogEntry[]> {
+    return invoke("get_gateway_catalog", {
+      refresh: options?.refresh ?? false,
+      includeHidden: options?.includeHidden ?? false,
+    });
+  },
+
+  /**
+   * 从该上游的 `/v1/models` 真拉一次模型列表并写库。
+   *
+   * 新出现的模型由后端写成 hidden 覆盖（= 未启用）：拉取只负责把上游的真实全集
+   * 带进目录，要不要对用户开放仍然要人工确认。失败时后端 reject 出中文错误串。
+   */
+  /**
+   * 刷新一家供应商的模型：传这张卡上的所有 upstream 行，后端按真实上游归并后
+   * **每家只发一次请求**，再把结果写进它对应的每一行。
+   */
+  async fetchSupplierModels(
+    upstreamIds: string[],
+  ): Promise<SupplierModelFetch> {
+    return invoke("fetch_supplier_models", { upstreamIds });
   },
 
   /** 读某 app 的模型配置；没配过返回 null。 */
@@ -19,7 +51,10 @@ export const gatewayApi = {
   },
 
   /** 写某 app 的模型配置（后端会先按目录校验引用）。 */
-  async setAppModelConfig(appType: string, config: AppModelConfig): Promise<void> {
+  async setAppModelConfig(
+    appType: string,
+    config: AppModelConfig,
+  ): Promise<void> {
     return invoke("set_app_model_config", { appType, config });
   },
 

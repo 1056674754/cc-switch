@@ -15,14 +15,28 @@ import type { Supplier } from "@/lib/api/suppliers";
 
 const mocks = vi.hoisted(() => ({
   create: vi.fn(),
+  ensureManaged: vi.fn(),
+  authGetStatus: vi.fn(),
   success: vi.fn(),
   error: vi.fn(),
 }));
 
 vi.mock("@/lib/api/suppliers", () => ({
   suppliersApi: {
-    create: (name: string, baseUrl: string, apiKey: string, apps: string[]) =>
-      mocks.create(name, baseUrl, apiKey, apps),
+    create: (
+      name: string,
+      baseUrl: string,
+      apiKey: string,
+      apps: string[],
+      protocol?: string,
+    ) => mocks.create(name, baseUrl, apiKey, apps, protocol),
+    ensureManaged: (authProvider: string) => mocks.ensureManaged(authProvider),
+  },
+}));
+
+vi.mock("@/lib/api/auth", () => ({
+  authApi: {
+    authGetStatus: (provider: string) => mocks.authGetStatus(provider),
   },
 }));
 
@@ -109,10 +123,18 @@ const renderDialog = () => {
   return { client, invalidateQueries, onClose };
 };
 
+/** 向导第一步是选来源；绝大多数用例走「自定义地址」这套表单。 */
+const openCustomForm = async (user: ReturnType<typeof userEvent.setup>) => {
+  await user.click(
+    screen.getByRole("button", { name: /suppliers\.createSourceCustom/ }),
+  );
+};
+
 const fillRequiredFields = async (
   user: ReturnType<typeof userEvent.setup>,
   overrides: { name?: string; baseUrl?: string; secret?: string } = {},
 ) => {
+  await openCustomForm(user);
   await user.type(
     screen.getByLabelText("suppliers.createNameLabel"),
     overrides.name ?? "  Acme Gateway  ",
@@ -151,12 +173,35 @@ async function clickOutside() {
 describe("CreateSupplierDialog", () => {
   beforeEach(() => {
     mocks.create.mockReset();
+    mocks.ensureManaged.mockReset();
+    mocks.authGetStatus.mockReset();
+    mocks.authGetStatus.mockResolvedValue({ accounts: [] });
     mocks.success.mockReset();
     mocks.error.mockReset();
   });
 
-  it("starts with an empty key and every supported app checked", () => {
+  it("starts on the source chooser with preset / import / custom entries", () => {
     renderDialog();
+
+    expect(
+      screen.getByText("suppliers.createSourcePreset"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("suppliers.createSourceImport"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText("suppliers.createSourceCustom"),
+    ).toBeInTheDocument();
+    // 还没有进表单：不显示任何输入框
+    expect(
+      screen.queryByLabelText("suppliers.createNameLabel"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("opens an empty form with no app pre-checked (creation is decoupled)", async () => {
+    renderDialog();
+    const user = userEvent.setup();
+    await openCustomForm(user);
 
     expect(screen.getByLabelText("suppliers.createNameLabel")).toHaveValue("");
     expect(screen.getByLabelText("suppliers.createBaseUrlLabel")).toHaveValue(
@@ -165,11 +210,11 @@ describe("CreateSupplierDialog", () => {
     const secret = screen.getByLabelText("suppliers.createSecretLabel");
     expect(secret).toHaveValue("");
     expect(secret).toHaveAttribute("type", "password");
-    // 默认全勾：claude / claude-desktop 都接上
-    expect(screen.getByRole("checkbox", { name: "Claude" })).toBeChecked();
+    // 创建供应商与接入 app 解耦：默认一个都不勾
+    expect(screen.getByRole("checkbox", { name: "Claude" })).not.toBeChecked();
     expect(
       screen.getByRole("checkbox", { name: "Claude Desktop" }),
-    ).toBeChecked();
+    ).not.toBeChecked();
     expect(
       screen.getByRole("button", { name: "suppliers.createSubmit" }),
     ).toBeEnabled();
@@ -180,7 +225,6 @@ describe("CreateSupplierDialog", () => {
     const user = userEvent.setup();
 
     await fillRequiredFields(user);
-    await user.click(screen.getByRole("checkbox", { name: "Claude" }));
     await user.keyboard("{Escape}");
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
     await waitFor(() =>
@@ -189,24 +233,20 @@ describe("CreateSupplierDialog", () => {
 
     await user.click(screen.getByRole("button", { name: "reopen" }));
 
-    // 上一轮的输入、勾选、密钥都不带走
-    expect(screen.getByLabelText("suppliers.createNameLabel")).toHaveValue("");
-    expect(screen.getByLabelText("suppliers.createBaseUrlLabel")).toHaveValue(
-      "",
-    );
-    expect(screen.getByLabelText("suppliers.createSecretLabel")).toHaveValue(
-      "",
-    );
-    expect(screen.getByRole("checkbox", { name: "Claude" })).toBeChecked();
+    // 上一轮的输入、勾选、密钥都不带走：回到来源选择这一步
     expect(
-      screen.getByRole("checkbox", { name: "Claude Desktop" }),
-    ).toBeChecked();
+      screen.getByText("suppliers.createSourceCustom"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("suppliers.createNameLabel"),
+    ).not.toBeInTheDocument();
   });
 
   it("can reveal the key while typing and hide it again", async () => {
     renderDialog();
     const user = userEvent.setup();
 
+    await openCustomForm(user);
     // 空密钥时不显示切换按钮，有内容才给
     expect(
       screen.queryByRole("button", { name: "apiKeyInput.show" }),
@@ -268,24 +308,9 @@ describe("CreateSupplierDialog", () => {
     expect(mocks.create).not.toHaveBeenCalled();
   });
 
-  it("refuses submitting with no app checked", async () => {
-    renderDialog();
-    const user = userEvent.setup();
-
-    await fillRequiredFields(user);
-    await user.click(screen.getByRole("checkbox", { name: "Claude" }));
-    await user.click(screen.getByRole("checkbox", { name: "Claude Desktop" }));
-    await clickCreate(user);
-
-    expect(
-      screen.getByText("suppliers.createAppsRequired"),
-    ).toBeInTheDocument();
-    expect(mocks.create).not.toHaveBeenCalled();
-  });
-
-  it("creates the supplier, replaces the overview, refreshes apps and closes", async () => {
+  it("creates the supplier with no app checked (creation is independent of access)", async () => {
     mocks.create.mockResolvedValue(created);
-    const { client, invalidateQueries, onClose } = renderDialog();
+    const { onClose } = renderDialog();
     const user = userEvent.setup();
 
     await fillRequiredFields(user);
@@ -296,7 +321,30 @@ describe("CreateSupplierDialog", () => {
         "Acme Gateway",
         "https://api.acme.dev",
         "sk-new-key",
+        [],
+        "anthropic",
+      ),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("creates the supplier, replaces the overview, refreshes apps and closes", async () => {
+    mocks.create.mockResolvedValue(created);
+    const { client, invalidateQueries, onClose } = renderDialog();
+    const user = userEvent.setup();
+
+    await fillRequiredFields(user);
+    await user.click(screen.getByRole("checkbox", { name: "Claude" }));
+    await user.click(screen.getByRole("checkbox", { name: "Claude Desktop" }));
+    await clickCreate(user);
+
+    await waitFor(() =>
+      expect(mocks.create).toHaveBeenCalledWith(
+        "Acme Gateway",
+        "https://api.acme.dev",
+        "sk-new-key",
         ["claude", "claude-desktop"],
+        "anthropic",
       ),
     );
     // 后端返回的总览直接落缓存，不再多拉一次
@@ -359,6 +407,8 @@ describe("CreateSupplierDialog", () => {
     const user = userEvent.setup();
 
     await fillRequiredFields(user);
+    await user.click(screen.getByRole("checkbox", { name: "Claude" }));
+    await user.click(screen.getByRole("checkbox", { name: "Claude Desktop" }));
     await clickCreate(user);
 
     await waitFor(() =>
@@ -436,5 +486,106 @@ describe("CreateSupplierDialog", () => {
       resolveCreate(created);
     });
     await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("filters presets and fills name / address / protocol from the picked one", async () => {
+    renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: /suppliers\.createSourcePreset/ }),
+    );
+    const search = screen.getByLabelText("suppliers.createPresetSearch");
+    await user.type(search, "deepseek");
+    // 结果里只剩匹配项：点进去表单已经带着预设值
+    expect(screen.queryByText("suppliers.createPresetEmpty")).toBeNull();
+    const [firstPreset] = screen.getAllByRole("button", {
+      name: /https?:\/\//,
+    });
+    await user.click(firstPreset);
+
+    expect(screen.getByLabelText("suppliers.createNameLabel")).not.toHaveValue(
+      "",
+    );
+    expect(
+      screen.getByLabelText("suppliers.createBaseUrlLabel"),
+    ).not.toHaveValue("");
+    expect(screen.getByLabelText("suppliers.createProtocolLabel")).toHaveValue(
+      "anthropic",
+    );
+  });
+
+  it("hides the app picker for non-anthropic protocols and creates without apps", async () => {
+    mocks.create.mockResolvedValue(created);
+    const { onClose } = renderDialog();
+    const user = userEvent.setup();
+
+    await fillRequiredFields(user);
+    await user.selectOptions(
+      screen.getByLabelText("suppliers.createProtocolLabel"),
+      "openai_responses",
+    );
+    // 非 anthropic 协议先不接应用
+    expect(
+      screen.queryByRole("checkbox", { name: "Claude" }),
+    ).not.toBeInTheDocument();
+    await clickCreate(user);
+
+    await waitFor(() =>
+      expect(mocks.create).toHaveBeenCalledWith(
+        "Acme Gateway",
+        "https://api.acme.dev",
+        "sk-new-key",
+        [],
+        "openai_responses",
+      ),
+    );
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
+  });
+
+  it("imports a detected local sign-in as a managed supplier", async () => {
+    mocks.authGetStatus.mockImplementation((provider: string) =>
+      Promise.resolve({
+        accounts:
+          provider === "codex_oauth" ? [{ id: "acc-1" }, { id: "acc-2" }] : [],
+      }),
+    );
+    mocks.ensureManaged.mockResolvedValue(created);
+    const { client, onClose } = renderDialog();
+    const user = userEvent.setup();
+
+    await user.click(
+      screen.getByRole("button", { name: /suppliers\.createSourceImport/ }),
+    );
+    // 检测到 Codex 登录态：显示账号数并提供导入
+    expect(
+      await screen.findByText("suppliers.createImportAccounts:2"),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.createImportAction" }),
+    );
+
+    await waitFor(() =>
+      expect(mocks.ensureManaged).toHaveBeenCalledWith("codex_oauth"),
+    );
+    expect(client.getQueryData(suppliersKeys.overview)).toEqual(created);
+    expect(mocks.success).toHaveBeenCalledWith("suppliers.createImportSuccess");
+    await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
+  });
+
+  it("goes back to the source chooser without losing the page", async () => {
+    renderDialog();
+    const user = userEvent.setup();
+
+    await openCustomForm(user);
+    await user.click(
+      screen.getByRole("button", { name: "suppliers.createBack" }),
+    );
+    expect(
+      screen.getByText("suppliers.createSourcePreset"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("suppliers.createNameLabel"),
+    ).not.toBeInTheDocument();
   });
 });

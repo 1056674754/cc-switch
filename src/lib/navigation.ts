@@ -19,7 +19,6 @@ export type AppPage =
 
 export type GlobalPage =
   | "usage"
-  | "auth"
   | "mcp"
   | "skills"
   | "skillsDiscovery"
@@ -58,7 +57,6 @@ const APP_PAGES: AppPage[] = [
 
 const GLOBAL_PAGES: GlobalPage[] = [
   "usage",
-  "auth",
   "mcp",
   "skills",
   "skillsDiscovery",
@@ -74,6 +72,8 @@ export const APP_STORAGE_KEY = "cc-switch-last-app";
 
 /** 旧版视图名 → 新视图（OpenClaw 的三个配置页合成了一个）。 */
 const LEGACY_VIEWS: Record<string, View> = {
+  // 授权中心已并入供应商页
+  auth: "suppliers",
   openclawEnv: "openclawConfig",
   openclawTools: "openclawConfig",
   openclawAgents: "openclawConfig",
