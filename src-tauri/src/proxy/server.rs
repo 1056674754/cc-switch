@@ -117,6 +117,10 @@ impl ProxyServer {
             .log_upstream_key_diagnostics()
             .await;
 
+        // 自适应 429 退避参数：启动时从 proxy_config 表加载（热更新走
+        // update_rate_limit_config_for_app）
+        self.state.provider_router.seed_rate_limit_configs().await;
+
         let addr: SocketAddr =
             format!("{}:{}", self.config.listen_address, self.config.listen_port)
                 .parse()
@@ -495,6 +499,25 @@ impl ProxyServer {
             .provider_router
             .update_app_configs(app_type, config)
             .await;
+    }
+
+    /// 热更新指定 app 的自适应 429 退避参数
+    pub async fn update_rate_limit_config_for_app(
+        &self,
+        app_type: &str,
+        config: super::adaptive_rate_limiter::RateLimitBackoffConfig,
+    ) {
+        self.state
+            .provider_router
+            .update_rate_limit_config(app_type, config)
+            .await;
+    }
+
+    /// 自适应 429 限流状态快照（UI 命令用）
+    pub async fn rate_limit_snapshots(
+        &self,
+    ) -> Vec<super::adaptive_rate_limiter::RateLimitSnapshot> {
+        self.state.provider_router.rate_limit_snapshots().await
     }
 
     /// 重置指定 Provider 的熔断器

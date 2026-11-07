@@ -8,6 +8,7 @@ import type {
   AppProxyConfig,
   ProxyStackWriteError,
   ProxyTakeoverStatus,
+  RateLimitState,
 } from "@/types/proxy";
 import { extractErrorMessage } from "@/utils/errorUtils";
 import { getAppLabel } from "@/config/appConfig";
@@ -18,6 +19,7 @@ export const proxyKeys = {
   globalConfig: ["globalProxyConfig"] as const,
   clientHost: ["proxyClientHost"] as const,
   appConfig: (appType: string) => ["appProxyConfig", appType] as const,
+  rateLimitStates: ["rateLimitStates"] as const,
 };
 
 // ========== 代理服务器状态 Hooks ==========
@@ -329,6 +331,19 @@ export function useSetProxyClientHost() {
     onSettled: () => {
       queryClient.invalidateQueries({ queryKey: proxyKeys.clientHost });
     },
+  });
+}
+
+/**
+ * 自适应 429 限流退避的实时状态。后端读的是内存快照（代理未运行时空列表），
+ * 开销可忽略；429 随时可能发生，所以固定间隔轮询而不是「有状态才轮询」。
+ */
+export function useRateLimitStates(poll = true) {
+  return useQuery({
+    queryKey: proxyKeys.rateLimitStates,
+    queryFn: () => proxyApi.getRateLimitStates(),
+    refetchInterval: poll ? 3000 : false,
+    placeholderData: (previous: RateLimitState[] | undefined) => previous,
   });
 }
 

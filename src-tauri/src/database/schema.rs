@@ -620,6 +620,8 @@ impl Database {
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
             circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60, circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            rate_limit_adaptive_enabled INTEGER NOT NULL DEFAULT 1,
+            rate_limit_floor_secs INTEGER NOT NULL DEFAULT 2, rate_limit_cap_secs INTEGER NOT NULL DEFAULT 60,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
             created_at TEXT NOT NULL DEFAULT (datetime('now')), updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -859,6 +861,21 @@ impl Database {
         // 尝试添加 live_takeover_active 列到 proxy_config 表
         let _ = conn.execute(
             "ALTER TABLE proxy_config ADD COLUMN live_takeover_active INTEGER NOT NULL DEFAULT 0",
+            [],
+        );
+
+        // 自适应 429 限流退避参数（默认开启：floor 2s / cap 60s——Claude 客户端
+        // 对超过 60s 的 retry-after 会放弃重试，上限不能随便调大）
+        let _ = conn.execute(
+            "ALTER TABLE proxy_config ADD COLUMN rate_limit_adaptive_enabled INTEGER NOT NULL DEFAULT 1",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE proxy_config ADD COLUMN rate_limit_floor_secs INTEGER NOT NULL DEFAULT 2",
+            [],
+        );
+        let _ = conn.execute(
+            "ALTER TABLE proxy_config ADD COLUMN rate_limit_cap_secs INTEGER NOT NULL DEFAULT 60",
             [],
         );
 
@@ -1510,6 +1527,8 @@ impl Database {
             circuit_failure_threshold INTEGER NOT NULL DEFAULT 4, circuit_success_threshold INTEGER NOT NULL DEFAULT 2,
             circuit_timeout_seconds INTEGER NOT NULL DEFAULT 60, circuit_error_rate_threshold REAL NOT NULL DEFAULT 0.6,
             circuit_min_requests INTEGER NOT NULL DEFAULT 10,
+            rate_limit_adaptive_enabled INTEGER NOT NULL DEFAULT 1,
+            rate_limit_floor_secs INTEGER NOT NULL DEFAULT 2, rate_limit_cap_secs INTEGER NOT NULL DEFAULT 60,
             default_cost_multiplier TEXT NOT NULL DEFAULT '1',
             pricing_model_source TEXT NOT NULL DEFAULT 'response',
             live_takeover_active INTEGER NOT NULL DEFAULT 0,

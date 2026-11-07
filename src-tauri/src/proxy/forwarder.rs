@@ -4,6 +4,7 @@
 
 use super::hyper_client::{ProxyResponse, MAX_RESPONSE_BODY_BYTES};
 use super::{
+    adaptive_rate_limiter::Admission,
     body_filter::filter_private_params_with_whitelist,
     content_encoding::{decompress_body_with_limit, get_content_encoding},
     error::*,
@@ -636,6 +637,11 @@ impl RequestForwarder {
         // HalfOpen 探测仍同步等待，保证 permit 与熔断状态及时释放。
         self.record_success_result(&provider.id, app_type_str, used_half_open_permit)
             .await;
+        // 成功也喂给自适应退避控制器：探测成功 → 退出冷却、档位减半；
+        // 非探测成功 → 档位温和衰减。
+        self.router
+            .note_provider_success(app_type_str, &provider.id)
+            .await;
 
         {
             let mut current_providers = self.current_providers.write().await;
@@ -690,6 +696,14 @@ impl RequestForwarder {
                 Some(crate::proxy::provider_router::classify_failure(error)),
             )
             .await;
+        // 429 已在 forward() 里由 note_provider_429 记账（并清探测标记）；
+        // 其余可重试失败若发生在探测请求上，需要清探测标记并重新冷却，
+        // 否则 probe_in_flight 永久卡死、端点无法恢复。
+        if !matches!(error, ProxyError::RateLimited { .. }) {
+            self.router
+                .note_provider_probe_failure(app_type_str, &provider.id)
+                .await;
+        }
         self.status.write().await.last_error = Some(last_error);
     }
 
@@ -704,6 +718,11 @@ impl RequestForwarder {
         if self.routing_state_enabled() {
             self.router
                 .release_permit_neutral(&provider.id, app_type_str, used_half_open_permit)
+                .await;
+            // 中性失败（客户端请求自身的问题：400/422/断连等）意味着上游活着且
+            // 没在限流——若是探测请求，按成功对待：退出冷却、档位衰减。
+            self.router
+                .note_provider_success(app_type_str, &provider.id)
                 .await;
             self.record_failed_request(error.to_string()).await;
         }
@@ -808,6 +827,9 @@ impl RequestForwarder {
         let mut last_error = None;
         let mut last_provider = None;
         let mut attempted_providers = 0usize;
+        // 所有供应商都被 429 冷却本地拒绝时的最短重试间隔（取各端点最小值，
+        // 客户端按它重试时至少有一个端点可能已恢复）。
+        let mut rate_limited_wait: Option<u64> = None;
 
         // 单 Provider 场景下跳过熔断器检查（故障转移关闭时）；Stack 模型的请求不碰熔断器。
         let bypass_circuit_breaker = providers.len() == 1 || !self.routing_state_enabled();
@@ -846,6 +868,30 @@ impl RequestForwarder {
 
             if !allowed {
                 continue;
+            }
+
+            // 429 自适应冷却：冷却中的端点本地快速失败，不打上游、不记熔断/健康度
+            // ——上游根本没被请求，失败统计不该变化。与熔断器同一 bypass 条件
+            // （单 provider / Stack 模式）：单供应商链没有备用路由，本地拒绝只是
+            // 原地失败，交给冷却到期后的探测放行；真实 429 的记账不受影响。
+            if !bypass_circuit_breaker {
+                if let Admission::Deny { retry_after_secs } = self
+                    .router
+                    .acquire_provider_request(app_type_str, &provider.id)
+                    .await
+                {
+                    log::info!(
+                        "[{app_type_str}] [RL-001] 供应商 {} 429 冷却中，本地快速失败（{retry_after_secs}s 后重试）",
+                        provider.id
+                    );
+                    if rate_limited_wait
+                        .map(|wait| retry_after_secs < wait)
+                        .unwrap_or(true)
+                    {
+                        rate_limited_wait = Some(retry_after_secs);
+                    }
+                    continue;
+                }
             }
 
             // PRE-SEND 优化器：每个 provider 独立决定是否优化
@@ -1337,6 +1383,31 @@ impl RequestForwarder {
         }
 
         if attempted_providers == 0 {
+            // 全部供应商都在 429 冷却中（而非熔断）：不打上游，本地合成 429
+            // 交给客户端，间隔是算出来的最短等待——这正是「别再疯狂打 429」的
+            // 最后一环：客户端的重试时刻由代理统一调度。
+            if let Some(wait) = rate_limited_wait {
+                self.record_failed_request(format!("所有供应商 429 冷却中（{wait}s 后重试）"))
+                    .await;
+                return Err(ForwardError {
+                    error: ProxyError::RateLimited {
+                        retry_after_secs: wait,
+                        body: Some(
+                            serde_json::json!({
+                                "type": "error",
+                                "error": {
+                                    "type": "rate_limit_error",
+                                    "message": format!(
+                                        "cc-switch: all providers are rate-limit cooling down; retry after {wait}s"
+                                    ),
+                                },
+                            })
+                            .to_string(),
+                        ),
+                    },
+                    provider: None,
+                });
+            }
             // providers 列表非空，但全部被熔断器拒绝（典型：HalfOpen 探测名额被占用）
             self.record_failed_request("所有供应商暂时不可用（熔断器限制）".to_string())
                 .await;
@@ -2894,6 +2965,18 @@ impl RequestForwarder {
             Ok((response, resolved_claude_api_format, outbound_model))
         } else {
             let status_code = status.as_u16();
+            // 上游 429：此刻响应头还在（body 消费后就没了），先把 Retry-After
+            // 抓下来喂给自适应退避控制器——此前这个头直接被丢弃，客户端只能
+            // 拿到写死的 10s。
+            let retry_after_hint = if status_code == 429 {
+                response
+                    .headers()
+                    .get(http::header::RETRY_AFTER)
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(super::adaptive_rate_limiter::parse_retry_after_header)
+            } else {
+                None
+            };
             // 错误响应同样可能被上游压缩（content-encoding）。reqwest 未启用任何
             // 自动解压 feature，这里拿到的是原始字节；不解压的话，压缩过的错误体会
             // 在 from_utf8 处变成非 UTF-8 而被丢弃，隐藏掉上游的限流/鉴权等详情。
@@ -2911,6 +2994,25 @@ impl RequestForwarder {
                 None => raw.to_vec(),
             };
             let body_text = String::from_utf8(decoded).ok();
+
+            if status_code == 429 {
+                let client_wait = self
+                    .router
+                    .note_provider_429(app_type.as_str(), &provider.id, retry_after_hint)
+                    .await;
+                log::info!(
+                    "[{}] [RL-002] 上游 429（provider={}），自适应退避 {client_wait}s{}",
+                    app_type.as_str(),
+                    provider.id,
+                    retry_after_hint
+                        .map(|d| format!("（上游建议 {}s）", d.as_secs()))
+                        .unwrap_or_default()
+                );
+                return Err(ProxyError::RateLimited {
+                    retry_after_secs: client_wait,
+                    body: body_text,
+                });
+            }
 
             Err(ProxyError::UpstreamError {
                 status: status_code,
@@ -3400,6 +3502,9 @@ impl RequestForwarder {
                 400 | 405 | 406 | 413 | 414 | 415 | 422 | 501 => ErrorCategory::NonRetryable,
                 _ => ErrorCategory::Retryable,
             },
+            // 上游 429（自适应退避）：换下一家仍可能持有不同 key/配额，保持
+            // 与 UpstreamError{429} 相同的 failover 语义；退避间隔由控制器算。
+            ProxyError::RateLimited { .. } => ErrorCategory::Retryable,
             // Provider 级配置/转换问题：换一个 Provider 可能就能成功
             ProxyError::ConfigError(_) => ErrorCategory::Retryable,
             ProxyError::TransformError(_) => ErrorCategory::Retryable,
@@ -3417,6 +3522,7 @@ impl RequestForwarder {
 fn extract_error_message(error: &ProxyError) -> Option<String> {
     match error {
         ProxyError::UpstreamError { body, .. } => body.clone(),
+        ProxyError::RateLimited { body, .. } => body.clone(),
         _ => Some(error.to_string()),
     }
 }

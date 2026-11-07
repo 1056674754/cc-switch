@@ -6,6 +6,9 @@ use crate::app_config::AppType;
 use crate::database::{Database, UpstreamBinding};
 use crate::error::AppError;
 use crate::provider::Provider;
+use crate::proxy::adaptive_rate_limiter::{
+    AdaptiveRateLimiter, Admission, RateLimitBackoffConfig, RateLimitSnapshot,
+};
 use crate::proxy::circuit_breaker::{AllowResult, CircuitBreaker, CircuitBreakerConfig};
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
@@ -52,6 +55,8 @@ pub fn classify_failure(error: &crate::proxy::error::ProxyError) -> FailureKind 
             500..=599 => FailureKind::ServerError,
             _ => FailureKind::Request,
         },
+        // 上游 429（自适应退避路径）：与 UpstreamError{429} 同类，只影响这把 key。
+        ProxyError::RateLimited { .. } => FailureKind::Credential,
         _ => FailureKind::Request,
     }
 }
@@ -107,6 +112,8 @@ pub struct ProviderRouter {
     db: Arc<Database>,
     /// 熔断器管理器 - key 见 [`ProviderRouter::circuit_key_for`]
     circuit_breakers: Arc<RwLock<HashMap<String, Arc<CircuitBreaker>>>>,
+    /// 自适应 429 限流退避控制器（与熔断器共享 key 体系）
+    rate_limiter: Arc<AdaptiveRateLimiter>,
     /// 熔断键 → 归属的 app_types。网关级键会被多个 app 共用，
     /// `update_app_configs` 需要据此判断某个 key 是否与目标 app 相关。
     circuit_key_apps: Arc<RwLock<HashMap<String, HashSet<String>>>>,
@@ -122,10 +129,81 @@ impl ProviderRouter {
         Self {
             db,
             circuit_breakers: Arc::new(RwLock::new(HashMap::new())),
+            rate_limiter: Arc::new(AdaptiveRateLimiter::new()),
             circuit_key_apps: Arc::new(RwLock::new(HashMap::new())),
             upstream_keys: Arc::new(RwLock::new(HashMap::new())),
             circuit_mode: CircuitKeyMode::from_env(),
         }
+    }
+
+    /// 记录一次上游 429，升级退避档位。返回建议客户端等待的秒数。
+    pub async fn note_provider_429(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+        upstream_retry_after: Option<Duration>,
+    ) -> u64 {
+        let key = self.circuit_key_for(app_type, provider_id).await;
+        self.rate_limiter
+            .note_429(&key, app_type, provider_id, upstream_retry_after)
+            .await
+    }
+
+    /// 请求放行判定：冷却中的端点本地拒绝（不打上游）。
+    pub async fn acquire_provider_request(&self, app_type: &str, provider_id: &str) -> Admission {
+        let key = self.circuit_key_for(app_type, provider_id).await;
+        self.rate_limiter.acquire(&key, app_type, provider_id).await
+    }
+
+    /// 记录一次上游成功（探测成功退出冷却，非探测成功温和衰减档位）。
+    pub async fn note_provider_success(&self, app_type: &str, provider_id: &str) {
+        let key = self.circuit_key_for(app_type, provider_id).await;
+        self.rate_limiter.note_success(&key, app_type).await;
+    }
+
+    /// 探测请求以非 429 方式失败：清探测标记、按半档重新冷却。
+    pub async fn note_provider_probe_failure(&self, app_type: &str, provider_id: &str) {
+        let key = self.circuit_key_for(app_type, provider_id).await;
+        self.rate_limiter.note_probe_failure(&key, app_type).await;
+    }
+
+    /// 该供应商所在端点的剩余冷却时间；不在冷却期为 `None`。
+    pub async fn provider_cooling_remaining(
+        &self,
+        app_type: &str,
+        provider_id: &str,
+    ) -> Option<Duration> {
+        let key = self.circuit_key_for(app_type, provider_id).await;
+        self.rate_limiter.cooldown_remaining(&key).await
+    }
+
+    /// 热更新某 app 的退避参数。
+    pub async fn update_rate_limit_config(&self, app_type: &str, config: RateLimitBackoffConfig) {
+        self.rate_limiter.update_config(app_type, config).await;
+    }
+
+    /// 启动时从 proxy_config 表加载各 app 的退避参数（与熔断器配置同源）。
+    /// 表里没有的 app 用控制器默认值（enabled/floor 2s/cap 60s），恰与库默认一致。
+    pub async fn seed_rate_limit_configs(&self) {
+        for app_type in ["claude", "codex", "gemini", "grokbuild"] {
+            let Ok(config) = self.db.get_proxy_config_for_app(app_type).await else {
+                continue;
+            };
+            self.update_rate_limit_config(
+                app_type,
+                RateLimitBackoffConfig {
+                    enabled: config.rate_limit_adaptive_enabled,
+                    floor_secs: config.rate_limit_floor_secs as f64,
+                    cap_secs: config.rate_limit_cap_secs as f64,
+                },
+            )
+            .await;
+        }
+    }
+
+    /// 全量限流状态快照（UI 命令用）。
+    pub async fn rate_limit_snapshots(&self) -> Vec<RateLimitSnapshot> {
+        self.rate_limiter.snapshot().await
     }
 
     /// 当前的熔断键模式（供启动日志/诊断使用）
@@ -414,6 +492,38 @@ impl ProviderRouter {
                 } else {
                     result.push(current);
                 }
+            }
+        }
+
+        // 429 自适应冷却中的供应商：有别的选择时跳过（与熔断同级，别把请求
+        // 砸在正在冷却的上游上）；全军皆冷却时保留、按剩余冷却升序——先试
+        // 最可能恢复的那家，退避间隔也由它给出最短值。单供应商链（含故障
+        // 转移关闭、Codex Official 指定账号）不做此过滤：交给转发层的
+        // acquire 本地拒绝，客户端仍能拿到精确的 retry-after。
+        if result.len() > 1 {
+            let mut remaining = Vec::with_capacity(result.len());
+            let mut any_active = false;
+            for provider in &result {
+                let left = self
+                    .provider_cooling_remaining(app_type, &provider.id)
+                    .await;
+                any_active |= left.is_none();
+                remaining.push(left);
+            }
+            if any_active {
+                let kept: Vec<_> = result
+                    .into_iter()
+                    .zip(remaining)
+                    .filter(|(_, left)| left.is_none())
+                    .map(|(provider, _)| provider)
+                    .collect();
+                result = kept;
+            } else {
+                let mut indexed: Vec<_> = result.into_iter().zip(remaining).collect();
+                indexed.sort_by_key(|(_, left)| {
+                    left.map(|d| d.as_millis() as u64).unwrap_or(u64::MAX)
+                });
+                result = indexed.into_iter().map(|(provider, _)| provider).collect();
             }
         }
 

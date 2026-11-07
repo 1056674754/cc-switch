@@ -30,6 +30,9 @@ pub fn map_proxy_error_to_status(error: &ProxyError) -> u16 {
         // 上游错误：使用实际状态码
         ProxyError::UpstreamError { status, .. } => *status,
 
+        // 上游 429（自适应退避）：固定 429 Too Many Requests
+        ProxyError::RateLimited { .. } => 429,
+
         // 超时错误：504 Gateway Timeout
         ProxyError::Timeout(_) | ProxyError::StreamIdleTimeout(_) => 504,
 
@@ -83,6 +86,17 @@ pub fn get_error_message(error: &ProxyError) -> String {
                 .filter(|s| !s.is_empty())
                 .unwrap_or("上游未返回错误内容");
             format!("上游错误 ({status}): {body}")
+        }
+        ProxyError::RateLimited {
+            retry_after_secs,
+            body,
+        } => {
+            let body = body
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .unwrap_or("上游未返回错误内容");
+            format!("上游限流 (429)，建议 {retry_after_secs}s 后重试: {body}")
         }
         ProxyError::Timeout(msg) => format!("请求超时: {msg}"),
         ProxyError::ForwardFailed(msg) => format!("转发失败: {msg}"),

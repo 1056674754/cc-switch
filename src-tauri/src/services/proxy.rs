@@ -639,6 +639,34 @@ impl ProxyService {
         Ok(())
     }
 
+    /// 热更新指定应用的自适应 429 退避参数
+    pub async fn update_rate_limit_config_for_app(
+        &self,
+        app_type: &str,
+        config: crate::proxy::adaptive_rate_limiter::RateLimitBackoffConfig,
+    ) -> Result<(), String> {
+        if let Some(server) = self.server.read().await.as_ref() {
+            server
+                .update_rate_limit_config_for_app(app_type, config)
+                .await;
+            log::info!("已热更新 {app_type} 运行中的自适应退避参数");
+        } else {
+            log::debug!("{app_type} 自适应退避参数将在下次代理启动时生效");
+        }
+        Ok(())
+    }
+
+    /// 自适应 429 限流状态快照（代理未运行时空列表）
+    pub async fn rate_limit_snapshots(
+        &self,
+    ) -> Vec<crate::proxy::adaptive_rate_limiter::RateLimitSnapshot> {
+        if let Some(server) = self.server.read().await.as_ref() {
+            server.rate_limit_snapshots().await
+        } else {
+            Vec::new()
+        }
+    }
+
     /// 重置指定 Provider 的熔断器
     ///
     /// 如果代理服务器正在运行，立即重置内存中的熔断器状态

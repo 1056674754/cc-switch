@@ -53,6 +53,7 @@ import { KimiAccountLogin } from "@/components/providers/KimiAccountLogin";
 import { useDshAccountStatus } from "@/components/providers/DshAccount";
 import { CreateSupplierDialog } from "./CreateSupplierDialog";
 import { protocolLabel } from "./protocolLabel";
+import { SupplierRateLimitBadge } from "./SupplierRateLimitBadge";
 import { useSupplierAccountSwitch } from "./useSupplierAccountSwitch";
 
 /**
@@ -407,6 +408,10 @@ export function SupplierPage() {
           const appTypes = collectAppTypes(group);
           const showProtocolBadge =
             protocols.length === 1 && protocols[0] !== "unknown";
+          // 组内全部接入的 providerId：429 限流徽章按它匹配端点状态
+          const groupProviderIds = group.suppliers.flatMap((supplier) =>
+            supplier.bindings.map((binding) => binding.providerId),
+          );
 
           return (
             <li
@@ -440,6 +445,7 @@ export function SupplierPage() {
                           {t("suppliers.disabledBadge")}
                         </Badge>
                       )}
+                      <SupplierRateLimitBadge providerIds={groupProviderIds} />
                       {primary.baseUrl ? (
                         <code
                           className="min-w-0 font-mono text-caption text-fg-2 [overflow-wrap:anywhere]"

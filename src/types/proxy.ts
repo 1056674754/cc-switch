@@ -252,4 +252,29 @@ export interface AppProxyConfig {
   circuitTimeoutSeconds: number;
   circuitErrorRateThreshold: number;
   circuitMinRequests: number;
+  /** 自适应 429 限流退避开关（默认开启） */
+  rateLimitAdaptiveEnabled: boolean;
+  /** 退避档位下限（秒）：首次 429 的最短冷却 */
+  rateLimitFloorSecs: number;
+  /** 退避档位上限（秒）：Claude 客户端对 >60s 的 retry-after 会放弃重试 */
+  rateLimitCapSecs: number;
+}
+
+/** 自适应 429 限流退避的实时状态（get_rate_limit_states 返回） */
+export interface RateLimitOwner {
+  appType: string;
+  providerId: string;
+}
+
+export interface RateLimitState {
+  /** 端点 key（与熔断键同格式） */
+  key: string;
+  /** 已知使用该端点的 (appType, providerId) */
+  owners: RateLimitOwner[];
+  /** 当前退避档位（秒） */
+  levelSecs: number;
+  /** 距冷却结束的剩余毫秒；不在冷却期为 0 */
+  cooldownRemainingMs: number;
+  /** 近 60s 的 429 次数 */
+  recent429Count: number;
 }

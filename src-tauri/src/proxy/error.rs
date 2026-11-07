@@ -48,6 +48,17 @@ pub enum ProxyError {
     #[error("上游错误 (状态码 {status}): {body:?}")]
     UpstreamError { status: u16, body: Option<String> },
 
+    /// 上游 429（限流/额度）。与 [`ProxyError::UpstreamError`] 的区别：
+    /// 转发层此时已把这次 429 喂给自适应退避控制器
+    /// （[`crate::proxy::adaptive_rate_limiter::AdaptiveRateLimiter`]），
+    /// `retry_after_secs` 是算出来的客户端重试间隔——上游 `Retry-After` 头、
+    /// 近 60s 的 429 密度、当前退避档位共同决定，取代旧的固定 10 秒。
+    #[error("上游限流 (429)，建议 {retry_after_secs}s 后重试: {body:?}")]
+    RateLimited {
+        retry_after_secs: u64,
+        body: Option<String>,
+    },
+
     #[error("超过最大重试次数")]
     MaxRetriesExceeded,
 
@@ -115,42 +126,29 @@ impl IntoResponse for ProxyError {
                 })),
             )
                 .into_response();
-            apply_busy_retry_headers(&mut response);
+            apply_busy_retry_headers(&mut response, None);
             return response;
         }
 
+        let mut retry_after_override: Option<u64> = None;
         let (status, body) = match &self {
             ProxyError::UpstreamError {
                 status: upstream_status,
                 body: upstream_body,
+            } => (
+                StatusCode::from_u16(*upstream_status).unwrap_or(StatusCode::BAD_GATEWAY),
+                upstream_error_body(upstream_body, *upstream_status),
+            ),
+            ProxyError::RateLimited {
+                retry_after_secs,
+                body: upstream_body,
             } => {
-                let http_status =
-                    StatusCode::from_u16(*upstream_status).unwrap_or(StatusCode::BAD_GATEWAY);
-
-                // 尝试解析上游响应体为 JSON，如果失败则包装为字符串
-                let error_body = if let Some(body_str) = upstream_body {
-                    if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
-                        // 上游返回的是 JSON，直接透传
-                        json_body
-                    } else {
-                        // 上游返回的不是 JSON，包装为错误消息
-                        json!({
-                            "error": {
-                                "message": body_str,
-                                "type": "upstream_error",
-                            }
-                        })
-                    }
-                } else {
-                    json!({
-                        "error": {
-                            "message": format!("Upstream error (status {})", upstream_status),
-                            "type": "upstream_error",
-                        }
-                    })
-                };
-
-                (http_status, error_body)
+                // 上游 429 走自适应退避：透传上游错误体，retry-after 用算出的值。
+                retry_after_override = Some(*retry_after_secs);
+                (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    upstream_error_body(upstream_body, 429),
+                )
             }
             _ => {
                 let (http_status, message) = match &self {
@@ -206,7 +204,9 @@ impl IntoResponse for ProxyError {
                     ProxyError::ResponseBodyTooLarge(_) => {
                         (StatusCode::BAD_GATEWAY, self.to_string())
                     }
-                    ProxyError::UpstreamError { .. } => unreachable!(),
+                    ProxyError::UpstreamError { .. } | ProxyError::RateLimited { .. } => {
+                        unreachable!()
+                    }
                 };
 
                 let error_body = json!({
@@ -222,28 +222,58 @@ impl IntoResponse for ProxyError {
 
         let mut response = (status, Json(body)).into_response();
         // 上游自己回的 429（限流/额度）原来原样透传、没有 retry-after，客户端就会
-        // 用默认的 500ms 起指数重试，几秒一次把上游锤得更狠。统一补上退避头。
+        // 用默认的 500ms 起指数重试，几秒一次把上游锤得更狠。统一补上退避头；
+        // 走自适应退避控制器（RateLimited）时用算出的间隔，其余路径保持旧固定值。
         if status == StatusCode::TOO_MANY_REQUESTS {
-            apply_busy_retry_headers(&mut response);
+            apply_busy_retry_headers(&mut response, retry_after_override);
         }
         response
     }
+}
+
+/// 把上游错误体规范化成响应 JSON：JSON 透传，非 JSON 包一层，空体给兜底文案。
+fn upstream_error_body(upstream_body: &Option<String>, status: u16) -> serde_json::Value {
+    if let Some(body_str) = upstream_body {
+        if let Ok(json_body) = serde_json::from_str::<serde_json::Value>(body_str) {
+            // 上游返回的是 JSON，直接透传
+            return json_body;
+        }
+        // 上游返回的不是 JSON，包装为错误消息
+        return json!({
+            "error": {
+                "message": body_str,
+                "type": "upstream_error",
+            }
+        });
+    }
+    json!({
+        "error": {
+            "message": format!("Upstream error (status {})", status),
+            "type": "upstream_error",
+        }
+    })
 }
 
 /// 给 429 补上客户端认得的退避头：
 /// - `retry-after`：下一次重试前至少等多久（秒，也接受 HTTP-date）
 /// - `x-should-retry: true`：强制按可重试处理
 ///
+/// `retry_after_secs` 来自自适应退避控制器（`RateLimited` 携带）；没有上下文的
+/// 路径（如 2xx 错误信封改写）保持旧的固定值兜底。
+///
 /// 注意别把 retry-after 设太大：Claude 客户端对 429/529 有一条保护，等待时间
 /// 超过它的阈值（60 秒）就把响应标成 x-cc-retry-after-too-long 并设
-/// x-should-retry: false，直接放弃重试。
-const BUSY_RETRY_AFTER_SECS: &str = "10";
+/// x-should-retry: false，直接放弃重试。自适应控制器的档位上限默认就是 60，
+/// 配置层保证这个约束，这里不再二次钳制。
+const BUSY_RETRY_AFTER_SECS: u64 = 10;
 
-fn apply_busy_retry_headers(response: &mut Response) {
-    response.headers_mut().insert(
-        axum::http::header::RETRY_AFTER,
-        axum::http::HeaderValue::from_static(BUSY_RETRY_AFTER_SECS),
-    );
+pub(crate) fn apply_busy_retry_headers(response: &mut Response, retry_after_secs: Option<u64>) {
+    let secs = retry_after_secs.unwrap_or(BUSY_RETRY_AFTER_SECS);
+    if let Ok(value) = axum::http::HeaderValue::from_str(&secs.to_string()) {
+        response
+            .headers_mut()
+            .insert(axum::http::header::RETRY_AFTER, value);
+    }
     response.headers_mut().insert(
         axum::http::HeaderName::from_static("x-should-retry"),
         axum::http::HeaderValue::from_static("true"),

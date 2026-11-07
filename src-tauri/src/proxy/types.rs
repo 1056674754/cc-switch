@@ -186,6 +186,23 @@ pub struct AppProxyConfig {
     pub circuit_error_rate_threshold: f64,
     /// 计算错误率的最小请求数
     pub circuit_min_requests: u32,
+    /// 自适应 429 限流退避开关（默认开启）
+    #[serde(default = "default_true")]
+    pub rate_limit_adaptive_enabled: bool,
+    /// 退避档位下限（秒）：首次 429 的最短冷却
+    #[serde(default = "default_rate_limit_floor_secs")]
+    pub rate_limit_floor_secs: u32,
+    /// 退避档位上限（秒）：Claude 客户端对 >60s 的 retry-after 会放弃重试
+    #[serde(default = "default_rate_limit_cap_secs")]
+    pub rate_limit_cap_secs: u32,
+}
+
+fn default_rate_limit_floor_secs() -> u32 {
+    2
+}
+
+fn default_rate_limit_cap_secs() -> u32 {
+    60
 }
 
 /// 整流器配置

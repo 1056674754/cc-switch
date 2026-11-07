@@ -2551,7 +2551,7 @@ fn build_codex_proxy_error_response(
         ProxyError::Internal(format!("Failed to serialize proxy error: {e}"))
     })?;
 
-    axum::response::Response::builder()
+    let mut response = axum::response::Response::builder()
         .status(status)
         .header(
             axum::http::header::CONTENT_TYPE,
@@ -2561,7 +2561,19 @@ fn build_codex_proxy_error_response(
         .map_err(|e| {
             log::error!("[Codex] 构建代理错误响应失败: {e}");
             ProxyError::Internal(format!("Failed to build proxy error response: {e}"))
-        })
+        })?;
+    // 上游 429（自适应退避）也要带 retry-after：此前 Codex 路径完全没有退避头，
+    // 客户端按默认指数重试，会密集敲打冷却中的上游。
+    if status == axum::http::StatusCode::TOO_MANY_REQUESTS {
+        let retry_after_secs = match error {
+            ProxyError::RateLimited {
+                retry_after_secs, ..
+            } => Some(*retry_after_secs),
+            _ => None,
+        };
+        super::error::apply_busy_retry_headers(&mut response, retry_after_secs);
+    }
+    Ok(response)
 }
 
 /// Codex recognizes context-budget failures in `response.failed` SSE events.
@@ -2616,6 +2628,17 @@ fn codex_proxy_error_json(
             (
                 transform_codex_chat::chat_error_to_response_error(parsed_body.as_ref()),
                 Some(*status),
+            )
+        }
+        // 上游 429（自适应退避）：与 UpstreamError 同样透传上游错误体，
+        // upstream_status 固定 429。
+        ProxyError::RateLimited { body, .. } => {
+            let parsed_body = body
+                .as_deref()
+                .map(|body| serde_json::from_str::<Value>(body).unwrap_or_else(|_| json!(body)));
+            (
+                transform_codex_chat::chat_error_to_response_error(parsed_body.as_ref()),
+                Some(429),
             )
         }
         _ => (
@@ -2733,6 +2756,7 @@ fn codex_proxy_error_code(error: &ProxyError) -> &'static str {
         ProxyError::InvalidRequest(_) => "cc_switch_invalid_request",
         ProxyError::AuthError(_) => "cc_switch_auth_error",
         ProxyError::UpstreamError { .. } => "cc_switch_upstream_error",
+        ProxyError::RateLimited { .. } => "cc_switch_rate_limited",
         ProxyError::DatabaseError(_) => "cc_switch_database_error",
         ProxyError::Internal(_) => "cc_switch_internal_error",
         ProxyError::AlreadyRunning

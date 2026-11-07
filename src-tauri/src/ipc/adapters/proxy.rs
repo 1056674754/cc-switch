@@ -1,5 +1,5 @@
 // 由 scripts/gen_command_adapters.py 生成，请勿手改。
-// 源文件：src-tauri/src/commands/proxy.rs（共 36 条命令）
+// 源文件：src-tauri/src/commands/proxy.rs（共 37 条命令）
 
 use super::*;
 #[allow(non_snake_case)]
@@ -283,6 +283,19 @@ pub(crate) async fn __ipc_update_proxy_config_for_app(
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_config: AppProxyConfig = __args.required::<AppProxyConfig>("config")?;
     let __result = update_proxy_config_for_app(__p_state, __p_config).await;
+    match __result {
+        Ok(value) => crate::ipc::ok(value),
+        Err(error) => Err(error),
+    }
+}
+
+#[allow(non_snake_case)]
+pub(crate) async fn __ipc_get_rate_limit_states(
+    __app: &tauri::AppHandle,
+    __args: &mut crate::ipc::Args,
+) -> crate::ipc::Outcome {
+    let __p_state = __args.state::<AppState>(__app)?;
+    let __result = get_rate_limit_states(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

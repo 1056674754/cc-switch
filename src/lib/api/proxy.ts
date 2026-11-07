@@ -11,6 +11,7 @@ import type {
   CodexDaemonRestartOutcome,
   AppModeView,
   StartupAttachFailure,
+  RateLimitState,
 } from "@/types/proxy";
 
 export const proxyApi = {
@@ -154,6 +155,11 @@ export const proxyApi = {
   // 更新指定应用的代理配置
   async updateProxyConfigForApp(config: AppProxyConfig): Promise<void> {
     return invoke("update_proxy_config_for_app", { config });
+  },
+
+  // 自适应 429 限流退避的实时状态（代理未运行时空列表）
+  async getRateLimitStates(): Promise<RateLimitState[]> {
+    return invoke("get_rate_limit_states");
   },
 
   // ========== 计费默认配置 API ==========

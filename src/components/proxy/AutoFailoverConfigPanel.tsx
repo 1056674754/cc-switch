@@ -3,8 +3,9 @@ import { useTranslation } from "react-i18next";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Switch } from "@/components/ui/switch";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Save, Loader2, Info } from "lucide-react";
+import { Save, Loader2, Info, TimerReset } from "lucide-react";
 import { toast } from "@/lib/toast";
 import { useAppProxyConfig, useUpdateAppProxyConfig } from "@/lib/query/proxy";
 
@@ -33,6 +34,9 @@ export function AutoFailoverConfigPanel({
     circuitTimeoutSeconds: "60",
     circuitErrorRateThreshold: "50", // 存储百分比值
     circuitMinRequests: "10",
+    rateLimitAdaptiveEnabled: true,
+    rateLimitFloorSecs: "2",
+    rateLimitCapSecs: "60",
   });
 
   useEffect(() => {
@@ -50,6 +54,9 @@ export function AutoFailoverConfigPanel({
           Math.round(config.circuitErrorRateThreshold * 100),
         ),
         circuitMinRequests: String(config.circuitMinRequests),
+        rateLimitAdaptiveEnabled: config.rateLimitAdaptiveEnabled,
+        rateLimitFloorSecs: String(config.rateLimitFloorSecs),
+        rateLimitCapSecs: String(config.rateLimitCapSecs),
       });
     }
   }, [config]);
@@ -75,6 +82,8 @@ export function AutoFailoverConfigPanel({
       circuitTimeoutSeconds: { min: 0, max: 300 },
       circuitErrorRateThreshold: { min: 0, max: 100 },
       circuitMinRequests: { min: 5, max: 100 },
+      rateLimitFloorSecs: { min: 1, max: 30 },
+      rateLimitCapSecs: { min: 10, max: 300 },
     };
 
     // 解析原始值
@@ -88,6 +97,8 @@ export function AutoFailoverConfigPanel({
       circuitTimeoutSeconds: parseNum(formData.circuitTimeoutSeconds),
       circuitErrorRateThreshold: parseNum(formData.circuitErrorRateThreshold),
       circuitMinRequests: parseNum(formData.circuitMinRequests),
+      rateLimitFloorSecs: parseNum(formData.rateLimitFloorSecs),
+      rateLimitCapSecs: parseNum(formData.rateLimitCapSecs),
     };
 
     // 校验是否超出范围（NaN 也视为无效）
@@ -147,6 +158,28 @@ export function AutoFailoverConfigPanel({
       ranges.circuitMinRequests,
       t("proxy.autoFailover.minRequests", "最小请求数"),
     );
+    checkRange(
+      raw.rateLimitFloorSecs,
+      ranges.rateLimitFloorSecs,
+      t("proxy.autoFailover.rateLimitFloor", "退避下限"),
+    );
+    checkRange(
+      raw.rateLimitCapSecs,
+      ranges.rateLimitCapSecs,
+      t("proxy.autoFailover.rateLimitCap", "退避上限"),
+    );
+    if (
+      !isNaN(raw.rateLimitFloorSecs) &&
+      !isNaN(raw.rateLimitCapSecs) &&
+      raw.rateLimitFloorSecs >= raw.rateLimitCapSecs
+    ) {
+      errors.push(
+        t(
+          "proxy.autoFailover.rateLimitFloorBelowCap",
+          "退避下限必须小于退避上限",
+        ),
+      );
+    }
 
     if (errors.length > 0) {
       toast.error(
@@ -172,6 +205,9 @@ export function AutoFailoverConfigPanel({
         circuitTimeoutSeconds: raw.circuitTimeoutSeconds,
         circuitErrorRateThreshold: raw.circuitErrorRateThreshold / 100,
         circuitMinRequests: raw.circuitMinRequests,
+        rateLimitAdaptiveEnabled: formData.rateLimitAdaptiveEnabled,
+        rateLimitFloorSecs: raw.rateLimitFloorSecs,
+        rateLimitCapSecs: raw.rateLimitCapSecs,
       });
       toast.success(
         t("proxy.autoFailover.configSaved", "自动故障转移配置已保存"),
@@ -199,6 +235,9 @@ export function AutoFailoverConfigPanel({
           Math.round(config.circuitErrorRateThreshold * 100),
         ),
         circuitMinRequests: String(config.circuitMinRequests),
+        rateLimitAdaptiveEnabled: config.rateLimitAdaptiveEnabled,
+        rateLimitFloorSecs: String(config.rateLimitFloorSecs),
+        rateLimitCapSecs: String(config.rateLimitCapSecs),
       });
     }
   };
@@ -492,6 +531,88 @@ export function AutoFailoverConfigPanel({
               </p>
             </div>
           </div>
+        </div>
+
+        {/* 429 自适应退避 */}
+        <div className="space-y-4 rounded-lg border border-white/10 bg-subtle p-4">
+          <div className="flex items-center justify-between gap-4">
+            <div className="space-y-1">
+              <h4 className="flex items-center gap-2 text-sm font-semibold">
+                <TimerReset className="h-4 w-4" />
+                {t("proxy.autoFailover.rateLimitSettings", "429 自适应退避")}
+              </h4>
+              <p className="text-xs text-fg-2">
+                {t(
+                  "proxy.autoFailover.rateLimitInfo",
+                  "上游 429 时按限流密度自动拉长冷却，并把精确的重试间隔通过 retry-after 头告诉客户端；冷却期内的请求本地秒拒、不再打上游，多个并发任务的重试时刻自动错开。",
+                )}
+              </p>
+            </div>
+            <Switch
+              checked={formData.rateLimitAdaptiveEnabled}
+              onCheckedChange={(value) =>
+                setFormData({ ...formData, rateLimitAdaptiveEnabled: value })
+              }
+              disabled={isDisabled}
+              aria-label={t(
+                "proxy.autoFailover.rateLimitSettings",
+                "429 自适应退避",
+              )}
+            />
+          </div>
+
+          {formData.rateLimitAdaptiveEnabled && (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="space-y-2">
+                <Label htmlFor={`rateLimitFloor-${appType}`}>
+                  {t("proxy.autoFailover.rateLimitFloor", "退避下限（秒）")}
+                </Label>
+                <Input
+                  id={`rateLimitFloor-${appType}`}
+                  type="number"
+                  min="1"
+                  max="30"
+                  value={formData.rateLimitFloorSecs}
+                  onChange={(e) =>
+                    setFormData({
+                      ...formData,
+                      rateLimitFloorSecs: e.target.value,
+                    })
+                  }
+                  disabled={isDisabled}
+                />
+                <p className="text-xs text-fg-2">
+                  {t(
+                    "proxy.autoFailover.rateLimitFloorHint",
+                    "首次 429 的最短冷却，范围 1-30 秒，默认 2 秒",
+                  )}
+                </p>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor={`rateLimitCap-${appType}`}>
+                  {t("proxy.autoFailover.rateLimitCap", "退避上限（秒）")}
+                </Label>
+                <Input
+                  id={`rateLimitCap-${appType}`}
+                  type="number"
+                  min="10"
+                  max="300"
+                  value={formData.rateLimitCapSecs}
+                  onChange={(e) =>
+                    setFormData({ ...formData, rateLimitCapSecs: e.target.value })
+                  }
+                  disabled={isDisabled}
+                />
+                <p className="text-xs text-fg-2">
+                  {t(
+                    "proxy.autoFailover.rateLimitCapHint",
+                    "Claude 客户端对超过 60 秒的 retry-after 会放弃重试，Claude 类应用建议保持 60",
+                  )}
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* 操作按钮 */}

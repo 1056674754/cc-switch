@@ -81,6 +81,15 @@ export function ProviderStatsTable({
               <th className={cn(usageTable.th, usageTable.groupGap)}>
                 {t("usage.cost")}
               </th>
+              <th
+                className={usageTable.th}
+                title={t(
+                  "usage.rateLimitedCountHint",
+                  "上游限流（429）次数，自适应退避的统计依据",
+                )}
+              >
+                {t("usage.rateLimitedCount", "429")}
+              </th>
               <th className={cn(usageTable.th, usageTable.groupGap)}>
                 {t("usage.tokens")}
               </th>
@@ -90,7 +99,7 @@ export function ProviderStatsTable({
           <tbody>
             {rows.length === 0 ? (
               <tr>
-                <td colSpan={7} className={usageTable.empty}>
+                <td colSpan={8} className={usageTable.empty}>
                   {t("usage.noData")}
                 </td>
               </tr>
@@ -119,6 +128,20 @@ export function ProviderStatsTable({
                       title={moneyTitle(stat.totalCost, 6)}
                     >
                       {money(stat.totalCost, 2)}
+                    </td>
+                    <td
+                      className={cn(
+                        usageTable.td,
+                        stat.rateLimitedCount
+                          ? "text-danger-text"
+                          : "text-fg-3",
+                      )}
+                      title={t(
+                        "usage.rateLimitedCountHint",
+                        "上游限流（429）次数，自适应退避的统计依据",
+                      )}
+                    >
+                      {fmtInt(stat.rateLimitedCount ?? 0, locale)}
                     </td>
                     <td
                       className={cn(usageTable.td, usageTable.groupGap)}

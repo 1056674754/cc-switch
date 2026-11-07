@@ -134,6 +134,8 @@ export interface ProviderStats {
   firstTokenMedianMs?: number | null;
   /** 估算首字中位数（毫秒）：会话日志导入、按时间戳推出了首字的请求；没有精确值时才显示，带 ≈ */
   estFirstTokenMedianMs?: number | null;
+  /** 429（上游限流/额度）次数：明细日志统计，日汇总不计 */
+  rateLimitedCount?: number;
 }
 
 export interface ModelStats {

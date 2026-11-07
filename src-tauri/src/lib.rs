@@ -1935,6 +1935,7 @@ pub fn run() {
             commands::set_proxy_client_host,
             commands::get_proxy_config_for_app,
             commands::update_proxy_config_for_app,
+            commands::get_rate_limit_states,
             commands::get_pricing_model_source,
             commands::set_pricing_model_source,
             commands::is_proxy_running,

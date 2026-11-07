@@ -142,6 +142,9 @@ pub struct ProviderStats {
     /// 估算首字中位数（毫秒）：会话日志导入、按时间戳推出了首字的明细请求。
     /// 和上面分开：口径不同，界面上只在没有精确值时显示，带 ≈。
     pub est_first_token_median_ms: Option<u64>,
+    /// 429（上游限流/额度）次数：自适应退避统计的依据。日汇总（rollup）没有
+    /// 状态码维度，只统计明细日志，时间范围早于明细保留期的部分不计。
+    pub rate_limited_count: u64,
 }
 
 /// 计速度的门槛：输出少于这个数的请求（工具调用这类）不算速度，避免 0.1 秒回 15 个 token 算出离谱的数。
@@ -1837,7 +1840,8 @@ impl Database {
                 SUM(speed_output) as speed_output,
                 SUM(speed_gen_ms) as speed_gen_ms,
                 SUM(est_output) as est_output,
-                SUM(est_ms) as est_ms
+                SUM(est_ms) as est_ms,
+                SUM(rate_limited_count) as rate_limited_count
             FROM (
                 SELECT l.provider_id, l.app_type,
                     {detail_pname} as provider_name,
@@ -1849,7 +1853,8 @@ impl Database {
                     COALESCE(SUM(CASE WHEN {speed_ok} THEN l.output_tokens ELSE 0 END), 0) as speed_output,
                     COALESCE(SUM(CASE WHEN {speed_ok} THEN l.latency_ms - l.first_token_ms ELSE 0 END), 0) as speed_gen_ms,
                     COALESCE(SUM(CASE WHEN {est_ok} THEN l.output_tokens ELSE 0 END), 0) as est_output,
-                    COALESCE(SUM(CASE WHEN {est_ok} THEN l.latency_ms ELSE 0 END), 0) as est_ms
+                    COALESCE(SUM(CASE WHEN {est_ok} THEN l.latency_ms ELSE 0 END), 0) as est_ms,
+                    COALESCE(SUM(CASE WHEN l.status_code = 429 THEN 1 ELSE 0 END), 0) as rate_limited_count
                 FROM proxy_request_logs l
                 LEFT JOIN providers p ON l.provider_id = p.id AND l.app_type = p.app_type
                 {detail_where}
@@ -1862,6 +1867,7 @@ impl Database {
                     COALESCE(SUM(CAST(r.total_cost_usd AS REAL)), 0),
                     COALESCE(SUM(r.success_count), 0),
                     COALESCE(SUM(r.avg_latency_ms * r.request_count), 0),
+                    0,
                     0,
                     0,
                     0,
@@ -1929,6 +1935,7 @@ impl Database {
                 est_speed_duration_ms: row.get::<_, i64>(11)?.max(0) as u64,
                 first_token_median_ms,
                 est_first_token_median_ms,
+                rate_limited_count: row.get::<_, i64>(12)?.max(0) as u64,
             })
         };
 

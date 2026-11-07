@@ -269,6 +269,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "set_proxy_client_host",
     "get_proxy_config_for_app",
     "update_proxy_config_for_app",
+    "get_rate_limit_states",
     "get_pricing_model_source",
     "set_pricing_model_source",
     "is_proxy_running",
@@ -436,7 +437,7 @@ pub(crate) const COMMANDS: &[&str] = &[
 ];
 
 /// 已桥接的命令数量。
-pub(crate) const COMMAND_COUNT: usize = 428;
+pub(crate) const COMMAND_COUNT: usize = 429;
 
 /// 命令名 → 所属源文件（模块）名。控制服务用它标注改动归属的界面域。
 pub(crate) fn module_of(command: &str) -> Option<&'static str> {
@@ -710,6 +711,7 @@ pub(crate) fn module_of(command: &str) -> Option<&'static str> {
         | "set_proxy_client_host"
         | "get_proxy_config_for_app"
         | "update_proxy_config_for_app"
+        | "get_rate_limit_states"
         | "get_pricing_model_source"
         | "set_pricing_model_source"
         | "is_proxy_running"
@@ -1133,6 +1135,7 @@ pub(crate) async fn dispatch(
         "set_proxy_client_host" => crate::commands::proxy::ipc_adapters::__ipc_set_proxy_client_host(__app, &mut __args).await,
         "get_proxy_config_for_app" => crate::commands::proxy::ipc_adapters::__ipc_get_proxy_config_for_app(__app, &mut __args).await,
         "update_proxy_config_for_app" => crate::commands::proxy::ipc_adapters::__ipc_update_proxy_config_for_app(__app, &mut __args).await,
+        "get_rate_limit_states" => crate::commands::proxy::ipc_adapters::__ipc_get_rate_limit_states(__app, &mut __args).await,
         "get_pricing_model_source" => crate::commands::proxy::ipc_adapters::__ipc_get_pricing_model_source(__app, &mut __args).await,
         "set_pricing_model_source" => crate::commands::proxy::ipc_adapters::__ipc_set_pricing_model_source(__app, &mut __args).await,
         "is_proxy_running" => crate::commands::proxy::ipc_adapters::__ipc_is_proxy_running(__app, &mut __args).await,

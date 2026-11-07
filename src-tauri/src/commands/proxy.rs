@@ -355,6 +355,12 @@ pub async fn update_proxy_config_for_app(
     let app_type = config.app_type.clone();
     let app = require_proxy_app(&app_type)?;
     let circuit_config = CircuitBreakerConfig::from(&config);
+    // 自适应 429 退避参数要在 config 被 update 消费前取出
+    let rate_limit_config = crate::proxy::adaptive_rate_limiter::RateLimitBackoffConfig {
+        enabled: config.rate_limit_adaptive_enabled,
+        floor_secs: config.rate_limit_floor_secs as f64,
+        cap_secs: config.rate_limit_cap_secs as f64,
+    };
     // `enabled` 是模式的镜像，只由进入 / 退出代理改写。
     let mut config = config;
     config.enabled = crate::mode::current::is_proxy(&app);
@@ -366,7 +372,24 @@ pub async fn update_proxy_config_for_app(
     state
         .proxy_service
         .update_circuit_breaker_config_for_app(&app_type, circuit_config)
+        .await?;
+
+    // 自适应 429 退避参数同步热更新
+    state
+        .proxy_service
+        .update_rate_limit_config_for_app(&app_type, rate_limit_config)
         .await
+}
+
+/// 获取自适应 429 限流退避的实时状态（供应商页徽章 / 用量页展示用）
+///
+/// 每个端点一条：当前档位、冷却剩余毫秒、近 60s 的 429 次数、已知使用方。
+/// 代理未运行时返回空列表（状态在内存里，随代理生命周期）。
+#[tauri::command]
+pub async fn get_rate_limit_states(
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<crate::proxy::adaptive_rate_limiter::RateLimitSnapshot>, String> {
+    Ok(state.proxy_service.rate_limit_snapshots().await)
 }
 
 async fn get_pricing_model_source_internal(
