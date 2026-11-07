@@ -45,7 +45,7 @@ pub(crate) async fn __ipc_import_from_deeplink(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_request: DeepLinkImportRequest = __args.required::<DeepLinkImportRequest>("request")?;
-    let __result = import_from_deeplink(__p_state, __p_request);
+    let __result = import_from_deeplink(__p_state, __p_request).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

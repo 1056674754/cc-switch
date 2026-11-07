@@ -23,7 +23,7 @@ pub(crate) async fn __ipc_create_profile(
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_name: String = __args.required::<String>("name")?;
     let __p_scope: String = __args.required::<String>("scope")?;
-    let __result = create_profile(__p_state, __p_name, __p_scope);
+    let __result = create_profile(__p_state, __p_name, __p_scope).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -40,7 +40,7 @@ pub(crate) async fn __ipc_update_profile(
     let __p_name: Option<String> = __args.option::<String>("name")?;
     let __p_resnapshot: Option<bool> = __args.option::<bool>("resnapshot")?;
     let __p_scope: Option<String> = __args.option::<String>("scope")?;
-    let __result = update_profile(__p_state, __p_id, __p_name, __p_resnapshot, __p_scope);
+    let __result = update_profile(__p_state, __p_id, __p_name, __p_resnapshot, __p_scope).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -54,7 +54,7 @@ pub(crate) async fn __ipc_delete_profile(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_id: String = __args.required::<String>("id")?;
-    let __result = delete_profile(__p_state, __p_id);
+    let __result = delete_profile(__p_state, __p_id).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -68,7 +68,7 @@ pub(crate) async fn __ipc_clear_current_profile(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_scope: String = __args.required::<String>("scope")?;
-    let __result = clear_current_profile(__p_state, __p_scope);
+    let __result = clear_current_profile(__p_state, __p_scope).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -84,7 +84,7 @@ pub(crate) async fn __ipc_apply_profile(
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_id: String = __args.required::<String>("id")?;
     let __p_scope: String = __args.required::<String>("scope")?;
-    let __result = apply_profile(__p_app, __p_state, __p_id, __p_scope);
+    let __result = apply_profile(__p_app, __p_state, __p_id, __p_scope).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

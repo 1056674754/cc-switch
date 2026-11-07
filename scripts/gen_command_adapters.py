@@ -63,6 +63,7 @@ class Command:
     error_type: str = ""
     unsupported: str = ""
     unsupported_kind: str = ""  # "window"（降级为 no-op）| "channel"/"response"（报错）
+    ipc_body: bool = False  # 返回 tauri::ipc::InvokeResponseBody（已序列化的 JSON 响应体）
 
 
 def strip_comments(text: str) -> str:
@@ -225,17 +226,19 @@ def parse_file(path: Path, module: str) -> dict[str, Command]:
 
         returns_result = False
         error_type = ""
+        ipc_body = False
         unsupported = ""
         unsupported_kind = ""
         if text[paren_end + 1 :].lstrip().startswith("->"):
             arrow = text.index("->", paren_end) + 2
             return_type = text[arrow : text.index("{", arrow)].strip()
             returns_result, error_type = parse_return_type(return_type)
+            ipc_body = "InvokeResponseBody" in return_type
             if re.search(r"\bResponse\b", return_type):
                 unsupported = "返回值是 tauri::ipc::Response（原始字节流），浏览器桥只支持 JSON"
                 unsupported_kind = "response"
         for param in params:
-            if "Channel<" in param.raw_type:
+            if re.search(r"\bChannel\b", param.raw_type):
                 unsupported = "参数里有 tauri::ipc::Channel（流式回调通道），浏览器桥不支持"
                 unsupported_kind = "channel"
             if param.kind == "window":
@@ -252,6 +255,7 @@ def parse_file(path: Path, module: str) -> dict[str, Command]:
             returns_result=returns_result,
             params=params,
             error_type=error_type,
+            ipc_body=ipc_body,
             unsupported=unsupported,
             unsupported_kind=unsupported_kind,
         )
@@ -411,7 +415,17 @@ def render_adapter(command: Command) -> str:
     call = f"{command.name}({', '.join(call_args)})"
     await_suffix = ".await" if command.is_async else ""
     lines.append(f"    let __result = {call}{await_suffix};")
-    if command.returns_result:
+    if command.ipc_body:
+        # InvokeResponseBody 不实现 Serialize：按已序列化的 JSON 解析回 Value 再走桥；
+        # Raw（原始字节流）浏览器桥表达不了，给可读错误。
+        lines.append("    match __result {")
+        lines.append(
+            "        Ok(value) => value.deserialize::<serde_json::Value>()"
+            ' .map_err(|error| format!("ipc: 返回值解析失败：{error}")),'
+        )
+        lines.append(f"        Err(error) => {error_expr(command.error_type)},")
+        lines.append("    }")
+    elif command.returns_result:
         lines.append(
             "    match __result { Ok(value) => crate::ipc::ok(value), "
             f"Err(error) => {error_expr(command.error_type)} }}"

@@ -172,7 +172,7 @@ pub(crate) async fn __ipc_import_default_config(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_app: String = __args.required::<String>("app")?;
-    let __result = import_default_config(__p_state, __p_app);
+    let __result = import_default_config(__p_state, __p_app).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -207,7 +207,7 @@ pub(crate) async fn __ipc_import_claude_desktop_providers_from_claude(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = import_claude_desktop_providers_from_claude(__p_state);
+    let __result = import_claude_desktop_providers_from_claude(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -220,7 +220,7 @@ pub(crate) async fn __ipc_ensure_claude_desktop_official_provider(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = ensure_claude_desktop_official_provider(__p_state);
+    let __result = ensure_claude_desktop_official_provider(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -233,7 +233,7 @@ pub(crate) async fn __ipc_ensure_codex_official_provider(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = ensure_codex_official_provider(__p_state);
+    let __result = ensure_codex_official_provider(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -246,7 +246,7 @@ pub(crate) async fn __ipc_ensure_grokbuild_official_provider(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = ensure_grokbuild_official_provider(__p_state);
+    let __result = ensure_grokbuild_official_provider(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -348,7 +348,7 @@ pub(crate) async fn __ipc_get_custom_endpoints(
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_app: String = __args.required::<String>("app")?;
     let __p_providerId: String = __args.required::<String>("providerId")?;
-    let __result = get_custom_endpoints(__p_state, __p_app, __p_providerId);
+    let __result = get_custom_endpoints(__p_state, __p_app, __p_providerId).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -364,7 +364,7 @@ pub(crate) async fn __ipc_add_custom_endpoint(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_providerId: String = __args.required::<String>("providerId")?;
     let __p_url: String = __args.required::<String>("url")?;
-    let __result = add_custom_endpoint(__p_state, __p_app, __p_providerId, __p_url);
+    let __result = add_custom_endpoint(__p_state, __p_app, __p_providerId, __p_url).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -380,7 +380,7 @@ pub(crate) async fn __ipc_remove_custom_endpoint(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_providerId: String = __args.required::<String>("providerId")?;
     let __p_url: String = __args.required::<String>("url")?;
-    let __result = remove_custom_endpoint(__p_state, __p_app, __p_providerId, __p_url);
+    let __result = remove_custom_endpoint(__p_state, __p_app, __p_providerId, __p_url).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -396,7 +396,7 @@ pub(crate) async fn __ipc_update_endpoint_last_used(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_providerId: String = __args.required::<String>("providerId")?;
     let __p_url: String = __args.required::<String>("url")?;
-    let __result = update_endpoint_last_used(__p_state, __p_app, __p_providerId, __p_url);
+    let __result = update_endpoint_last_used(__p_state, __p_app, __p_providerId, __p_url).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -427,7 +427,7 @@ pub(crate) async fn __ipc_get_universal_providers(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = get_universal_providers(__p_state);
+    let __result = get_universal_providers(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -441,7 +441,7 @@ pub(crate) async fn __ipc_get_universal_provider(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_id: String = __args.required::<String>("id")?;
-    let __result = get_universal_provider(__p_state, __p_id);
+    let __result = get_universal_provider(__p_state, __p_id).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -456,7 +456,7 @@ pub(crate) async fn __ipc_upsert_universal_provider(
     let __p_app: tauri::AppHandle = __app.clone();
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_provider: UniversalProvider = __args.required::<UniversalProvider>("provider")?;
-    let __result = upsert_universal_provider(__p_app, __p_state, __p_provider);
+    let __result = upsert_universal_provider(__p_app, __p_state, __p_provider).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -471,7 +471,7 @@ pub(crate) async fn __ipc_delete_universal_provider(
     let __p_app: tauri::AppHandle = __app.clone();
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_id: String = __args.required::<String>("id")?;
-    let __result = delete_universal_provider(__p_app, __p_state, __p_id);
+    let __result = delete_universal_provider(__p_app, __p_state, __p_id).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -486,7 +486,7 @@ pub(crate) async fn __ipc_sync_universal_provider(
     let __p_app: tauri::AppHandle = __app.clone();
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_id: String = __args.required::<String>("id")?;
-    let __result = sync_universal_provider(__p_app, __p_state, __p_id);
+    let __result = sync_universal_provider(__p_app, __p_state, __p_id).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -499,7 +499,7 @@ pub(crate) async fn __ipc_import_opencode_providers_from_live(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = import_opencode_providers_from_live(__p_state);
+    let __result = import_opencode_providers_from_live(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

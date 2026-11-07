@@ -8,7 +8,7 @@ pub(crate) async fn __ipc_get_pi_current_state(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = get_pi_current_state(__p_state);
+    let __result = get_pi_current_state(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -24,7 +24,8 @@ pub(crate) async fn __ipc_update_pi_provider_usage_script(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_id: String = __args.required::<String>("id")?;
     let __p_usageScript: UsageScript = __args.required::<UsageScript>("usageScript")?;
-    let __result = update_pi_provider_usage_script(__p_state, __p_app, __p_id, __p_usageScript);
+    let __result =
+        update_pi_provider_usage_script(__p_state, __p_app, __p_id, __p_usageScript).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

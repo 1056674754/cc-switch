@@ -8,7 +8,7 @@ pub(crate) async fn __ipc_import_openclaw_providers_from_live(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = import_openclaw_providers_from_live(__p_state);
+    let __result = import_openclaw_providers_from_live(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

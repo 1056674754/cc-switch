@@ -220,13 +220,21 @@ impl PoolInner {
             }
             drop(live);
 
-            // 3. 等别人归还。先持 idle 锁再 wait，归还方也必须持 idle 锁才能入队，
-            //    这样不会漏掉唤醒。
+            // 3. 等别人归还。归还方持 idle 锁入队并 notify，所以真正 wait 前必须持
+            //    同一把 idle 锁再看一次队列：第 1 步与本步之间可能已经 push + notify，
+            //    那时还没有等待者，唤醒会丢（漏掉就会白等到 ACQUIRE_TIMEOUT）。
             let now = Instant::now();
             if now >= deadline {
                 return Err(PoolError::Timeout);
             }
-            let idle = self.idle.lock().map_err(|_| PoolError::Poisoned)?;
+            let mut idle = self.idle.lock().map_err(|_| PoolError::Poisoned)?;
+            if let Some(conn) = idle.pop() {
+                return Ok(PooledConn {
+                    pool: self,
+                    conn: Some(conn),
+                    _not_send: std::marker::PhantomData,
+                });
+            }
             let (_idle, _) = self
                 .cv
                 .wait_timeout(idle, deadline - now)

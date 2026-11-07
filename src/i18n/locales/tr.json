@@ -384,7 +384,8 @@
     "codexAuthCleanupFailed": "Başarılı bir şekilde geçiş yapıldı ancak auth.json kaldırılamadı; resmi oturum açma kimlik bilgileri hâlâ diskte; bunları kaldırmak için auth.json'u Codex yapılandırma dizininden silin",
     "windowControlFailed": "Pencere kontrolü başarısız oldu: {{error}}",
     "officialBlockedByProxy": "Yerel yönlendirme etkinken resmi sağlayıcıya geçilemez. Yönlendirmenin resmi API'lerle kullanılması hesabın yasaklanmasına neden olabilir.",
-    "proxyOfficialWarning": "Mevcut sağlayıcı {{name}} resmidir. Yerel yönlendirmeyi kullanmadan önce üçüncü taraf bir sağlayıcıya geçmeyi düşünün."
+    "proxyOfficialWarning": "Mevcut sağlayıcı {{name}} resmidir. Yerel yönlendirmeyi kullanmadan önce üçüncü taraf bir sağlayıcıya geçmeyi düşünün.",
+    "proxyLoopbackHijacked": "Requests from {{app}} to the local route {{origin}} will be picked up by the system proxy, so {{app}} will fail with 502 errors. Make loopback addresses connect directly in your proxy tool (for example, add IP-CIDR,127.0.0.0/8,DIRECT,no-resolve at the top of your Clash rules), then fully quit and reopen {{app}}."
   },
   "confirm": {
     "deleteProvider": "Sağlayıcıyı Sil",
@@ -977,6 +978,7 @@
     "browsePlaceholderHermes": "ör. /home/<your-username>/.hermes",
     "browsePlaceholderPi": "ör. /home/<your-username>/.pi/agent",
     "browsePlaceholderOmp": "ör. /home/<your-username>/.omp/agent",
+    "browsePlaceholderDsh": "e.g., /home/<your-username>/.dsh",
     "browseDirectory": "Dizine Göz Atın",
     "resetDefault": "Varsayılan dizine sıfırla (kaydettikten sonra etkili olur)",
     "checkForUpdates": "Güncellemeleri Kontrol Et",
@@ -1036,6 +1038,7 @@
     "toolActionDone": "{{action}}, {{count}} takım(lar)ı için tamamlandı",
     "toolActionPartial": "{{action}}, {{succeeded}} için başarılı oldu, {{failed}} için başarısız oldu",
     "toolActionFailed": "Yükleme/güncelleme komutu başarısız oldu",
+    "toolActionBinCollision": "A file already exists at {{path}}, probably from another installation method, and npm won't overwrite it. Check what it is, rename it as a backup, then try again. Don't use npm's --force: it overwrites the file outright.",
     "toolActionInProgress": "Kurulum veya güncelleme halen devam ediyor",
     "toolActionInProgressDetail": "{{tool}} için bir kurulum veya güncelleme zaten arka planda gerçekleştiriliyor. Lütfen bitmesini bekleyin; tekrar başlatmaya gerek yoktur.",
     "toolNotRunnable": "Yüklendi ancak çalıştırılamıyor (sürüm algılanmadı)",
@@ -2036,6 +2039,8 @@
     "autoReviewModelCodexDefault": "Codex varsayılanı (codex-auto-review)",
     "autoReviewModelMainDefault": "Ana model kendini inceler (varsayılan)",
     "autoReviewModelNoList": "Bu kartta model listesi yok: Codex onayları yalnızca ChatGPT hesaplarına yönlendirme yapan bazı aktarım hizmetlerinin kabul ettiği resmî codex-auto-review modeliyle inceler; diğerleri 404 döndürür. Bir model seçmek için yukarıdaki listeye model ekleyin.",
+    "officialSpeedTiersLabel": "Keep official Fast tier",
+    "officialSpeedTiersHint": "Keeps the official Fast speed tier on GPT models in the model list, so choosing Fast in Codex sends service_tier=priority. Only relays that forward to official ChatGPT accounts (such as CPA) accept it, and it uses quota faster; other upstreams may reject it or bill it at a higher price. Once on, a Fast choice you made under the official card takes effect on this provider right away. Not used in aggregation mode. Restart Codex after changing it.",
     "modelListHint": "Değişikliklerden sonra Codex uygulamasını yeniden başlatın.",
     "modelListDefaultHelp": "Bu modeller Codex'nin /model menüsünde görünür; ilk satır varsayılan modeldir. Adını resmi bir GPT modelinden alan satırlar resmi girişi kullanır, dolayısıyla görünen adları, pencereleri ve akıl yürütme düzeyleri göz ardı edilir.",
     "addCatalogModel": "Manuel olarak ekle",
@@ -4183,6 +4188,10 @@
     "monthly": "Aylık",
     "credits": "Kredi",
     "copilotPremium": "Credits",
+    "copilotCompletions": "Completions",
+    "copilotChat": "Chat",
+    "copilotCount": "{{remaining}} of {{total}} left",
+    "copilotNotIncluded": "Not in your plan",
     "utilization": "{{value}}%",
     "resetsIn": "{{time}} sonra sıfırlanır",
     "extraUsage": "Ekstra Kullanım",
@@ -4566,6 +4575,7 @@
     "connection": {
       "unchecked": "Kontrol edilmedi",
       "connected": "Bağlantı başarılı",
+      "authRequired": "Server reachable but requires sign-in (e.g. OAuth). CC Switch checks without your client's own login: if you've signed in from the client, it works there; if you set a token in the headers, make sure it is still valid",
       "disconnected": "Bağlantı başarısız",
       "checking": "Bağlantı kontrol ediliyor",
       "disabled": "Etkin değil"

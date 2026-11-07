@@ -23,7 +23,9 @@ pub(crate) async fn __ipc_get_session_messages(
     let __p_sourcePath: String = __args.required::<String>("sourcePath")?;
     let __result = get_session_messages(__p_providerId, __p_sourcePath).await;
     match __result {
-        Ok(value) => crate::ipc::ok(value),
+        Ok(value) => value
+            .deserialize::<serde_json::Value>()
+            .map_err(|error| format!("ipc: 返回值解析失败：{error}")),
         Err(error) => Err(error),
     }
 }

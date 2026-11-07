@@ -88,7 +88,7 @@ pub(crate) async fn __ipc_list_db_backups(
     __app: &tauri::AppHandle,
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
-    let __result = list_db_backups();
+    let __result = list_db_backups().await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -154,7 +154,7 @@ pub(crate) async fn __ipc_rename_db_backup(
 ) -> crate::ipc::Outcome {
     let __p_oldFilename: String = __args.required::<String>("oldFilename")?;
     let __p_newName: String = __args.required::<String>("newName")?;
-    let __result = rename_db_backup(__p_oldFilename, __p_newName);
+    let __result = rename_db_backup(__p_oldFilename, __p_newName).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -167,7 +167,7 @@ pub(crate) async fn __ipc_delete_db_backup(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_filename: String = __args.required::<String>("filename")?;
-    let __result = delete_db_backup(__p_filename);
+    let __result = delete_db_backup(__p_filename).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

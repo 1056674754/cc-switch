@@ -8,7 +8,7 @@ pub(crate) async fn __ipc_get_global_proxy_url(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
-    let __result = get_global_proxy_url(__p_state);
+    let __result = get_global_proxy_url(__p_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -22,7 +22,7 @@ pub(crate) async fn __ipc_set_global_proxy_url(
 ) -> crate::ipc::Outcome {
     let __p_state = __args.state::<AppState>(__app)?;
     let __p_url: String = __args.required::<String>("url")?;
-    let __result = set_global_proxy_url(__p_state, __p_url);
+    let __result = set_global_proxy_url(__p_state, __p_url).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),

@@ -8,7 +8,7 @@ pub(crate) async fn __ipc_get_installed_skills(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = get_installed_skills(__p_app_state);
+    let __result = get_installed_skills(__p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -64,7 +64,7 @@ pub(crate) async fn __ipc_uninstall_skill_unified(
 ) -> crate::ipc::Outcome {
     let __p_id: String = __args.required::<String>("id")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = uninstall_skill_unified(__p_id, __p_app_state);
+    let __result = uninstall_skill_unified(__p_id, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -79,7 +79,7 @@ pub(crate) async fn __ipc_restore_skill_backup(
     let __p_backup_id: String = __args.required::<String>("backupId")?;
     let __p_current_app: String = __args.required::<String>("currentApp")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = restore_skill_backup(__p_backup_id, __p_current_app, __p_app_state);
+    let __result = restore_skill_backup(__p_backup_id, __p_current_app, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -95,7 +95,7 @@ pub(crate) async fn __ipc_toggle_skill_app(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_enabled: bool = __args.required::<bool>("enabled")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = toggle_skill_app(__p_id, __p_app, __p_enabled, __p_app_state);
+    let __result = toggle_skill_app(__p_id, __p_app, __p_enabled, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -108,7 +108,7 @@ pub(crate) async fn __ipc_scan_unmanaged_skills(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = scan_unmanaged_skills(__p_app_state);
+    let __result = scan_unmanaged_skills(__p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -123,7 +123,7 @@ pub(crate) async fn __ipc_import_skills_from_apps(
     let __p_imports: Vec<ImportSkillSelection> =
         __args.required::<Vec<ImportSkillSelection>>("imports")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = import_skills_from_apps(__p_imports, __p_app_state);
+    let __result = import_skills_from_apps(__p_imports, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -338,7 +338,7 @@ pub(crate) async fn __ipc_uninstall_skill(
 ) -> crate::ipc::Outcome {
     let __p_directory: String = __args.required::<String>("directory")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = uninstall_skill(__p_directory, __p_app_state);
+    let __result = uninstall_skill(__p_directory, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -353,7 +353,7 @@ pub(crate) async fn __ipc_uninstall_skill_for_app(
     let __p_app: String = __args.required::<String>("app")?;
     let __p_directory: String = __args.required::<String>("directory")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = uninstall_skill_for_app(__p_app, __p_directory, __p_app_state);
+    let __result = uninstall_skill_for_app(__p_app, __p_directory, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -366,7 +366,7 @@ pub(crate) async fn __ipc_get_skill_repos(
     __args: &mut crate::ipc::Args,
 ) -> crate::ipc::Outcome {
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = get_skill_repos(__p_app_state);
+    let __result = get_skill_repos(__p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -380,7 +380,7 @@ pub(crate) async fn __ipc_add_skill_repo(
 ) -> crate::ipc::Outcome {
     let __p_repo: SkillRepo = __args.required::<SkillRepo>("repo")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = add_skill_repo(__p_repo, __p_app_state);
+    let __result = add_skill_repo(__p_repo, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -395,7 +395,7 @@ pub(crate) async fn __ipc_remove_skill_repo(
     let __p_owner: String = __args.required::<String>("owner")?;
     let __p_name: String = __args.required::<String>("name")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = remove_skill_repo(__p_owner, __p_name, __p_app_state);
+    let __result = remove_skill_repo(__p_owner, __p_name, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
@@ -410,7 +410,7 @@ pub(crate) async fn __ipc_install_skills_from_zip(
     let __p_file_path: String = __args.required::<String>("filePath")?;
     let __p_current_app: String = __args.required::<String>("currentApp")?;
     let __p_app_state = __args.state::<AppState>(__app)?;
-    let __result = install_skills_from_zip(__p_file_path, __p_current_app, __p_app_state);
+    let __result = install_skills_from_zip(__p_file_path, __p_current_app, __p_app_state).await;
     match __result {
         Ok(value) => crate::ipc::ok(value),
         Err(error) => Err(error),
