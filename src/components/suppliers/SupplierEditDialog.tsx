@@ -297,7 +297,10 @@ export function SupplierEditDialog({
         }}
       >
         <DialogContent
-          className="max-h-[min(860px,calc(100vh-48px))] max-w-[820px] gap-0 overflow-hidden p-0"
+          // WebKit 下 h-fit + flex-1 的弹窗会被压成只剩标题条（表单高度算成 0）。
+          // 给弹窗一个确定高度，让内部滚动区和底部按钮按 flex 正常分配。
+          style={{ height: "min(860px, calc(100vh - 48px))" }}
+          className="max-w-[820px] gap-0 overflow-hidden p-0"
           onInteractOutside={(event) => {
             event.preventDefault();
             requestClose();

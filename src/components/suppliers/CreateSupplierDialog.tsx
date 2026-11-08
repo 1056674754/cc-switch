@@ -315,7 +315,10 @@ export function CreateSupplierDialog({
       }}
     >
       <DialogContent
-        className="max-h-[min(860px,calc(100vh-48px))] max-w-[820px] gap-0 overflow-hidden p-0"
+        // WebKit 下 h-fit + flex-1 会把弹窗主体压成 0，只剩标题条；
+        // 给弹窗确定高度，各步骤的 flex 滚动区才会正常分配。
+        style={{ height: "min(860px, calc(100vh - 48px))" }}
+        className="max-w-[820px] gap-0 overflow-hidden p-0"
         onInteractOutside={(event) => {
           // 遮罩点击由这里统一处理：提交中不关，其余情况交给 requestClose
           event.preventDefault();
