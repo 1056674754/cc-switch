@@ -59,6 +59,8 @@ interface AccountQuotaColumnProps {
   queriedAt?: number | null;
   loading: boolean;
   onRefresh: () => void;
+  /** 点开重置次数弹窗时最底下附带的操作（目前只有 ChatGPT 账号的「使用重置卡」） */
+  resetCreditAction?: ReactNode;
 }
 
 /**
@@ -74,6 +76,7 @@ export function AccountQuotaColumn({
   queriedAt,
   loading,
   onRefresh,
+  resetCreditAction,
 }: AccountQuotaColumnProps) {
   const { t } = useTranslation();
   const now = useNow(
@@ -97,6 +100,9 @@ export function AccountQuotaColumn({
                 line={line}
                 breakdown={line.breakdown}
                 className={ROW_CLASS}
+                panelFooter={
+                  line.key === "reset_credits" ? resetCreditAction : undefined
+                }
               >
                 <QuotaRowCells
                   label={label}

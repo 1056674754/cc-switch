@@ -123,6 +123,7 @@ pub(crate) const COMMANDS: &[&str] = &[
     "testUsageScript",
     "get_subscription_quota",
     "get_codex_oauth_quota",
+    "consume_codex_reset_credit",
     "get_codex_oauth_models",
     "get_xai_oauth_models",
     "get_xai_oauth_quota",
@@ -437,7 +438,7 @@ pub(crate) const COMMANDS: &[&str] = &[
 ];
 
 /// 已桥接的命令数量。
-pub(crate) const COMMAND_COUNT: usize = 429;
+pub(crate) const COMMAND_COUNT: usize = 430;
 
 /// 命令名 → 所属源文件（模块）名。控制服务用它标注改动归属的界面域。
 pub(crate) fn module_of(command: &str) -> Option<&'static str> {
@@ -456,7 +457,9 @@ pub(crate) fn module_of(command: &str) -> Option<&'static str> {
         | "get_claude_account_quota"
         | "get_claude_default_plan"
         | "get_claude_login_switch" => "claude_account",
-        "get_codex_oauth_quota" | "get_codex_oauth_models" => "codex_oauth",
+        "get_codex_oauth_quota" | "consume_codex_reset_credit" | "get_codex_oauth_models" => {
+            "codex_oauth"
+        }
         "get_coding_plan_quota" => "coding_plan",
         "get_claude_config_status"
         | "get_config_status"
@@ -989,6 +992,7 @@ pub(crate) async fn dispatch(
         "testUsageScript" => crate::commands::provider::ipc_adapters::__ipc_testUsageScript(__app, &mut __args).await,
         "get_subscription_quota" => crate::commands::subscription::ipc_adapters::__ipc_get_subscription_quota(__app, &mut __args).await,
         "get_codex_oauth_quota" => crate::commands::codex_oauth::ipc_adapters::__ipc_get_codex_oauth_quota(__app, &mut __args).await,
+        "consume_codex_reset_credit" => crate::commands::codex_oauth::ipc_adapters::__ipc_consume_codex_reset_credit(__app, &mut __args).await,
         "get_codex_oauth_models" => crate::commands::codex_oauth::ipc_adapters::__ipc_get_codex_oauth_models(__app, &mut __args).await,
         "get_xai_oauth_models" => crate::commands::xai_oauth::ipc_adapters::__ipc_get_xai_oauth_models(__app, &mut __args).await,
         "get_xai_oauth_quota" => crate::commands::xai_oauth::ipc_adapters::__ipc_get_xai_oauth_quota(__app, &mut __args).await,

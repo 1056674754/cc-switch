@@ -430,11 +430,16 @@ pub async fn migrate_gateway_from_stack(
 }
 
 /// 读某 app 的模型配置；没配过返回 `null`。
+///
+/// 读之前先修一遍过期的 `供应商/模型` 引用：供应商改名 / 合并后，老引用在目录里查不到，
+/// 界面会满屏「模型不在目录里」，代理发布时也会拿不到模型名。修正按模型 id 唯一匹配，幂等。
 #[tauri::command(async)]
 pub fn get_app_model_config(
     state: tauri::State<'_, AppState>,
     app_type: String,
 ) -> Result<Option<AppModelConfig>, String> {
+    gateway_config::repair_app_model_config(&state.db, &app_type)
+        .map_err(|error| error.to_string())?;
     state
         .db
         .get_app_model_config(&app_type)
@@ -451,6 +456,9 @@ pub async fn set_app_model_config(
 ) -> Result<(), String> {
     let catalog =
         gateway_catalog::catalog_view_cached(&state.db).map_err(|error| error.to_string())?;
+    // 旧客户端可能还带着供应商改名前的引用：能唯一对上就改写，再按目录严格校验。
+    let mut config = config;
+    gateway_config::remap_stale_references(&mut config, &catalog);
     gateway_config::validate_app_model_config(&config, &catalog)
         .map_err(|error| error.to_string())?;
     state

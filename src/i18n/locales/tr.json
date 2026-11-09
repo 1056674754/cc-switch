@@ -4524,7 +4524,13 @@
       "title": "Kaydedilen limit sıfırlamaları",
       "times": "×{{count}}",
       "inTime": "{{time}}'de",
-      "showAll": "{{count}} sıfırlamalarının her birinin süresinin ne zaman dolduğunu göster"
+      "showAll": "{{count}} sıfırlamalarının her birinin süresinin ne zaman dolduğunu göster",
+      "useAction": "Sıfırlama kartı kullan",
+      "useConfirmTitle": "Bir sıfırlama kartı kullanılsın mı?",
+      "useConfirmMessage": "Bu işlem bir sıfırlama kartını kalıcı olarak harcar ({{count}} adet kaldı) ve tükenen kota penceresini hemen sıfırlar. Geri alınamaz.",
+      "useConfirmAction": "Kullan",
+      "useSuccess": "Sıfırlama kartı kullanıldı — kota pencereleri sıfırlandı",
+      "useFailed": "Sıfırlama kartı kullanılamadı: {{error}}"
     },
     "credits": {
       "label": "Kredi",

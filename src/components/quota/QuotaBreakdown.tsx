@@ -26,6 +26,7 @@ export function QuotaBreakdownRow({
   className,
   align = "start",
   children,
+  panelFooter,
 }: {
   line?: QuotaLine;
   breakdown: QuotaBreakdown;
@@ -33,6 +34,8 @@ export function QuotaBreakdownRow({
   /** 弹窗和按钮哪边对齐：卡片额度列靠右，用 end */
   align?: "start" | "end";
   children: ReactNode;
+  /** 弹窗最底下附带的操作（ChatGPT 账号的「使用重置卡」），和明细用分隔线隔开 */
+  panelFooter?: ReactNode;
 }) {
   return (
     <Popover>
@@ -70,6 +73,9 @@ export function QuotaBreakdownRow({
             items={breakdown.footer}
             className="mt-2 border-t border-border pt-2"
           />
+        )}
+        {panelFooter && (
+          <div className="mt-2 border-t border-border pt-2">{panelFooter}</div>
         )}
       </PopoverContent>
     </Popover>

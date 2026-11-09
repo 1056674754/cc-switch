@@ -23,9 +23,18 @@ export interface ExtraUsage {
   currency: string | null;
 }
 
+/** 一张存下的限额重置卡（用来清空已用完的额度窗口，用掉就没了） */
+export interface ResetCredit {
+  id: string;
+  /** 到期时间；null 表示不过期 */
+  expiresAt: string | null;
+}
+
 /** ChatGPT 订阅存下的限额重置：每一次的到期时间，先到期的在前，null 表示不过期 */
 export interface ResetCredits {
   expiresAt: (string | null)[];
+  /** 每张卡的 id，顺序同 expiresAt；上游没给 id 时可能缺省 */
+  credits?: ResetCredit[];
 }
 
 export interface SubscriptionQuota {

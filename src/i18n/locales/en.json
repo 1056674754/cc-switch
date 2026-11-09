@@ -4849,7 +4849,13 @@
       "title": "Saved limit resets",
       "times": "×{{count}}",
       "inTime": "in {{time}}",
-      "showAll": "Show when each of the {{count}} resets expires"
+      "showAll": "Show when each of the {{count}} resets expires",
+      "useAction": "Use reset card",
+      "useConfirmTitle": "Use one reset card?",
+      "useConfirmMessage": "This permanently spends one reset card ({{count}} left) and clears the exhausted quota window right away. It cannot be undone.",
+      "useConfirmAction": "Use",
+      "useSuccess": "Reset card used — quota windows restored",
+      "useFailed": "Failed to use reset card: {{error}}"
     },
     "credits": {
       "label": "Credits",

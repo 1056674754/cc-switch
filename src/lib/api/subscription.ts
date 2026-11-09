@@ -10,6 +10,11 @@ export const subscriptionApi = {
     invoke("get_subscription_quota", { tool }),
   getCodexOauthQuota: (accountId: string | null): Promise<SubscriptionQuota> =>
     invoke("get_codex_oauth_quota", { accountId }),
+  /** 用掉一张存下的 ChatGPT 重置卡（清空已用完的额度窗口，不可恢复） */
+  consumeCodexResetCredit: (
+    accountId: string,
+  ): Promise<{ windowsReset: number | null; creditExpiresAt: string | null }> =>
+    invoke("consume_codex_reset_credit", { accountId }),
   getXaiOauthQuota: (accountId: string | null): Promise<SubscriptionQuota> =>
     invoke("get_xai_oauth_quota", { accountId }),
   /** 绑了账号的 Claude 官方卡：按那个账号自己的登录查，带上它的套餐 */

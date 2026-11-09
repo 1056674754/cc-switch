@@ -4769,7 +4769,13 @@
       "title": "存下的限額重設",
       "times": "{{count}} 次",
       "inTime": "{{time}}後",
-      "showAll": "查看 {{count}} 次重設各自的到期時間"
+      "showAll": "查看 {{count}} 次重設各自的到期時間",
+      "useAction": "使用重設卡",
+      "useConfirmTitle": "使用一張重設卡？",
+      "useConfirmMessage": "這會永久用掉一張重設卡（剩餘 {{count}} 張），立即清空已用完的額度窗口，無法復原。",
+      "useConfirmAction": "使用",
+      "useSuccess": "已用掉一張重設卡，額度窗口已重設",
+      "useFailed": "使用重設卡失敗：{{error}}"
     },
     "credits": {
       "label": "Credits",

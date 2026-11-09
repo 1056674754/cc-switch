@@ -4844,7 +4844,13 @@
       "title": "存下的限额重置",
       "times": "{{count}} 次",
       "inTime": "{{time}}后",
-      "showAll": "查看 {{count}} 次重置各自的到期时间"
+      "showAll": "查看 {{count}} 次重置各自的到期时间",
+      "useAction": "使用重置卡",
+      "useConfirmTitle": "使用一张重置卡？",
+      "useConfirmMessage": "这会永久用掉一张重置卡（剩余 {{count}} 张），立即清空已用完的额度窗口，无法撤销。",
+      "useConfirmAction": "使用",
+      "useSuccess": "已用掉一张重置卡，额度窗口已重置",
+      "useFailed": "使用重置卡失败：{{error}}"
     },
     "credits": {
       "label": "Credits",

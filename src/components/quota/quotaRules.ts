@@ -244,9 +244,10 @@ export function resetCreditsLine(
       ? t("quota.resetCredits.detail", { count, date })
       : t("quota.resetCredits.detailNoExpiry", { count }),
     window: RESET_CREDITS_WINDOW,
-    // 只有一次时行里已经写全了，不用再点开；除非还要附带别的（footer）
+    // 只有一次时行里已经写全了，不用再点开；除非还要附带别的（footer），
+    // 或者这张卡能在弹窗里直接用掉（credits 带 id，见「使用重置卡」）
     breakdown:
-      count > 1 || footer?.length
+      count > 1 || footer?.length || (credits?.credits?.length ?? 0) > 0
         ? {
             title: t("quota.resetCredits.title"),
             openLabel: t("quota.resetCredits.showAll", { count }),

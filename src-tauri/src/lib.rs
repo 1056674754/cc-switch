@@ -847,6 +847,14 @@ pub fn run() {
             // 要在任何写客户端文件的启动步骤之前。
             crate::mode::operation::recover_on_startup(&app_state.db);
 
+            // 供应商改名 / 合并会让存量的「供应商/模型」引用失效（界面上满屏「模型不在目录里」，
+            // 代理发布时也拿不到模型名）。按模型 id 唯一匹配修一遍，幂等。
+            match crate::services::gateway_config::repair_app_model_configs(&app_state.db) {
+                Ok(0) => {}
+                Ok(count) => log::info!("✓ 修正了 {count} 处供应商改名后的模型引用"),
+                Err(e) => log::warn!("修正模型引用失败: {e}"),
+            }
+
             // ============================================================
             // 按表独立判断的导入逻辑（各类数据独立检查，互不影响）
             // ============================================================
@@ -1781,6 +1789,7 @@ pub fn run() {
             // subscription quota
             commands::get_subscription_quota,
             commands::get_codex_oauth_quota,
+            commands::consume_codex_reset_credit,
             commands::get_codex_oauth_models,
             commands::get_xai_oauth_models,
             commands::get_xai_oauth_quota,

@@ -88,6 +88,40 @@ async fn query_codex_oauth_quota_for(
     .await
 }
 
+/// 用掉一张存下的 ChatGPT 重置卡：清空已用完的额度窗口（**不可恢复**）
+///
+/// - 只作用于 `account_id` 这个账号；token 过期时用刷新令牌换新的
+/// - 按最早到期挑一张卡，和界面里「重置 剩余 N 次」的顺序一致
+/// - 成功返回清掉的窗口数；前端随后会重查额度
+#[tauri::command(rename_all = "camelCase")]
+pub async fn consume_codex_reset_credit(
+    app: tauri::AppHandle,
+    account_id: String,
+    state: State<'_, CodexOAuthState>,
+) -> Result<crate::services::subscription::CodexResetCreditConsumed, String> {
+    let manager = &state.0;
+    let id = account_id.trim();
+    if id.is_empty() {
+        return Err("缺少账号 id".to_string());
+    }
+    let token = manager
+        .get_valid_token_for_account(id)
+        .await
+        .map_err(|e| format!("Codex OAuth token unavailable: {e}"))?;
+    let chatgpt_account_id = manager
+        .chatgpt_account_id_for_account(id)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = crate::services::subscription::consume_codex_reset_credit(
+        &token,
+        Some(&chatgpt_account_id),
+    )
+    .await?;
+    // 托盘额度是缓存快照，用掉后先别让它显示旧值；前端会紧接着重查
+    crate::tray::schedule_tray_refresh(&app);
+    Ok(result)
+}
+
 fn is_transient_token_error(error: &CodexOAuthError) -> bool {
     matches!(
         error,

@@ -4768,7 +4768,13 @@
       "title": "保存したリセット",
       "times": "{{count}} 回",
       "inTime": "{{time}}後",
-      "showAll": "{{count}} 回分のリセットの期限を表示"
+      "showAll": "{{count}} 回分のリセットの期限を表示",
+      "useAction": "リセットカードを使う",
+      "useConfirmTitle": "リセットカードを1枚使いますか？",
+      "useConfirmMessage": "リセットカードを1枚消費し（残り {{count}} 枚）、使い切ったクォータ枠をすぐにリセットします。元に戻せません。",
+      "useConfirmAction": "使う",
+      "useSuccess": "リセットカードを使いました。クォータ枠をリセットしました",
+      "useFailed": "リセットカードの使用に失敗しました：{{error}}"
     },
     "credits": {
       "label": "Credits",

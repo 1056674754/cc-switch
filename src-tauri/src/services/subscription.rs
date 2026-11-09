@@ -60,6 +60,18 @@ pub struct ResetCredits {
     /// 每一次可用重置的到期时间（ISO 8601），先到期的在前，不过期的是 None 排最后；
     /// 长度就是可用次数（只收 available 且查询时还没过期的）
     pub expires_at: Vec<Option<String>>,
+    /// 每一张卡的 id 与到期时间，顺序同 `expires_at`；「使用重置卡」按下标取 id。
+    /// 上游没给 id 时这个列表可能比 `expires_at` 短（旧版本字段兼容）
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credits: Vec<ResetCredit>,
+}
+
+/// 一张存下的重置卡（可用来清空已用完的额度窗口）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResetCredit {
+    pub id: String,
+    pub expires_at: Option<String>,
 }
 
 /// 订阅额度查询结果
@@ -978,6 +990,7 @@ struct CodexResetCreditsResponse {
 
 #[derive(Deserialize)]
 struct CodexResetCreditEntry {
+    id: Option<String>,
     status: Option<String>,
     expires_at: Option<String>,
 }
@@ -989,28 +1002,37 @@ fn parse_codex_reset_credits(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Option<ResetCredits> {
     let body: CodexResetCreditsResponse = serde_json::from_slice(raw).ok()?;
-    let mut expiries: Vec<Option<chrono::DateTime<chrono::Utc>>> = body
+    let mut cards: Vec<(Option<String>, Option<chrono::DateTime<chrono::Utc>>)> = body
         .credits
         .into_iter()
         .filter(|credit| credit.status.as_deref() == Some("available"))
         .filter_map(|credit| match credit.expires_at {
-            None => Some(None),
+            None => Some((credit.id, None)),
             // 认不出的到期时间当作不过期，宁可多显示一次也不吞掉
             Some(raw) => match chrono::DateTime::parse_from_rfc3339(&raw) {
                 Ok(at) => {
                     let at = at.with_timezone(&chrono::Utc);
-                    (at > now).then_some(Some(at))
+                    (at > now).then_some((credit.id, Some(at)))
                 }
-                Err(_) => Some(None),
+                Err(_) => Some((credit.id, None)),
             },
         })
         .collect();
     // None（不过期）排最后
-    expiries.sort_by_key(|at| (at.is_none(), *at));
+    cards.sort_by_key(|(_, at)| (at.is_none(), *at));
     Some(ResetCredits {
-        expires_at: expiries
+        expires_at: cards
+            .iter()
+            .map(|(_, at)| at.map(|at| at.to_rfc3339()))
+            .collect(),
+        credits: cards
             .into_iter()
-            .map(|at| at.map(|at| at.to_rfc3339()))
+            .filter_map(|(id, at)| {
+                id.map(|id| ResetCredit {
+                    id,
+                    expires_at: at.map(|at| at.to_rfc3339()),
+                })
+            })
             .collect(),
     })
 }
@@ -1040,6 +1062,125 @@ async fn query_codex_reset_credits(
     }
     let raw = resp.bytes().await.ok()?;
     parse_codex_reset_credits(&raw, chrono::Utc::now())
+}
+
+/// 用掉一张存下的重置卡的结果（回给前端提示用）
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodexResetCreditConsumed {
+    /// 这次重置清掉了几个已用完的额度窗口
+    pub windows_reset: Option<i64>,
+    /// 用掉的那张卡的到期时间（ISO 8601），没有时 None
+    pub credit_expires_at: Option<String>,
+}
+
+/// 列出现在能用的重置卡（带 id，按最早到期排前面）
+pub(crate) async fn list_codex_reset_credit_cards(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<Vec<ResetCredit>, String> {
+    let mut req = crate::proxy::http_client::get()
+        .get("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json")
+        .header("OpenAI-Beta", "codex-1");
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
+    }
+    let resp = req
+        .timeout(std::time::Duration::from_secs(8))
+        .send()
+        .await
+        .map_err(|e| format!("网络错误：{e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        log::warn!("查询重置卡：登录已过期（HTTP {status}）");
+        return Err(format!("ChatGPT 登录已过期，请重新登录（HTTP {status}）"));
+    }
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        log::warn!("查询重置卡失败：HTTP {status} {body}");
+        return Err(format!("查询重置卡失败（HTTP {status}）：{body}"));
+    }
+    let raw = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取重置卡响应失败：{e}"))?;
+    let credits = parse_codex_reset_credits(&raw, chrono::Utc::now())
+        .ok_or_else(|| "解析重置卡响应失败".to_string())?;
+    Ok(credits.credits)
+}
+
+/// 用掉一张存下的重置卡（**不可恢复**）：按最早到期挑一张，重放已用完的额度窗口。
+///
+/// 接口和 ChatGPT 桌面端/编辑器扩展里的「使用重置」同一个（未公开协议），
+/// 请求带 `redeem_request_id` 做幂等。
+pub(crate) async fn consume_codex_reset_credit(
+    access_token: &str,
+    account_id: Option<&str>,
+) -> Result<CodexResetCreditConsumed, String> {
+    let cards = list_codex_reset_credit_cards(access_token, account_id).await?;
+    let card = cards
+        .first()
+        .ok_or_else(|| "没有可用的重置卡".to_string())?;
+    log::info!(
+        "使用重置卡：开始（账号 {:?}，credit_id={}，到期 {:?}，可选 {} 张）",
+        account_id,
+        card.id,
+        card.expires_at,
+        cards.len()
+    );
+
+    #[derive(serde::Deserialize)]
+    struct ConsumeResponse {
+        windows_reset: Option<i64>,
+    }
+
+    let mut req = crate::proxy::http_client::get()
+        .post("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits/consume")
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", "codex-cli")
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("OpenAI-Beta", "codex-1")
+        .json(&serde_json::json!({
+            "credit_id": card.id,
+            "redeem_request_id": uuid::Uuid::new_v4().to_string(),
+        }));
+    if let Some(id) = account_id {
+        req = req.header("ChatGPT-Account-Id", id);
+    }
+    let resp = req
+        .timeout(std::time::Duration::from_secs(15))
+        .send()
+        .await
+        .map_err(|e| format!("网络错误：{e}"))?;
+    let status = resp.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        log::warn!("使用重置卡失败：登录已过期（HTTP {status}）");
+        return Err(format!("ChatGPT 登录已过期，请重新登录（HTTP {status}）"));
+    }
+    let raw = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("读取使用结果失败：{e}"))?;
+    if !status.is_success() {
+        let body = String::from_utf8_lossy(&raw);
+        log::warn!("使用重置卡失败：HTTP {status} {body}");
+        return Err(format!("使用重置卡失败（HTTP {status}）：{body}"));
+    }
+    let body: ConsumeResponse = serde_json::from_slice(&raw)
+        .map_err(|e| format!("解析使用结果失败：{e}"))?;
+    log::info!(
+        "使用重置卡：成功（credit_id={}，windows_reset={:?}）",
+        card.id,
+        body.windows_reset
+    );
+    Ok(CodexResetCreditConsumed {
+        windows_reset: body.windows_reset,
+        credit_expires_at: card.expires_at.clone(),
+    })
 }
 
 /// 查询 Codex / ChatGPT 反代订阅额度（连同存下的重置次数，两个请求并行）
@@ -2128,6 +2269,16 @@ mod tests {
             .unwrap()
             .starts_with("2026-10-20"));
         assert_eq!(credits.expires_at[2], None);
+        // 「使用重置卡」按同一顺序取 id，最早到期的那张先被用掉
+        assert_eq!(
+            credits
+                .credits
+                .iter()
+                .map(|credit| credit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["e", "a", "d"]
+        );
+        assert_eq!(credits.credits[2].expires_at, None);
     }
 
     #[test]
