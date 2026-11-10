@@ -969,6 +969,12 @@ fn reference_catalog(
         return Ok(None);
     }
     let providers = db.get_all_providers(AppType::Codex.as_str())?;
+    // 引用里的「供应商名」是网关口径（上游显示名，如 CTYun），Codex 这边的行可能叫
+    // 「自定义网关」：按目录条目的 sources（`codex:<行名>`）找回行，别只按行名碰运气。
+    let catalog_entries = crate::services::gateway_catalog::catalog_view(db).unwrap_or_else(|error| {
+        log::warn!("读取网关模型目录失败，引用只按行名解析: {error}");
+        Vec::new()
+    });
     let route_text = projection.catalog_input_text();
     let mut catalog = match plan_codex_model_catalog(
         &route.settings_config,
@@ -1001,7 +1007,10 @@ fn reference_catalog(
             log::warn!("模型引用 {reference} 不是 <供应商名>/<模型 id> 的形状，不发布");
             continue;
         };
-        let Some(provider) = providers.iter().find(|provider| provider.name == supplier) else {
+        let provider = reference_provider_name(&reference, &catalog_entries)
+            .and_then(|name| providers.iter().find(|provider| provider.name == name))
+            .or_else(|| providers.iter().find(|provider| provider.name == supplier));
+        let Some(provider) = provider else {
             log::warn!("模型引用 {reference} 的供应商 {supplier} 不存在，不发布");
             continue;
         };
@@ -1048,6 +1057,20 @@ fn reference_catalog(
     }
     catalog["models"] = serde_json::Value::Array(entries);
     Ok(Some(catalog))
+}
+
+/// 引用里的供应商是网关口径（上游显示名）；Codex 这边的行可能换了名字（如「自定义网关」）。
+/// 目录条目的 `sources` 记着 `codex:<行名>`，优先按它找回行，再退回按行名精确匹配。
+fn reference_provider_name<'a>(
+    reference: &str,
+    catalog: &'a [crate::services::gateway_catalog::CatalogViewEntry],
+) -> Option<&'a str> {
+    catalog
+        .iter()
+        .find(|entry| entry.reference == reference)?
+        .sources
+        .iter()
+        .find_map(|source| source.strip_prefix("codex:"))
 }
 
 fn stack_catalog(
@@ -1476,7 +1499,7 @@ pub(crate) fn preflight(db: &Database, provider: &Provider) -> Result<(), AppErr
 
 #[cfg(test)]
 mod tests {
-    use super::{is_proxy_base_url, stack_subagent_nested};
+    use super::{is_proxy_base_url, reference_provider_name, stack_subagent_nested};
     use serde_json::json;
 
     /// 子代理设置按合并目录校验：不在目录里、或者父 agent 用新版工具时会拒收的
@@ -1516,6 +1539,35 @@ mod tests {
         assert!(written(Some("ccs-gone/v4"), Some("high")).is_empty());
         assert!(written(Some("ccs-ds/off"), None).is_empty());
         assert!(written(None, Some("high")).is_empty());
+    }
+
+    #[test]
+    fn references_resolve_through_the_catalog_source_when_the_row_was_renamed() {
+        use crate::services::gateway_catalog::CatalogViewEntry;
+        let entry = |reference: &str, sources: &[&str]| CatalogViewEntry {
+            reference: reference.to_string(),
+            upstream_id: "up-ai.ctaigw.cn".to_string(),
+            upstream_name: "CTYun".to_string(),
+            model_id: "deepseek-v4.1-flash-1017".to_string(),
+            display_name: None,
+            one_m: false,
+            window: None,
+            endpoint_ids: vec![],
+            sources: sources.iter().map(|source| source.to_string()).collect(),
+        };
+        let catalog = vec![
+            entry("CTYun/deepseek-v4.1-flash-1017", &["codex:自定义网关"]),
+            entry("Kimi/k3", &["claude:Kimi"]),
+        ];
+
+        // 引用是真名 CTYun，但 Codex 这边这行叫「自定义网关」
+        assert_eq!(
+            reference_provider_name("CTYun/deepseek-v4.1-flash-1017", &catalog),
+            Some("自定义网关")
+        );
+        // 只挂在别的 app 下的条目没有 codex 行，交给调用方退回按行名匹配
+        assert_eq!(reference_provider_name("Kimi/k3", &catalog), None);
+        assert_eq!(reference_provider_name("Nope/x", &catalog), None);
     }
 
     #[test]
