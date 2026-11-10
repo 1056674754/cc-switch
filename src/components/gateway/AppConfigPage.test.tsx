@@ -188,6 +188,22 @@ describe("AppConfigPage", () => {
     );
   });
 
+  it("接入端就是绑定入口：没给这个 app 绑过的供应商也能直接选模型", async () => {
+    // 只有 kimi 这个 app 绑过 Kimi，codex 从来没绑过
+    getCatalog.mockResolvedValue([
+      { ...entries[1], sources: ["kimi:Kimi Official"] },
+    ]);
+    getAppModelConfig.mockResolvedValue({});
+    const user = userEvent.setup();
+    renderPage("codex", "Codex");
+
+    const defaultField = (await screen.findByText("默认模型")).parentElement;
+    await user.click(within(defaultField as HTMLElement).getByRole("combobox"));
+    expect(
+      await screen.findByRole("option", { name: /Kimi K3/ }),
+    ).toBeTruthy();
+  });
+
   it("允许列表按供应商加横栏分组，组内保持目录顺序", async () => {
     const groupedEntries: GatewayCatalogEntry[] = [
       ...entries,

@@ -88,16 +88,9 @@ export function AppConfigPage({
     });
   }, [configQuery.data, appLabel]);
 
-  // 只列这个 app 真的能用的模型：目录条目的 sources 形如 `claude:CTYun`。
-  const entries = useMemo(
-    () =>
-      (catalogQuery.data ?? []).filter((entry) =>
-        entry.sources.some(
-          (source) => source === appType || source.startsWith(`${appType}:`),
-        ),
-      ),
-    [catalogQuery.data, appType],
-  );
+  // 接入端就是绑定的入口：目录里的模型都能选，选中即视为给这个 app 绑了这家上游。
+  // 不再按 `sources`（app 已绑过的 provider）过滤，新用户没绑过也能直接挑模型。
+  const entries = useMemo(() => catalogQuery.data ?? [], [catalogQuery.data]);
   const slots = slotDefinitions(appType);
   const allowed = draft.allowed ?? [];
 

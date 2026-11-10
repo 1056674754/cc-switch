@@ -12,6 +12,7 @@ use crate::app_config::AppType;
 use crate::database::Database;
 use crate::error::AppError;
 use crate::mode::stack::StackTarget;
+use crate::provider::Provider;
 use crate::services::gateway_catalog::{resolve_reference, CatalogViewEntry};
 
 /// 把 `<供应商名>/<模型 id>` 解析成转发目标。不是引用形状时返回 `None`。
@@ -50,37 +51,373 @@ pub fn resolve_reference_target(
         )));
     };
 
-    // 目录来源里有这一家的名字，用它反查 provider 行。按 app 过滤：同一个上游在
-    // claude 与 claude-desktop 下是两条 provider 行，各自有自己的 settings。
+    // 目录来源里有这一家的名字，用它反查 provider 行。同一个上游在 claude 与
+    // claude-desktop 下是两条 provider 行，各自有自己的 settings。
     let source_prefix = format!("{}:", app.as_str());
     let provider_name = entry
         .sources
         .iter()
-        .find_map(|source| source.strip_prefix(&source_prefix))
-        .ok_or_else(|| {
-            AppError::Config(format!(
+        .find_map(|source| source.strip_prefix(&source_prefix));
+    let provider = match provider_name {
+        Some(provider_name) => {
+            let providers = db.get_all_providers(app.as_str())?;
+            let mut candidates = providers
+                .into_iter()
+                .filter(|(_, provider)| provider.name == provider_name);
+            let Some((_, provider)) = candidates.next() else {
+                return Err(AppError::Config(format!(
+                    "模型 {} 的供应商 {provider_name} 在 {} 里已不存在",
+                    model,
+                    app.as_str()
+                )));
+            };
+            provider
+        }
+        // 接入端选模型就是绑定：这家 app 没走过「给 app 加供应商」也能选目录里的模型，
+        // 按上游端点和密钥临时拼一个行。不认识的上游协议还是会报原来的错。
+        None if matches!(app, AppType::Codex) => {
+            match synthetic_codex_provider(db, entry)? {
+                Some(provider) => provider,
+                None => {
+                    return Err(AppError::Config(format!(
+                        "模型 {} 不属于 {}：这家 app 没有绑定该上游",
+                        model,
+                        app.as_str()
+                    )))
+                }
+            }
+        }
+        None if matches!(app, AppType::Claude | AppType::ClaudeDesktop) => {
+            match synthetic_claude_provider(db, entry)? {
+                Some(provider) => provider,
+                None => {
+                    return Err(AppError::Config(format!(
+                        "模型 {} 不属于 {}：这家 app 没有绑定该上游",
+                        model,
+                        app.as_str()
+                    )))
+                }
+            }
+        }
+        None => {
+            return Err(AppError::Config(format!(
                 "模型 {} 不属于 {}：这家 app 没有绑定该上游",
                 model,
                 app.as_str()
-            ))
-        })?;
-
-    let providers = db.get_all_providers(app.as_str())?;
-    let mut candidates = providers
-        .into_iter()
-        .filter(|(_, provider)| provider.name == provider_name);
-    let Some((_, provider)) = candidates.next() else {
-        return Err(AppError::Config(format!(
-            "模型 {} 的供应商 {provider_name} 在 {} 里已不存在",
-            model,
-            app.as_str()
-        )));
+            )))
+        }
     };
     Ok(Some(StackTarget {
         provider,
         upstream_model,
         original_model: model.to_string(),
     }))
+}
+
+
+
+/// 凭证可能是 `{file:~/.secrets/xxx}` 这种引用（opencode 那套写法）：发请求前读真实值。
+fn expand_secret(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let Some(rest) = raw.strip_prefix("{file:") else {
+        return Some(raw.to_string());
+    };
+    let path = rest.strip_suffix('}')?.trim();
+    let path = match path.strip_prefix("~/") {
+        Some(relative) => dirs::home_dir()?.join(relative),
+        None => std::path::PathBuf::from(path),
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+}
+
+/// 上游端点按 Codex 能用的协议排优先级；其余协议（各家私有托管端点）这里不管。
+fn codex_endpoint_rank(protocol: &str) -> Option<u8> {
+    match protocol {
+        "openai_responses" => Some(0),
+        "openai_chat" => Some(1),
+        "anthropic" => Some(2),
+        _ => None,
+    }
+}
+
+
+/// Claude / Claude Desktop 用环境变量表达上游：只认 Anthropic Messages 协议的端点。
+/// 凭证同样优先用目录来源那家 provider 的（同一端点可能挂着旧号和新号）。
+pub(crate) fn synthetic_claude_provider(
+    db: &Database,
+    entry: &CatalogViewEntry,
+) -> Result<Option<Provider>, AppError> {
+    let endpoints: Vec<(String, String)> = {
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt =
+            conn.prepare("SELECT id, base_url FROM upstream_endpoints WHERE id = ?1")?;
+        let mut found = Vec::new();
+        for endpoint_id in &entry.endpoint_ids {
+            if let Ok(row) = stmt.query_row([endpoint_id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }) {
+                found.push(row);
+            }
+        }
+        found
+    };
+    if endpoints.is_empty() {
+        return Ok(None);
+    }
+    let mut chosen: Option<(String, String)> = None;
+    {
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut protocol_stmt =
+            conn.prepare("SELECT protocol FROM upstream_endpoints WHERE id = ?1")?;
+        for (endpoint_id, base_url) in &endpoints {
+            let Ok(protocol) = protocol_stmt.query_row([endpoint_id], |row| row.get::<_, String>(0))
+            else {
+                continue;
+            };
+            if protocol != "anthropic" {
+                continue;
+            }
+            for source in &entry.sources {
+                let Some((source_app, source_name)) = source.split_once(':') else {
+                    continue;
+                };
+                let Ok(mut stmt) = conn.prepare(
+                    "SELECT b.provider_id FROM provider_bindings b
+                     JOIN providers p ON p.id = b.provider_id AND p.app_type = b.app_type
+                     WHERE b.app_type = ?1 AND p.name = ?2 AND b.endpoint_id = ?3",
+                ) else {
+                    continue;
+                };
+                let provider_ids: Vec<String> = stmt
+                    .query_map([source_app, source_name, endpoint_id.as_str()], |row| {
+                        row.get::<_, String>(0)
+                    })?
+                    .flatten()
+                    .collect();
+                for provider_id in provider_ids {
+                    let secret: Option<String> = conn
+                        .query_row(
+                            "SELECT secret FROM upstream_credentials
+                             WHERE endpoint_id = ?1 AND app_type = ?2 AND provider_id = ?3",
+                            [endpoint_id.as_str(), source_app, provider_id.as_str()],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .ok()
+                        .filter(|secret| !secret.trim().is_empty());
+                    if let Some(secret) = secret {
+                        chosen = Some((base_url.clone(), secret));
+                        break;
+                    }
+                }
+                if chosen.is_some() {
+                    break;
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+        if chosen.is_none() {
+            for (endpoint_id, base_url) in &endpoints {
+                let Ok(protocol) =
+                    protocol_stmt.query_row([endpoint_id], |row| row.get::<_, String>(0))
+                else {
+                    continue;
+                };
+                if protocol != "anthropic" {
+                    continue;
+                }
+                let secret: Option<String> = conn
+                    .query_row(
+                        "SELECT secret FROM upstream_credentials
+                         WHERE endpoint_id = ?1 AND secret IS NOT NULL
+                         ORDER BY (app_type = 'claude') DESC
+                         LIMIT 1",
+                        [endpoint_id.as_str()],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                    .filter(|secret| !secret.trim().is_empty());
+                if let Some(secret) = secret {
+                    chosen = Some((base_url.clone(), secret));
+                    break;
+                }
+            }
+        }
+    }
+    let Some((base_url, secret)) = chosen else {
+        return Ok(None);
+    };
+    let Some(secret) = expand_secret(&secret) else {
+        return Ok(None);
+    };
+    let model = entry.model_id.clone();
+    let settings = serde_json::json!({
+        "env": {
+            "ANTHROPIC_BASE_URL": base_url,
+            "ANTHROPIC_AUTH_TOKEN": secret,
+            "ANTHROPIC_MODEL": model,
+        }
+    });
+    Ok(Some(Provider::with_id(
+        format!("gateway-{}", entry.upstream_id),
+        entry.upstream_name.clone(),
+        settings,
+        None,
+    )))
+}
+
+/// 给「应用配置里点名、但这家 app 没绑过」的上游临时拼一个 Codex 供应商行：
+/// 端点取该上游 Codex 能用的那条，密钥取该端点已存的凭证（优先这个 app 自己的）。
+/// 不写库：请求路由完就丢，绑定关系由应用模型配置本身表达。
+pub(crate) fn synthetic_codex_provider(
+    db: &Database,
+    entry: &CatalogViewEntry,
+) -> Result<Option<Provider>, AppError> {
+    let endpoints: Vec<(String, String, String)> = {
+        let conn = crate::database::lock_conn!(db.conn);
+        let mut stmt = conn
+            .prepare("SELECT id, protocol, base_url FROM upstream_endpoints WHERE id = ?1")?;
+        let mut found = Vec::new();
+        for endpoint_id in &entry.endpoint_ids {
+            if let Ok(row) = stmt.query_row([endpoint_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            }) {
+                found.push(row);
+            }
+        }
+        found
+    };
+    let usable: Vec<(String, String, String)> = endpoints
+        .into_iter()
+        .filter(|(_, protocol, _)| codex_endpoint_rank(protocol).is_some())
+        .collect();
+    if usable.is_empty() {
+        return Ok(None);
+    }
+    // 优先用目录来源里那家 provider 的凭证：同一端点可能挂着几家（旧号和能用的号），
+    // 目录来源就是这条模型真正在用的那家。
+    let mut chosen: Option<(String, String, String, String)> = None;
+    {
+        let conn = crate::database::lock_conn!(db.conn);
+        for source in &entry.sources {
+            let Some((source_app, source_name)) = source.split_once(':') else {
+                continue;
+            };
+            let mut stmt = conn.prepare(
+                "SELECT b.endpoint_id, b.provider_id, e.protocol, e.base_url
+                 FROM provider_bindings b
+                 JOIN providers p ON p.id = b.provider_id AND p.app_type = b.app_type
+                 JOIN upstream_endpoints e ON e.id = b.endpoint_id
+                 WHERE b.app_type = ?1 AND p.name = ?2",
+            )?;
+            let rows = stmt.query_map([source_app, source_name], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?;
+            for row in rows.flatten() {
+                let (endpoint_id, provider_id, protocol, base_url) = row;
+                if codex_endpoint_rank(&protocol).is_none()
+                    || !entry.endpoint_ids.iter().any(|id| id == &endpoint_id)
+                {
+                    continue;
+                }
+                let secret: Option<String> = conn
+                    .query_row(
+                        "SELECT secret FROM upstream_credentials
+                         WHERE endpoint_id = ?1 AND app_type = ?2 AND provider_id = ?3",
+                        [&endpoint_id, source_app, &provider_id],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok()
+                    .filter(|secret| !secret.trim().is_empty());
+                if let Some(secret) = secret {
+                    chosen = Some((endpoint_id, protocol, base_url, secret));
+                    break;
+                }
+            }
+            if chosen.is_some() {
+                break;
+            }
+        }
+    }
+    let (_endpoint_id, protocol, base_url, secret) = match chosen {
+        Some(found) => found,
+        None => {
+            let (endpoint_id, protocol, base_url) = usable
+                .into_iter()
+                .min_by_key(|(_, protocol, _)| {
+                    codex_endpoint_rank(protocol).unwrap_or(u8::MAX)
+                })
+                .expect("usable 非空");
+            let secret: Option<String> = {
+                let conn = crate::database::lock_conn!(db.conn);
+                let mut stmt = conn.prepare(
+                    "SELECT secret FROM upstream_credentials
+                     WHERE endpoint_id = ?1 AND secret IS NOT NULL
+                     ORDER BY (app_type = 'codex') DESC
+                     LIMIT 1",
+                )?;
+                stmt.query_row([&endpoint_id], |row| row.get::<_, String>(0))
+                    .ok()
+                    .filter(|secret| !secret.trim().is_empty())
+            };
+            let Some(secret) = secret else {
+                return Ok(None);
+            };
+            (endpoint_id, protocol, base_url, secret)
+        }
+    };
+    let Some(secret) = expand_secret(&secret) else {
+        return Ok(None);
+    };
+    let wire_api = match protocol.as_str() {
+        "openai_chat" => "chat",
+        "openai_responses" => "responses",
+        // Anthropic 上游走代理的 Responses→Messages 转换，wire_api 只是占位。
+        _ => "chat",
+    };
+    let model = entry.model_id.clone();
+    let display = entry
+        .display_name
+        .clone()
+        .unwrap_or_else(|| entry.model_id.clone());
+    let config = format!(
+        "model = {model:?}\nmodel_provider = \"custom\"\n\n[model_providers]\n\n[model_providers.custom]\nname = {name:?}\nbase_url = {base_url:?}\nwire_api = {wire_api:?}\nrequires_openai_auth = true\n",
+        name = entry.upstream_name,
+    );
+    let mut settings = serde_json::json!({
+        "auth": { "OPENAI_API_KEY": secret },
+        "config": config,
+        "modelCatalog": { "models": [{
+            "model": model,
+            "displayName": display,
+            "contextWindow": entry.window,
+        }] },
+    });
+    if protocol == "anthropic" {
+        settings["api_format"] = serde_json::json!("anthropic");
+    }
+    Ok(Some(Provider::with_id(
+        format!("gateway-{}", entry.upstream_id),
+        entry.upstream_name.clone(),
+        settings,
+        None,
+    )))
 }
 
 /// 累加式 app（OpenCode 等）的客户端会把 provider 前缀吃掉，只发裸模型 id。
@@ -242,6 +579,23 @@ mod tests {
     use crate::provider::Provider;
     use serde_json::json;
 
+    #[test]
+    fn file_secret_references_are_read_before_use() {
+        assert_eq!(expand_secret("sk-plain"), Some("sk-plain".to_string()));
+        assert_eq!(expand_secret("  "), None);
+        let dir = tempfile::tempdir().expect("temp dir");
+        let file = dir.path().join("key.txt");
+        std::fs::write(&file, "sk-from-file\n").expect("write key");
+        assert_eq!(
+            expand_secret(&format!("{{file:{}}}", file.display())),
+            Some("sk-from-file".to_string())
+        );
+        assert_eq!(
+            expand_secret(&format!("{{file:{}}}", dir.path().join("missing").display())),
+            None
+        );
+    }
+
     fn claude_provider(id: &str, name: &str, base_url: &str, models: &[&str]) -> Provider {
         let mut env = json!({
             "ANTHROPIC_BASE_URL": base_url,
@@ -289,6 +643,106 @@ mod tests {
             allowed: allowed.iter().map(|value| value.to_string()).collect(),
             routing: None,
         }
+    }
+
+    /// 真机烟测（默认忽略）：真实库副本里，给一个从没绑过这个 app 的供应商选模型，
+    /// 路由能按上游端点 + 凭证临时拼出 Codex 行（接入端选模型即绑定）。
+    ///
+    /// 跑法：`CC_SWITCH_REAL_DB=~/.cc-switch/cc-switch.db cargo test --lib
+    /// real_db_codex_resolves_model_without_provider_row -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要 CC_SWITCH_REAL_DB 指向真实 cc-switch.db 的副本"]
+    #[serial_test::serial]
+    fn real_db_codex_resolves_model_without_provider_row() {
+        let source = std::env::var("CC_SWITCH_REAL_DB").expect("CC_SWITCH_REAL_DB");
+        let home = tempfile::tempdir().expect("temp home");
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::copy(&source, config_dir.join("cc-switch.db")).expect("copy real db");
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let db = Database::init().expect("migrate db copy");
+
+        let catalog = crate::services::gateway_catalog::catalog_view_cached(&db).expect("catalog");
+        let entry = catalog
+            .iter()
+            .find(|entry| {
+                entry.upstream_name == "Kimi"
+                    && !entry
+                        .sources
+                        .iter()
+                        .any(|source| source.starts_with("codex:"))
+                    && !entry.endpoint_ids.is_empty()
+            })
+            .expect("real db has a Kimi supplier codex never bound");
+        eprintln!(
+            "codex 没绑过 {}，端点 {:?}",
+            entry.reference, entry.endpoint_ids
+        );
+
+        let provider = synthetic_codex_provider(&db, entry)
+            .expect("synthetic provider")
+            .expect("端点和凭证都在，应该拼得出来");
+        assert_eq!(provider.id, format!("gateway-{}", entry.upstream_id));
+        assert!(provider.settings_config["auth"]["OPENAI_API_KEY"]
+            .as_str()
+            .is_some_and(|secret| !secret.is_empty()));
+        assert!(provider.settings_config["config"]
+            .as_str()
+            .is_some_and(|config| config.contains("base_url")));
+        assert_eq!(
+            provider.settings_config["modelCatalog"]["models"][0]["model"],
+            serde_json::json!(entry.model_id)
+        );
+
+        let target = resolve_reference_target(&db, &AppType::Codex, &entry.reference)
+            .expect("resolve for codex")
+            .expect("hit");
+        assert!(target.provider.id.starts_with("gateway-"));
+        assert_eq!(target.upstream_model, entry.model_id);
+    }
+
+    /// 真机烟测（默认忽略）：Claude 也一样，没绑过的供应商选中模型后按上游端点 + 凭证拼行。
+    ///
+    /// 跑法：`CC_SWITCH_REAL_DB=~/.cc-switch/cc-switch.db cargo test --lib
+    /// real_db_claude_resolves_model_without_provider_row -- --ignored --nocapture`
+    #[test]
+    #[ignore = "需要 CC_SWITCH_REAL_DB 指向真实 cc-switch.db 的副本"]
+    #[serial_test::serial]
+    fn real_db_claude_resolves_model_without_provider_row() {
+        let source = std::env::var("CC_SWITCH_REAL_DB").expect("CC_SWITCH_REAL_DB");
+        let home = tempfile::tempdir().expect("temp home");
+        let config_dir = home.path().join(".cc-switch");
+        std::fs::create_dir_all(&config_dir).expect("config dir");
+        std::fs::copy(&source, config_dir.join("cc-switch.db")).expect("copy real db");
+        std::env::set_var("CC_SWITCH_TEST_HOME", home.path());
+        let db = Database::init().expect("migrate db copy");
+
+        let catalog = crate::services::gateway_catalog::catalog_view_cached(&db).expect("catalog");
+        let mut checked = 0usize;
+        for entry in &catalog {
+            if entry
+                .sources
+                .iter()
+                .any(|source| source.starts_with("claude:") || source.starts_with("claude-desktop:"))
+            {
+                continue;
+            }
+            let Some(provider) = synthetic_claude_provider(&db, entry).expect("synthetic") else {
+                continue;
+            };
+            let target = resolve_reference_target(&db, &AppType::Claude, &entry.reference)
+                .expect("resolve for claude")
+                .expect("hit");
+            assert!(target.provider.id.starts_with("gateway-"));
+            assert_eq!(target.upstream_model, entry.model_id);
+            assert!(provider.settings_config["env"]["ANTHROPIC_BASE_URL"]
+                .as_str()
+                .is_some());
+            eprintln!("claude 没绑过 {}，拼行成功", entry.reference);
+            checked += 1;
+            break;
+        }
+        assert!(checked > 0, "真实库应该有一条 claude 没绑过、但能拼行的供应商");
     }
 
     /// 真机烟测（默认忽略）：把真实 cc-switch.db 的**副本**放进临时 home，

@@ -1024,10 +1024,20 @@ fn reference_catalog(
             log::warn!("模型引用 {reference} 不是 <供应商名>/<模型 id> 的形状，不发布");
             continue;
         };
-        let provider = reference_provider_name(&reference, &catalog_entries)
+        let bound = reference_provider_name(&reference, &catalog_entries)
             .and_then(|name| providers.iter().find(|provider| provider.name == name))
             .or_else(|| providers.iter().find(|provider| provider.name == supplier));
-        let Some(provider) = provider else {
+        // 接入端选模型就是绑定：这家上游可能没给 Codex 建过行，按上游端点和凭证临时拼行。
+        let synthetic = match bound {
+            Some(_) => None,
+            None => catalog_entries
+                .iter()
+                .find(|entry| entry.reference == reference)
+                .map(|entry| crate::services::gateway_route::synthetic_codex_provider(db, entry))
+                .transpose()?
+                .flatten(),
+        };
+        let Some(provider) = bound.copied().or(synthetic.as_ref()) else {
             log::warn!("模型引用 {reference} 的供应商 {supplier} 不存在，不发布");
             continue;
         };
