@@ -223,7 +223,7 @@ pub(crate) async fn prepare_official_rows(
     let Target::Proxy { route, stack, .. } = target else {
         return Ok(());
     };
-    if !needs_official_rows(route, stack) {
+    if !needs_official_rows(route, stack) && !reference_catalog_needed(db, route)? {
         return Ok(());
     }
     if matches!(
@@ -255,6 +255,18 @@ pub(crate) async fn off_runtime<T: Send + 'static>(
 /// 官方做路由、发布了 Stack 模型：目录里要写全官方模型。
 pub(crate) fn needs_official_rows(route: &Provider, stack: &[Member]) -> bool {
     !stack.is_empty() && is_official(route)
+}
+
+/// 官方路由 + 模型配置里点名了引用：发布引用目录时要把官方模型行一起写进去，
+/// 否则 Codex 客户端只剩这几条自定义模型（官方模型走的是同一个目录文件）。
+fn reference_catalog_needed(db: &Database, route: &Provider) -> Result<bool, AppError> {
+    if !is_official(route) {
+        return Ok(false);
+    }
+    let Some(config) = db.get_app_model_config(AppType::Codex.as_str())? else {
+        return Ok(false);
+    };
+    Ok(config.default.is_some() || !config.allowed.is_empty())
 }
 
 /// 按未加锁读到的内容预测这次操作之后 Codex 会用的登录（能取官方列表的才是 `Ok`，否则带
@@ -725,7 +737,7 @@ pub(crate) fn plan(
     // 每 app 模型配置点名的引用，优先于路由那家自己的目录（条目从各自的行生成）。
     let reference = match (&model_override, provider, &projection) {
         (Some(_), Some(provider), Some(projection)) if stack_catalog.is_none() => {
-            reference_catalog(db, provider, projection).unwrap_or_else(|error| {
+            reference_catalog(db, provider, projection, prepared).unwrap_or_else(|error| {
                 log::warn!("生成模型引用目录失败: {error}");
                 None
             })
@@ -945,6 +957,7 @@ fn reference_catalog(
     db: &Database,
     route: &Provider,
     projection: &CodexProjection,
+    prepared: &Prepared,
 ) -> Result<Option<serde_json::Value>, AppError> {
     let Some(config) = db.get_app_model_config(AppType::Codex.as_str())? else {
         return Ok(None);
@@ -976,16 +989,20 @@ fn reference_catalog(
         Vec::new()
     });
     let route_text = projection.catalog_input_text();
-    let mut catalog = match plan_codex_model_catalog(
-        &route.settings_config,
-        &route_text,
-        crate::proxy::providers::resolve_codex_catalog_tool_profile(route),
-    )?
-    .catalog
-    {
-        Some(catalog) => catalog,
-        // 行里没发布模型列表时也照样发引用：Codex 只按 slug 找模型。
-        None => serde_json::json!({ "models": [] }),
+    // 官方路由：先放官方模型行（写了目录后 Codex 只认文件里的模型），再追加引用。
+    let mut catalog = match prepared.native.as_ref().and_then(NativeRows::rows) {
+        Some(rows) if is_official(route) => serde_json::json!({ "models": rows }),
+        _ => match plan_codex_model_catalog(
+            &route.settings_config,
+            &route_text,
+            crate::proxy::providers::resolve_codex_catalog_tool_profile(route),
+        )?
+        .catalog
+        {
+            Some(catalog) => catalog,
+            // 行里没发布模型列表时也照样发引用：Codex 只按 slug 找模型。
+            None => serde_json::json!({ "models": [] }),
+        },
     };
     let mut entries = catalog
         .get("models")
